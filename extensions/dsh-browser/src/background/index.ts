@@ -58,8 +58,8 @@ const SETTINGS_DEFAULTS: Settings = {
   trustedActionOrigins: [],
 }
 
-/** 自动探测的候选端口（dsh web 默认 3080；--port 覆盖的常见值）。 */
-const DISCOVERY_PORTS = [3080, 3081, 3090]
+/** 自动探测的候选端口（dsh web 默认 3080；桌面应用常用 14389；--port 覆盖的常见值）。 */
+const DISCOVERY_PORTS = [3080, 3081, 3090, 14389]
 const LEGACY_LOCAL_URL = 'ws://127.0.0.1:3080'
 
 /** 探测本机 dsh 的桥地址：fetch /ext/bridge-config 直到成功。 */
@@ -463,8 +463,21 @@ chrome.alarms.onAlarm.addListener((alarm) => {
 
 // ---- Boot ----
 
-// Clicking the toolbar icon opens the side panel directly (Chrome 116+).
-void chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(() => {})
+// Open the side panel when the toolbar icon is clicked.
+// Chrome 116+ uses chrome.sidePanel; Firefox has no sidePanel API, so the
+// action click opens the sidebar via sidebarAction.open() (user gesture).
+if (typeof chrome.sidePanel !== 'undefined' && typeof chrome.sidePanel.setPanelBehavior === 'function') {
+  void chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(() => {})
+} else if (typeof chrome.action !== 'undefined' && typeof chrome.action.onClicked !== 'undefined') {
+  chrome.action.onClicked.addListener(() => {
+    // Firefox: open the sidebar (requires a user gesture, which a click is).
+    const sidebar = (chrome as unknown as { sidebarAction?: { open?: () => Promise<void> | void } }).sidebarAction
+    if (typeof sidebar?.open === 'function') {
+      const result = sidebar.open()
+      if (result instanceof Promise) result.catch(() => {})
+    }
+  })
+}
 
 void loadSettings().then(async (loaded) => {
   settings = loaded
