@@ -291,14 +291,15 @@ export class BridgeServer {
         // extension auto-discovers the bridge and connects without setup).
         // WebSockets have no same-origin policy, so a malicious page could
         // open a cross-origin socket to 127.0.0.1 with a loopback remote —
-        // the loopback shortcut therefore requires an extension Origin
-        // (only extension contexts can present one; pages cannot forge the
-        // header). Both Chromium (`chrome-extension://`) and Firefox
-        // (`moz-extension://`) extension origins are accepted. Non-loopback
-        // remotes must still present the bearer token.
-        const extensionOrigin = typeof origin === 'string'
-          && (origin.startsWith('chrome-extension://') || origin.startsWith('moz-extension://'))
-        const loopbackNoToken = isLoopbackAddress(remoteAddress) && extensionOrigin
+        // the loopback shortcut therefore requires a chrome-extension://
+        // Origin (only extension contexts can present one; pages cannot
+        // forge the header). Firefox moz-extension:// origins contain a
+        // per-install UUID rather than the manifest's stable Gecko ID, so
+        // they are not an identity boundary and must present the bearer token.
+        // Non-loopback remotes must also present the bearer token.
+        const loopbackNoToken = isLoopbackAddress(remoteAddress)
+          && typeof origin === 'string'
+          && origin.startsWith('chrome-extension://')
         if (!loopbackNoToken && !verifyToken(this.deps.token, frame.token)) {
           ws.close(4002, 'bad token')
           return

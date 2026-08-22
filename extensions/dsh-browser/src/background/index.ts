@@ -985,9 +985,9 @@ chrome.notifications.onClicked.addListener((notificationId) => {
   const windowId = approvals.windowId(id)
   if (windowId === undefined) return
   clearApprovalNotification(id)
-  // Notification clicks are extension user gestures; Chrome permits
-  // sidePanel.open() only from such a user-initiated event.
-  void chrome.sidePanel.open({ windowId }).catch(() => {})
+  // Notification clicks are extension user gestures; both panel APIs require
+  // the call to remain inside this handler.
+  openAssistantPanel(windowId)
 })
 
 // ---- Tab affinity ----
@@ -1072,20 +1072,27 @@ chrome.alarms.onAlarm.addListener((alarm) => {
 
 // ---- Boot ----
 
+interface FirefoxSidebarAction {
+  open(): Promise<void> | void
+}
+
+function openAssistantPanel(windowId?: number): void {
+  if (import.meta.env.EXT_TARGET === 'firefox') {
+    const sidebar = (chrome as unknown as { sidebarAction?: FirefoxSidebarAction }).sidebarAction
+    if (sidebar === undefined) return
+    void Promise.resolve(sidebar.open()).catch(() => {})
+    return
+  }
+  if (windowId !== undefined) void chrome.sidePanel.open({ windowId }).catch(() => {})
+}
+
 // Open the side panel when the toolbar icon is clicked.
 // Chrome 116+ uses chrome.sidePanel; Firefox has no sidePanel API, so the
 // action click opens the sidebar via sidebarAction.open() (user gesture).
-if (typeof chrome.sidePanel !== 'undefined' && typeof chrome.sidePanel.setPanelBehavior === 'function') {
+if (import.meta.env.EXT_TARGET === 'firefox') {
+  chrome.action.onClicked.addListener(() => { openAssistantPanel() })
+} else {
   void chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(() => {})
-} else if (typeof chrome.action !== 'undefined' && typeof chrome.action.onClicked !== 'undefined') {
-  chrome.action.onClicked.addListener(() => {
-    // Firefox: open the sidebar (requires a user gesture, which a click is).
-    const sidebar = (chrome as unknown as { sidebarAction?: { open?: () => Promise<void> | void } }).sidebarAction
-    if (typeof sidebar?.open === 'function') {
-      const result = sidebar.open()
-      if (result instanceof Promise) result.catch(() => {})
-    }
-  })
 }
 
 // Alarms survive some extension/service-worker restarts. Remove any stale

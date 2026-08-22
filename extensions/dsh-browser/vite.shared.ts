@@ -37,6 +37,9 @@ export const sharedPlugins = [tsconfigPaths({ projects: ['./tsconfig.json'] }), 
 /** Shared build options for the non-panel targets. */
 export function targetBuild(entry: string, format: 'es' | 'iife', entryFileNames: string, emptyOutDir: boolean) {
   return defineConfig({
+    define: {
+      'import.meta.env.EXT_TARGET': JSON.stringify(browserTarget),
+    },
     build: {
       outDir,
       emptyOutDir,
