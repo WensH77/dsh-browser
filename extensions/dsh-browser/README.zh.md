@@ -1,4 +1,4 @@
-# dsh 浏览器操作扩展（Chrome MV3）
+# dsh 浏览器操作扩展（Chrome 与 Firefox MV3）
 
 [English](README.md) | 中文
 
@@ -23,7 +23,7 @@ dsh 的**浏览器操作端**：让模型直接读取并操作你在浏览器里
 ## 架构
 
 ```
-side panel (React) ◄─port─► background SW ◄─WS─► dsh bridge plugin
+side panel (React) ◄─port─► background SW/事件页 ◄─WS─► dsh bridge plugin
                                  │
                   tabs.sendMessage (DSH_ACTION)
                                  ▼
@@ -40,10 +40,11 @@ side panel (React) ◄─port─► background SW ◄─WS─► dsh bridge plug
 ```sh
 pnpm install
 pnpm --filter dsh-browser-extension run build
+pnpm --filter dsh-browser-extension run build:firefox
 pnpm --filter dsh-browser-extension run test
 ```
 
-请在仓库根目录执行这些命令；构建产物输出到 `extensions/dsh-browser/dist/`。
+请在仓库根目录执行这些命令。Chrome 产物输出到 `extensions/dsh-browser/dist/`；Firefox 产物输出到 `extensions/dsh-browser/dist-firefox/`。
 
 ## 安装与使用
 
@@ -83,11 +84,11 @@ pnpm --filter dsh-browser-extension run test
 
    加载或重新加载扩展本身是被动的：只有打开侧栏后，扩展才会探测本机端口并创建 WebSocket。用户已建立的健康连接可在侧栏关闭后继续用于后台审批；但连接一旦掉线或被另一浏览器替换，没有打开侧栏时就不会重连。
 
-3. **开始使用**：打开普通的 `http://` 或 `https://` 页面，点击 DeepSeek 鲸鱼图标打开侧边栏。扩展会自动探测本机 dsh，回环连接无需填写地址或 Token；远程部署时才需要在设置中配置。可以直接对话，或先点「读取页面」。
+3. **开始使用**：打开普通的 `http://` 或 `https://` 页面，点击 DeepSeek 鲸鱼图标打开侧边栏。两个构建都会自动探测本机 dsh。Chrome 回环连接无需地址或 Token；Firefox 的 `moz-extension://` UUID 不能证明扩展身份，必须在设置中填入 `~/.dsh/ext-bridge-token`。可以直接对话，或先点「读取页面」。
 
 页面即使在扩展安装或重载之前已经打开，也会在第一次操作时自动补加载内容脚本，无需手动刷新。`chrome://`、Chrome Web Store 等浏览器内置或受保护页面不支持读取和操作。
 
-如果只开发扩展，请先 clone 仓库，在仓库根目录运行 `pnpm --filter dsh-browser-extension run build`，然后直接加载 `extensions/dsh-browser/dist/`。代码更新后需要重新构建，并在 `chrome://extensions` 中重新加载扩展。
+如果只开发扩展，Chrome 从 `chrome://extensions` 加载 `extensions/dsh-browser/dist/`；Firefox 运行 `build:firefox` 后，从 `about:debugging#/runtime/this-firefox` 加载 `extensions/dsh-browser/dist-firefox/manifest.json`。代码更新后需重新构建并重新加载。
 
 ## 为什么浏览器操作仍采用纯文本
 
@@ -102,7 +103,7 @@ pnpm --filter dsh-browser-extension run test
 
 ## 权限说明
 
-`sidePanel`（侧边栏）、`storage`（设置与最近会话续接）、`notifications`（侧栏关闭时可选的审批提醒）、`tabs` + `activeTab` + `scripting`（观察切页，并向用户显式选择的受控标签页注入/发消息；安装前已打开的页面也会按需补注入）、`webNavigation`（枚举该标签页中的 frame，并把消息绑定到具体文档）、`alarms`（仅在侧栏首次取得桥接连接后启用的 SW 保活）、`http/https`（内容脚本注入普通网页）。扩展绝不改变用户正在看的标签页，也不会静默跟随手动切页；只有用户选择继续原页面后，助手才会在后台操作。
+Chrome 使用 `sidePanel`，Firefox 使用 `sidebar_action`。两者都申请 `storage`（设置与最近会话续接）、`notifications`（侧栏关闭时可选的审批提醒）、`tabs` + `activeTab` + `scripting`（观察切页，并向用户显式选择的受控标签页注入/发消息；安装前已打开的页面也会按需补注入）、`webNavigation`（枚举该标签页中的 frame，并把消息绑定到具体文档）、`alarms`（后台保活）和 `http/https`（内容脚本注入普通网页）。Firefox AMO manifest 如实声明扩展会把浏览活动、网页内容/操作和对话内容发送给用户配置的 dsh/模型服务。扩展绝不改变用户正在看的标签页，也不会静默跟随手动切页；只有用户选择继续原页面后，助手才会在后台操作。
 
 ## 已知限制
 
