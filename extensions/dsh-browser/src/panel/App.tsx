@@ -766,13 +766,18 @@ export function App(): React.JSX.Element {
   async function resumeSession(entry: SessionPickerEntry): Promise<void> {
     if (sessionSwitchBlocked || sessionChangingRef.current) return
     const transition = beginSessionTransition()
-    const runtime = sessionRuntimeRef.current.snapshot(entry.sessionId, entry.running)
-    prepareSessionSwitch(runtime.running, runtime.questions)
-    sessionRef.current = entry.sessionId
-    await api.setActiveSession(entry.sessionId)
-    setSessionTitle(projectedSessionTitle(entry) ?? sessionDisplayTitle(entry))
     try {
+      await api.setActiveSession(entry.sessionId)
+      if (sessionTransitionRef.current !== transition) return
+      const runtime = sessionRuntimeRef.current.snapshot(entry.sessionId, entry.running)
+      prepareSessionSwitch(runtime.running, runtime.questions)
+      sessionRef.current = entry.sessionId
+      setSessionTitle(projectedSessionTitle(entry) ?? sessionDisplayTitle(entry))
       await refreshHistory(entry.sessionId)
+    } catch (cause) {
+      if (sessionTransitionRef.current === transition) {
+        setError(cause instanceof Error ? cause.message : String(cause))
+      }
     } finally {
       finishSessionTransition(transition)
     }
