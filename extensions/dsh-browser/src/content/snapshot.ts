@@ -10,7 +10,7 @@
  * @module
  */
 
-import { accessibleName, collectInteractive, isInViewport, isVisible, mainText, pageText, truncate } from './extract.ts'
+import { accessibleName, collectInteractive, isInViewport, mainText, pageText, truncate } from './extract.ts'
 import { ElementIds } from './ids.ts'
 import { isSensitiveField, maskValue } from './privacy.ts'
 
@@ -52,6 +52,7 @@ interface FormFieldView {
   kind: string
   value: string
   masked: boolean
+  checked?: boolean
   required?: boolean
 }
 
@@ -119,52 +120,67 @@ export function buildSnapshot(ids: ElementIds, options: SnapshotOptions, last: S
   // first snapshot on a fresh document always adds everything.
   const reindexed = last !== null && added + removed > elements.length * 0.5
 
-  // Viewport-first ordering keeps the most relevant items inside the budget.
-  const ordered = [...elements].sort((a, b) => {
-    const av = isInViewport(a) ? 0 : 1
-    const bv = isInViewport(b) ? 0 : 1
-    return av - bv
-  })
+  // Measure viewport membership once. Calling getBoundingClientRect from a
+  // sort comparator forces repeated layout reads on large pages.
+  const elementViews = elements.map((element) => ({ element, inViewport: isInViewport(element) }))
+  const ordered = [...elementViews].sort((a, b) => Number(b.inViewport) - Number(a.inViewport))
+  const names = new Map<Element, string>()
+  const nameOf = (element: Element): string => {
+    let name = names.get(element)
+    if (name === undefined) {
+      name = accessibleName(element)
+      names.set(element, name)
+    }
+    return name
+  }
 
   const items: InventoryItem[] = []
-  for (const el of ordered.slice(0, options.budget.maxItems)) {
+  for (const { element: el, inViewport } of ordered.slice(0, options.budget.maxItems)) {
     const index = ids.indexOf(el)
     if (index === undefined) continue
     const item: InventoryItem = {
       index,
       role: roleOf(el),
-      name: accessibleName(el),
-      inViewport: isInViewport(el),
+      name: nameOf(el),
+      inViewport,
     }
     if (el instanceof HTMLButtonElement && el.disabled) item.disabled = true
     if (el instanceof HTMLInputElement) {
       if (el.disabled) item.disabled = true
       if (el.type === 'checkbox' || el.type === 'radio') item.checked = el.checked
     }
+    const ariaChecked = el.getAttribute('aria-checked')
+    if (ariaChecked === 'true' || ariaChecked === 'false') item.checked = ariaChecked === 'true'
     if (el instanceof HTMLOptionElement && el.selected) item.selected = true
     if (el instanceof HTMLAnchorElement && el.href !== '') item.href = hrefHeadline(el.href)
     items.push(item)
   }
 
-  const formElements = [...document.querySelectorAll('input:not([type="hidden"]), select, textarea')]
-    .filter((el) => isVisible(el))
-    .slice(0, options.budget.maxForms)
+  // Form controls are already part of the visible interactive inventory, so
+  // reuse that scan instead of querying, styling, and measuring them again.
+  const formElements = elements.filter((el) => el instanceof HTMLInputElement
+    || el instanceof HTMLSelectElement
+    || el instanceof HTMLTextAreaElement)
   const forms: FormFieldView[] = []
-  for (const el of formElements) {
+  for (const el of formElements.slice(0, options.budget.maxForms)) {
     const index = ids.indexOf(el)
     if (index === undefined) continue
     const masked = isSensitiveField(el)
-    const value = el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement
+    const checkable = el instanceof HTMLInputElement && (el.type === 'checkbox' || el.type === 'radio')
+    const value = checkable
+      ? ''
+      : el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement
       ? el.value
       : el instanceof HTMLSelectElement
         ? selectedText(el)
         : ''
     forms.push({
       index,
-      label: accessibleName(el),
+      label: nameOf(el),
       kind: el instanceof HTMLInputElement ? el.type : el.tagName.toLowerCase(),
       value: masked ? maskValue(value) : value.slice(0, 120),
       masked,
+      ...checkable ? { checked: el.checked } : {},
       ...el instanceof HTMLInputElement && el.required ? { required: true } : {},
     })
   }
@@ -179,22 +195,23 @@ export function buildSnapshot(ids: ElementIds, options: SnapshotOptions, last: S
   const lastItems = last === null ? new Map<number, InventoryItem>() : new Map(last.items.map((item) => [item.index, item]))
   const lastForms = last === null ? new Map<number, FormFieldView>() : new Map(last.forms.map((form) => [form.index, form]))
 
-  const changed: number[] = []
+  const changed = new Set<number>()
   const removedIds: number[] = []
   if (options.delta === true && last !== null) {
     if (last.main !== main.text || last.url !== location.href || last.title !== document.title) {
-      changed.push(-1) // -1 = 正文/标题/URL 变化（渲染时说明）
+      changed.add(-1) // -1 = 正文/标题/URL 变化（渲染时说明）
     }
     for (const item of items) {
       const before = lastItems.get(item.index)
-      if (before === undefined || !sameItem(before, item)) changed.push(item.index)
+      if (before === undefined || !sameItem(before, item)) changed.add(item.index)
     }
+    const currentItemIds = new Set(items.map((item) => item.index))
     for (const index of lastItems.keys()) {
-      if (items.every((item) => item.index !== index)) removedIds.push(index)
+      if (!currentItemIds.has(index)) removedIds.push(index)
     }
     for (const form of forms) {
       const before = lastForms.get(form.index)
-      if (before === undefined || !sameForm(before, form)) changed.push(form.index)
+      if (before === undefined || !sameForm(before, form)) changed.add(form.index)
     }
   }
 
@@ -206,7 +223,7 @@ export function buildSnapshot(ids: ElementIds, options: SnapshotOptions, last: S
     main: main.text,
     items,
     forms,
-    changed: options.delta === true ? changed : [],
+    changed: options.delta === true ? [...changed] : [],
     removed: options.delta === true ? removedIds : [],
     reindexed,
     truncated: {
@@ -229,6 +246,7 @@ function sameItem(a: InventoryItem, b: InventoryItem): boolean {
 
 function sameForm(a: FormFieldView, b: FormFieldView): boolean {
   return a.label === b.label && a.kind === b.kind && a.value === b.value && a.masked === b.masked
+    && a.checked === b.checked && a.required === b.required
 }
 
 /**
@@ -236,59 +254,97 @@ function sameForm(a: FormFieldView, b: FormFieldView): boolean {
  * block; no images anywhere).
  * @param view - snapshot to render.
  * @param delta - whether this is a delta render (changes only).
+ * @param maxChars - optional render cap for compact derivative responses.
  * @returns the text payload.
  */
 /** 渲染结果的整体预算：主文/清单之外的部分（标题、URL、包装行）也计入。 */
 function capRendered(text: string, budgetChars: number): string {
   if (text.length <= budgetChars) return text
-  return `${text.slice(0, budgetChars)}…(已按预算截断)`
+  return `${text.slice(0, budgetChars)}…(truncated to the snapshot character budget)`
 }
 
-export function renderSnapshot(view: SnapshotView, delta: boolean): string {
+function renderItem(item: InventoryItem): string {
+  const state = [
+    item.disabled === true ? 'disabled' : undefined,
+    item.checked === undefined ? undefined : item.checked ? 'checked' : 'unchecked',
+    item.inViewport ? undefined : 'outside viewport',
+  ].filter((value) => value !== undefined).join('/')
+  const stateText = state === '' ? '' : ` [${state}]`
+  const hrefText = item.href !== undefined ? ` → ${item.href}` : ''
+  return `  [${item.index}] ${item.role} "${item.name}"${stateText}${hrefText}`
+}
+
+function renderForm(form: FormFieldView, includeIdentity: boolean): string {
+  const identity = includeIdentity ? `${form.label} (${form.kind}) ` : ''
+  const state = form.checked === undefined
+    ? `value="${form.masked ? '••••' : form.value}"`
+    : `checked=${String(form.checked)}`
+  return `  [${form.index}] ${identity}${state}${form.required === true ? ' required' : ''}`
+}
+
+function appendTruncationNotes(lines: string[], view: SnapshotView): void {
+  const notes: string[] = []
+  if (view.truncated.mainChars > 0) notes.push(`Main content truncated by ${view.truncated.mainChars} characters`)
+  if (view.truncated.itemsDropped > 0) notes.push(`${view.truncated.itemsDropped} additional elements omitted`)
+  if (view.truncated.formsDropped > 0) notes.push(`${view.truncated.formsDropped} additional form fields omitted`)
+  if (notes.length > 0) lines.push(`\n(${notes.join('; ')}. Use browser_get_text or specify region for more content.)`)
+}
+
+export function renderSnapshot(view: SnapshotView, delta: boolean, maxChars: number = view.budgetChars): string {
   const lines: string[] = []
   if (delta) {
-    lines.push(`页面变化 v${view.version} (${view.url})`)
-    if (view.changed.includes(-1)) lines.push('正文/标题/URL 发生变化')
+    lines.push(`Page change v${view.version} (${view.url})`)
     const elementChanges = view.changed.filter((id) => id !== -1)
-    if (elementChanges.length > 0) lines.push(`变化的元素: ${elementChanges.join(', ')}`)
-    if (view.removed.length > 0) lines.push(`消失的元素: ${view.removed.join(', ')}`)
-    if (view.changed.length === 0 && view.removed.length === 0) lines.push('(无可见变化)')
-    lines.push('如需完整快照，请不带 delta 重新调用 browser_snapshot。')
-    return capRendered(lines.join('\n'), view.budgetChars)
+    const changedIds = new Set(elementChanges)
+    const changedItems = view.items.filter((item) => changedIds.has(item.index))
+    const changedForms = view.forms.filter((form) => changedIds.has(form.index))
+
+    lines.push(`Status: ${view.ready}${view.reindexed ? ' (element indices were reassigned; use the indices in this snapshot)' : ''}`)
+    if (view.changed.includes(-1)) {
+      lines.push(`Title: ${view.title || '(untitled)'}`)
+      if (view.main.length > 0) {
+        lines.push('')
+        lines.push('Changed main content:')
+        lines.push(view.main)
+      }
+    }
+    if (changedItems.length > 0) {
+      lines.push('')
+      lines.push('Changed interactive elements:')
+      for (const item of changedItems) lines.push(renderItem(item))
+    }
+    if (changedForms.length > 0) {
+      lines.push('')
+      lines.push('Changed form fields:')
+      const renderedItems = new Set(changedItems.map((item) => item.index))
+      for (const form of changedForms) lines.push(renderForm(form, !renderedItems.has(form.index)))
+    }
+    if (view.removed.length > 0) lines.push(`Removed elements: ${view.removed.join(', ')}`)
+    if (view.changed.length === 0 && view.removed.length === 0) lines.push('(No visible changes.)')
+    appendTruncationNotes(lines, view)
+    return capRendered(lines.join('\n'), maxChars)
   }
-  lines.push(`标题: ${view.title || '(无标题)'}`)
+  lines.push(`Title: ${view.title || '(untitled)'}`)
   lines.push(`URL: ${view.url}`)
-  lines.push(`状态: ${view.ready}${view.reindexed ? '（元素编号已重排，请以本快照编号为准）' : ''}`)
+  lines.push(`Status: ${view.ready}${view.reindexed ? ' (element indices were reassigned; use the indices in this snapshot)' : ''}`)
   if (view.main.length > 0) {
     lines.push('')
-    lines.push('正文:')
+    lines.push('Main content:')
     lines.push(view.main)
   }
   if (view.items.length > 0) {
     lines.push('')
-    lines.push('交互元素:')
-    for (const item of view.items) {
-      const state = [
-        item.disabled === true ? '禁用' : undefined,
-        item.checked === true ? '已勾选' : undefined,
-        item.inViewport ? undefined : '视口外',
-      ].filter((x) => x !== undefined).join('/')
-      const stateText = state === '' ? '' : ` [${state}]`
-      const hrefText = item.href !== undefined ? ` → ${item.href}` : ''
-      lines.push(`  [${item.index}] ${item.role} "${item.name}"${stateText}${hrefText}`)
-    }
+    lines.push('Interactive elements:')
+    for (const item of view.items) lines.push(renderItem(item))
   }
   if (view.forms.length > 0) {
     lines.push('')
-    lines.push('表单字段:')
+    lines.push('Form fields:')
+    const renderedItems = new Set(view.items.map((item) => item.index))
     for (const form of view.forms) {
-      lines.push(`  [${form.index}] ${form.label} (${form.kind}) 值="${form.masked ? '••••' : form.value}"${form.required === true ? ' 必填' : ''}`)
+      lines.push(renderForm(form, !renderedItems.has(form.index)))
     }
   }
-  const notes: string[] = []
-  if (view.truncated.mainChars > 0) notes.push(`正文截断 ${view.truncated.mainChars} 字符`)
-  if (view.truncated.itemsDropped > 0) notes.push(`另有 ${view.truncated.itemsDropped} 个元素未列出`)
-  if (view.truncated.formsDropped > 0) notes.push(`另有 ${view.truncated.formsDropped} 个表单字段未列出`)
-  if (notes.length > 0) lines.push(`\n(${notes.join('；')}。需要更多内容请用 browser_get_text 或指定 region。)`)
-  return capRendered(lines.join('\n'), view.budgetChars)
+  appendTruncationNotes(lines, view)
+  return capRendered(lines.join('\n'), maxChars)
 }

@@ -111,16 +111,33 @@ fi
 
 EXT="$ROOT/extensions/dsh-browser"
 PLUGIN="$ROOT/packages/browser/bridge-browser"
+WEB_PROFILE_MANIFEST="$DSH_HOME_DIR/profiles/web/package.json"
+LEGACY_PLUGIN="@deepseek-ai/dsh-bridge-browser"
+
+profile_has_dependency() {
+  local manifest="$1"
+  local package_name="$2"
+
+  [ -f "$manifest" ] || return 1
+  node -e '
+    const manifest = require(process.argv[1]);
+    process.exit(Object.hasOwn(manifest.dependencies ?? {}, process.argv[2]) ? 0 : 1);
+  ' "$manifest" "$package_name"
+}
 
 require_command pnpm "未找到 pnpm；请先启用 Corepack 或安装 pnpm。" "pnpm was not found; enable Corepack or install pnpm first."
+require_command node "未找到 Node.js；请先安装受支持的 Node.js 版本。" "Node.js was not found; install a supported Node.js version first."
 require_command rsync "未找到 rsync；请先安装 rsync。" "rsync was not found; install rsync first."
 
 print_step 1 "构建浏览器桥" "Build the browser bridge"
 (cd "$ROOT" && pnpm install --frozen-lockfile >/dev/null 2>&1)
-(cd "$ROOT" && pnpm --filter @deepseek-ai/dsh-bridge-browser run build >/dev/null 2>&1)
+(cd "$ROOT" && pnpm --filter @yuxianglin/dsh-bridge-browser run build >/dev/null 2>&1)
 
 print_step 2 "注册到本机 web profile" "Register with the local web profile"
-(cd "$ROOT" && pnpm exec dsh plugin --profile web add "@deepseek-ai/dsh-bridge-browser@link:$PLUGIN" >/dev/null)
+if profile_has_dependency "$WEB_PROFILE_MANIFEST" "$LEGACY_PLUGIN"; then
+  (cd "$ROOT" && pnpm exec dsh plugin --profile web remove "$LEGACY_PLUGIN" >/dev/null)
+fi
+(cd "$ROOT" && pnpm exec dsh plugin --profile web add -w "@yuxianglin/dsh-bridge-browser@link:$PLUGIN" >/dev/null)
 
 print_step 3 "构建 Chrome 扩展" "Build the Chrome extension"
 (cd "$ROOT" && pnpm --filter dsh-browser-extension run build >/dev/null 2>&1)
@@ -134,6 +151,21 @@ else
 fi
 mkdir -p "$DIST_DIR"
 rsync -a --delete-after "$EXT/dist/" "$DIST_DIR/"
+if [ -f "$ROOT/.managed-by-install-sh" ]; then
+  INSTALL_MODE="managed"
+else
+  INSTALL_MODE="checkout"
+fi
+node -e '
+  const { writeFileSync } = require("node:fs");
+  const [filename, mode, sourceRoot] = process.argv.slice(1);
+  const info = {
+    schemaVersion: 1,
+    mode,
+    ...(mode === "checkout" ? { sourceRoot } : {}),
+  };
+  writeFileSync(filename, `${JSON.stringify(info, null, 2)}\n`);
+' "$DIST_DIR/install-info.json" "$INSTALL_MODE" "$ROOT"
 echo -n "$DIST_DIR" | pbcopy
 
 open -a "Google Chrome" "chrome://extensions" 2>/dev/null || open -b com.google.Chrome "chrome://extensions"

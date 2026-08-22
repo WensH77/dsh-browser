@@ -1,18 +1,18 @@
-# @deepseek-ai/dsh-bridge-browser
+# @yuxianglin/dsh-bridge-browser
 
 English | [中文](README.zh.md)
 
 The **browser-operation bridge** for dsh: mounts a token-authenticated WebSocket carrier (`/ext/bridge`) that the Chrome extension connects to, proxies gateway RPCs through the same fetch handler the `/api` surface uses, pumps session events per connection, and registers the text-only `browser_*` tool set that reads and operates the user's active tab through the extension — click elements, fill forms, scroll, and navigate in the real browser, login state preserved. The side panel is the conversation entry; the tools are the product.
 
-**Text-only by design**: DeepSeek models have no vision, so page snapshots are structured text (title, main content, numbered interactive inventory, form fields with masked sensitive values) and every action addresses elements by stable inventory numbers. No screenshots exist anywhere in the pipeline.
+**Text-only browser tools, multimodal chat passthrough**: page snapshots stay structured text (title, main content, numbered interactive inventory, and masked form fields), and every browser action uses stable inventory numbers. The generic RPC carrier also passes dsh 0.1.1 image prompts and durable attachment reads; deferred new sessions expose image limits only when the host actually mounts the attachment service.
 
 ## Config
 
 | Key | Type | Default | Description |
 |---|---|---|---|
 | `token` | `string` | generated | Fixed bearer token. When absent, a token is generated on first boot, persisted at `~/.dsh/ext-bridge-token` (chmod 0600), and printed in the boot log. |
-| `toolTimeoutMs` | `number` | 60000 | Per-tool-call budget. |
-| `snapshotMaxChars` | `number` | 12000 | Upper bound on one rendered snapshot's characters (also negotiated to the extension via `hello.ok` caps). |
+| `toolTimeoutMs` | `number` | 90000 | Per-tool-call budget, leaving time for the extension's 60-second approval window. |
+| `snapshotMaxChars` | `number` | 32000 | Upper bound on one rendered snapshot's characters, minimum 500 (also negotiated to the extension via `hello.ok` caps). |
 | `maxInteractiveItems` | `number` | 60 | Upper bound on interactive inventory items per snapshot. |
 | `sessionWorkspacePath` | `string` | `~/.dsh/browser-sessions` | Dedicated Host Workspace for extension-created sessions. The plugin creates and idempotently registers the directory on the first implicit `session.create`; the session cwd becomes this path, so the GUI shows a `browser-sessions` workspace group. Set `""` to keep sessions Ungrouped. |
 | `deferSessionCreate` | `boolean` | `true` | Sessions materialize only on the first message: `session.create` answers with a provisional id (nothing persisted), history reads empty, and the first `session.prompt` creates the real session (same id, original payload). Opening the panel without chatting leaves zero trace in the session store/GUI. |
@@ -48,7 +48,7 @@ The installer copies the unpacked extension to `~/.dsh/browser-extension` and op
 
 ## Wire protocol
 
-Frames are JSON objects discriminated by `t`, defined in [`protocol.ts`](src/protocol.ts) — the single source of truth shared with the extension through the workspace package's `./src/*` export. The built package also publishes `@deepseek-ai/dsh-bridge-browser/protocol` for external consumers.
+Frames are JSON objects discriminated by `t`, defined in [`protocol.ts`](src/protocol.ts) — the single source of truth shared with the extension through the workspace package's `./src/*` export. The built package also publishes `@yuxianglin/dsh-bridge-browser/protocol` for external consumers.
 
 - Client → server: `hello` (auth + caps), `rpc` (gateway method passthrough), `respond` (resolve a host interaction by its RPC id), `tool.result`, `pong`.
 - Server → client: `hello.ok` (echoes negotiated caps), `rpc.result`, `respond.result` (correlated acceptance or error), `event` (gateway event envelope, same shape as `/api/events.mux`), `tool.call`, `ping`, `error`.
@@ -66,7 +66,7 @@ Each `respond` carries a globally unique transport id as well as the host intera
 
 ## Model Experience
 
-- **Token effect**: one `browser_snapshot` (default 12k chars) costs roughly 3–4k tokens; delta snapshots cost a fraction of that. The system-prompt section tells the model to snapshot on demand rather than hoard page text.
+- **Token effect**: one `browser_snapshot` (default 32k chars) costs roughly 8–10k tokens for typical English text; the exact count depends on language and tokenizer, and delta snapshots cost a fraction of that. The system-prompt section tells the model to snapshot on demand rather than hoard page text.
 - **KV-cache effect**: none beyond ordinary tool results; snapshots are not cached server-side.
 - **Latency**: each action awaits the extension's real-page execution plus settle detection (typically 0.2–2s; navigation up to 5s).
 - **Failure modes**: `bridge-closed` (extension not connected), `timeout`, `no-active-tab`, `content-unavailable` (page needs a refresh), `action-failed` (stale inventory index — the model should re-snapshot).

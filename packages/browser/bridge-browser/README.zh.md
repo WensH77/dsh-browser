@@ -1,18 +1,18 @@
-# @deepseek-ai/dsh-bridge-browser
+# @yuxianglin/dsh-bridge-browser
 
 [English](README.md) | 中文
 
 dsh 的**浏览器操作桥**：在宿主 webserver 上挂载一个 **token 认证的 WebSocket 通道**（`/ext/bridge`），供 Chrome 扩展连接；通过 `/api` 同款 fetch handler 代理网关 RPC、按连接泵送会话事件，并注册**纯文本**的 `browser_*` 工具集——经扩展在真实浏览器中读取页面、点击元素、填写表单、滚动与导航，登录态保留。侧边栏是对话入口，工具才是产品本体。
 
-**纯文本设计**：DeepSeek 模型无视觉，页面快照是结构化文本（标题、正文、带编号的交互清单、敏感值打码的表单字段），所有动作按稳定编号寻址；整条管线不存在截图。
+**纯文本浏览器工具，多模态对话透传**：页面快照仍是结构化文本（标题、正文、带编号的交互清单、敏感值打码的表单字段），所有浏览器动作按稳定编号寻址。通用 RPC 通道也会透传 dsh 0.1.1 的图片消息和持久附件读取；延迟创建的新会话只在宿主确实挂载附件服务时声明图片限制。
 
 ## 配置
 
 | 键 | 类型 | 默认 | 说明 |
 |---|---|---|---|
 | `token` | `string` | 自动生成 | 固定 bearer token。缺省时首次启动生成，写入 `~/.dsh/ext-bridge-token`（0600）并打印在启动日志。 |
-| `toolTimeoutMs` | `number` | 60000 | 单次工具调用预算。 |
-| `snapshotMaxChars` | `number` | 12000 | 单次快照渲染字符上限（经 `hello.ok` caps 协商给扩展）。 |
+| `toolTimeoutMs` | `number` | 90000 | 单次工具调用预算，为扩展的 60 秒审批窗口预留时间。 |
+| `snapshotMaxChars` | `number` | 32000 | 单次快照渲染字符上限，最小为 500（经 `hello.ok` caps 协商给扩展）。 |
 | `maxInteractiveItems` | `number` | 60 | 单次快照交互清单条数上限。 |
 | `sessionWorkspacePath` | `string` | `~/.dsh/browser-sessions` | 扩展创建的会话所用的专用 Host Workspace。插件会在首次调用未显式指定工作区的 `session.create` 时创建并幂等注册该目录；会话的 cwd 随之变为此路径，因此 GUI 会显示 `browser-sessions` 工作区分组。设为 `""` 可让会话继续显示在“未分组”中。 |
 | `deferSessionCreate` | `boolean` | `true` | 会话只在第一条消息时才真正创建：`session.create` 先返回一个内存暂定 ID（不落库），历史读取为空，第一次 `session.prompt` 才创建真实会话（同一 ID、回放原始创建参数）。只打开面板不说话，会在会话库/GUI 里不留任何痕迹。 |
@@ -48,7 +48,7 @@ npx @deepseek-ai/dsh web
 
 ## 线协议
 
-帧为按 `t` 判别的 JSON 对象，定义在 [`protocol.ts`](src/protocol.ts)，是通过 workspace 包的 `./src/*` export 与扩展共享的真源。构建后的包还会发布 `@deepseek-ai/dsh-bridge-browser/protocol`，供外部消费方使用。
+帧为按 `t` 判别的 JSON 对象，定义在 [`protocol.ts`](src/protocol.ts)，是通过 workspace 包的 `./src/*` export 与扩展共享的真源。构建后的包还会发布 `@yuxianglin/dsh-bridge-browser/protocol`，供外部消费方使用。
 
 - 客户端 → 服务端：`hello`（认证+caps）、`rpc`（网关方法透传）、`respond`（按 RPC id 结算宿主交互）、`tool.result`、`pong`。
 - 服务端 → 客户端：`hello.ok`（回显协商后的 caps）、`rpc.result`、`respond.result`（相关联的受理结果或错误）、`event`（网关事件信封，与 `/api/events.mux` 同形）、`tool.call`、`ping`、`error`。
@@ -66,7 +66,7 @@ npx @deepseek-ai/dsh web
 
 ## 模型体验
 
-- **Token 影响**：一次 `browser_snapshot`（默认 12k 字符）约 3–4k token；delta 快照只需零头。系统提示段落引导模型按需快照而非囤积页面文本。
+- **Token 影响**：一次 `browser_snapshot`（默认 32k 字符）对常见英文文本约为 8–10k token，具体取决于语言和分词器；delta 快照只需零头。系统提示段落引导模型按需快照而非囤积页面文本。
 - **KV 缓存影响**：无（快照不做服务端缓存）。
 - **延迟**：每次动作等待扩展在真实页面执行 + 稳定检测（通常 0.2–2s；导航最长 5s）。
 - **失败模式**：`bridge-closed`（扩展未连接）、`timeout`、`no-active-tab`、`content-unavailable`（页面需刷新）、`action-failed`（编号过期——模型应重新快照）。

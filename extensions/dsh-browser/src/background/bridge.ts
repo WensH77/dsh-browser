@@ -9,8 +9,12 @@
  * @module
  */
 
-import type { BridgeCaps, ClientFrame, ServerFrame } from '@deepseek-ai/dsh-bridge-browser/src/protocol.ts'
-import { isServerFrame, parseBridgeFrame } from '@deepseek-ai/dsh-bridge-browser/src/protocol.ts'
+import type { BridgeCaps, ClientFrame, ServerFrame } from '@yuxianglin/dsh-bridge-browser/src/protocol.ts'
+import {
+  DEFAULT_SNAPSHOT_MAX_CHARS,
+  isServerFrame,
+  parseBridgeFrame,
+} from '@yuxianglin/dsh-bridge-browser/src/protocol.ts'
 
 /** Coarse connection state for the UI. */
 export type BridgeState = 'connecting' | 'connected' | 'reconnecting' | 'stopped'
@@ -45,6 +49,8 @@ export class BridgeClient {
   constructor(
     readonly sinks: BridgeSinks,
     private readonly probe: BridgeProbe = async () => true,
+    /** Whether a disconnected client still has an active user-owned lease. */
+    private readonly shouldReconnect: () => boolean = () => true,
   ) {}
 
   /** Current coarse state (mirrors the last emitted sink value). */
@@ -75,6 +81,16 @@ export class BridgeClient {
     this.emitState('stopped')
   }
 
+  /**
+   * Drop an in-progress reconnect when its UI lease disappears, while keeping
+   * an authenticated socket alive for background approvals already enabled by
+   * the user. A later socket loss will still consult shouldReconnect().
+   */
+  suspendReconnect(): void {
+    if (this.state === 'connected') return
+    this.stop()
+  }
+
   /** Whether a frame can be sent right now. */
   get connected(): boolean {
     return this.ws !== null && this.ws.readyState === WebSocket.OPEN
@@ -94,8 +110,10 @@ export class BridgeClient {
 
   private async loop(generation: number): Promise<void> {
     while (this.running && generation === this.generation) {
+      if (!this.retryAllowed()) return
       const reachable = await this.probe(this.url).catch(() => false)
       if (!this.running || generation !== this.generation) return
+      if (!this.retryAllowed()) return
       if (!reachable) {
         this.emitState('reconnecting')
         await this.waitBeforeRetry()
@@ -104,6 +122,16 @@ export class BridgeClient {
 
       const socket = new WebSocket(this.url)
       this.ws = socket
+      // A replacement is an ownership handoff, not a transient transport
+      // failure. Yield permanently so two open profiles cannot reconnect in a
+      // tight loop and repeatedly evict one another.
+      socket.addEventListener('close', (event) => {
+        if (event.code !== 4000 || this.ws !== socket || !this.running) return
+        this.running = false
+        this.clearAckTimer()
+        this.ws = null
+        this.emitState('stopped')
+      }, { once: true })
       this.emitState('connecting')
 
       await new Promise<void>((resolve) => {
@@ -124,7 +152,7 @@ export class BridgeClient {
       socket.send(JSON.stringify({
         t: 'hello',
         token: this.token,
-        caps: { textOnly: true, snapshotMaxChars: 12_000, maxInteractiveItems: 60 },
+        caps: { textOnly: true, snapshotMaxChars: DEFAULT_SNAPSHOT_MAX_CHARS, maxInteractiveItems: 60 },
       } satisfies ClientFrame))
 
       let authed = false
@@ -182,8 +210,16 @@ export class BridgeClient {
       socket.close()
     }
     if (!this.running) return
+    if (!this.retryAllowed()) return
     this.emitState('reconnecting')
     await this.waitBeforeRetry()
+  }
+
+  private retryAllowed(): boolean {
+    if (this.shouldReconnect()) return true
+    this.running = false
+    this.emitState('stopped')
+    return false
   }
 
   private async waitBeforeRetry(): Promise<void> {

@@ -8,12 +8,31 @@ Connect [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) to t
 
 `dsh` is DeepSeek AI's open-source, plugin-based agent harness. This repository provides a companion browser bridge plugin and Chrome MV3 extension as one standalone pnpm workspace.
 
-The integration is text-only: pages become structured text with a numbered inventory of interactive elements, and the model addresses those elements by number. Screenshots never enter the model-facing pipeline.
+Browser operation remains text-only: pages become structured text with a numbered inventory of interactive elements, and the model addresses those elements by number. dsh 0.1.1 multimodal chat is separate from that page channel—the side panel accepts PNG, JPEG, WebP, and GIF attachments when the host advertises image support, while browser tools still never capture screenshots.
 
-The workspace uses a pinned, publicly available `@deepseek-ai/dsh` release for reproducible installation. It requires neither a DeepSeek Harness source checkout, dependencies from a parent directory, nor npm credentials. DeepSeek Harness is currently a developer preview, so upgrades may require coordinated dependency and API updates.
+## Quick install
+
+The standard `dsh plugin` command alone cannot install this project. The integration contains both a dsh bridge plugin and a Chrome MV3 extension, and the extension must also be built and installed in Chrome. Use the repository's one-line installer to set up both parts:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/Lum1104/dsh-browser/refs/heads/main/scripts/install.sh | bash
+```
+
+When the installer opens `chrome://extensions`, follow its instructions to load or reload **dsh Browser Assistant**. If dsh is already running, restart it after installation. See [Detailed installation and usage](#detailed-installation-and-usage) for prerequisites, startup commands, updates, and developer installation.
 
 > [!IMPORTANT]
-> The unscoped [`dsh-browser`](https://www.npmjs.com/package/dsh-browser) package on npm belongs to a different project and is not affiliated with this repository. This project is not currently published as an npm package; use the installation method below.
+> The unscoped [`dsh-browser`](https://www.npmjs.com/package/dsh-browser) package on npm belongs to a different project and is not affiliated with this repository. This project is not currently published as an npm package; use the installer above.
+
+## Performance
+
+In a paired 60-run end-to-end benchmark on August 18, 2026, both backends completed all 30 assigned runs successfully, while dsh Browser Control required fewer model/tool round trips and finished faster:
+
+| Backend | Success | Mean end-to-end latency | Mean browser tool calls |
+|---|---:|---:|---:|
+| **dsh Browser Control** | **30/30** | **5.32 s** | **3.4** |
+| Matched Playwright baseline | 30/30 | 6.67 s | 4.7 |
+
+The paired Playwright / extension duration ratio was **1.24** (95% CI **1.16–1.34**): Playwright took about 24% longer, or equivalently, dsh Browser Control reduced latency by about 20% and saved 1.35 seconds per task on average. The suite used six browser tasks, five deterministic seeds, the same DSH profile and model (`deepseek-v4-flash`), and independently validated page state. See the [benchmark methodology and reproduction guide](benchmark/README.md).
 
 ## Core capabilities
 
@@ -24,9 +43,10 @@ The workspace uses a pinned, publicly available `@deepseek-ai/dsh` release for r
 | Fill forms | `browser_type` | React/Vue-compatible input; `replace` clears the field first |
 | Press keys | `browser_press` | Keyboard events such as Enter, Tab, Escape, and arrow keys |
 | Scroll | `browser_scroll` | Viewport scrolling: up, down, top, and bottom |
-| Navigate | `browser_navigate` / `browser_back` / `browser_forward` / `browser_reload` | In-tab navigation with login state preserved |
+| Navigate | `browser_navigate` / `browser_back` / `browser_forward` / `browser_reload` | Navigation inside the controlled tab, with login state preserved |
 | Read region | `browser_get_text` | Lazy-loaded or partial page text |
 | Wait for stability | `browser_wait` | Page-load and render-settle detection |
+| Send images | `session.prompt` / `session.attachment` | Host-capability-gated image drafts, image-only prompts, and durable history previews |
 
 ## Repository layout
 
@@ -40,25 +60,25 @@ scripts/install.sh
 ## Why this design
 
 - **Your real browser, not a headless copy**: the model works in the page you already have open, retaining logins, sessions, and cookies.
-- **A text-first model interface**: numbered controls, stable IDs across snapshots, delta updates, and masked sensitive values make pages operable without vision.
+- **A text-first page interface**: numbered controls, stable IDs across snapshots, delta updates, and masked sensitive values make pages operable without screenshots; user-attached chat images use dsh's separate multimodal message path.
 - **A narrow privacy boundary**: passwords and payment-card values are always rendered as `••••` and never leave the page.
-- **A guarded bridge**: authenticated handshakes protect remote connections, privileged gateway methods reject non-loopback callers, and the extension only operates the active tab.
+- **A guarded bridge**: authenticated handshakes protect remote connections, privileged gateway methods reject non-loopback callers, and the extension binds tools to one user-controlled tab.
 
-## Zero-configuration install and use
+## Detailed installation and usage
 
-Prerequisites: Node.js `^22.19` or `>=24`, Corepack/pnpm, and Google Chrome. All required `@deepseek-ai` packages are available from the public npm registry; installation does not require an npm token.
+Requirements: Node.js `^22.19` or `>=24`, Corepack/pnpm, and Google Chrome.
 
-**Step 1 — install the bridge and extension**. The recommended command does not require Git or a local clone:
+### Install or update
+
+For a managed installation, run:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/Lum1104/dsh-browser/refs/heads/main/scripts/install.sh | bash
 ```
 
-The remote installer downloads `main` into the installer-managed directory `~/.dsh/dsh-browser`, then installs the pinned public npm dependencies from the lockfile, builds the bridge plugin, registers its official bundle in dsh's local `web` profile, builds the extension, copies it to `~/.dsh/browser-extension`, and opens `chrome://extensions`. Enable Developer mode and load the extension directory when prompted. Running the same command again updates the managed installation; keep source edits in a clone instead.
+The installer downloads `main`, builds and registers the bridge plugin, builds the Chrome extension into `~/.dsh/browser-extension`, and opens `chrome://extensions`. On the first install, load that directory as an unpacked extension; on updates, click **Reload**. Restart dsh if it is already running.
 
-**Already running dsh? Restart it after installing.** The installer registers the bridge bundle in dsh's local `web` profile, and dsh loads its profile only at startup. An instance started before the install keeps running without the bridge, so the side panel reports "Not connected" even though the extension loaded correctly. Stop that instance and start it again (Step 2); the extension then discovers the bridge automatically and needs no reconfiguration.
-
-Developers can clone the repository and run the same installer from any checkout. This mode uses the current branch without downloading or overwriting source files:
+To install the current branch from a source checkout instead:
 
 ```sh
 git clone https://github.com/Lum1104/dsh-browser.git
@@ -66,29 +86,23 @@ cd dsh-browser
 ./scripts/install.sh
 ```
 
-**Step 2 — start dsh**. For a managed installation, use its pinned version:
+After pulling or switching revisions, rerun `./scripts/install.sh` and reload the extension.
+
+### Start and use
+
+Start the managed installation with:
 
 ```sh
 cd ~/.dsh/dsh-browser && pnpm start
 ```
 
-From a clone, run `pnpm start` in the repository root instead.
-
-Or run the latest public release directly from npm:
+From a source checkout, run `pnpm start` in the repository root. To use the latest public dsh release instead:
 
 ```sh
 npx @deepseek-ai/dsh web
 ```
 
-Both commands load the same browser bundle from the local `web` profile. Port 3080 is used by default; if it is occupied, run `pnpm start -- --port <port>` or `npx @deepseek-ai/dsh web --port <port>`. When the DeepSeek whale icon appears in the toolbar, click it to open the side panel.
-
-**For subsequent use**, the extension does not need to be installed again. Run either startup command above.
-
-**No configuration is required for local use**: the extension discovers dsh through `/ext/bridge-config`, and loopback connections do not require a bridge token. This runtime security token is unrelated to npm authentication; an address and bridge token are only needed for remote deployment with `--host 0.0.0.0`.
-
-**Step 3 — use it**: open any normal `http://` or `https://` page and click the DeepSeek whale icon. When the side panel reports "Connected", chat normally or click "Read page" first. A page that was already open before the extension was installed or reloaded is instrumented automatically on the first action; no page refresh is needed. Browser-internal and protected pages such as `chrome://` and the Chrome Web Store cannot be read or operated.
-
-To update a managed installation, run the same `curl | bash` command again. To update a clone, pull or switch to the desired revision and run `./scripts/install.sh`. Then click Reload for "dsh Browser Assistant" in `chrome://extensions` and reopen the side panel. Chrome should load `~/.dsh/browser-extension`; do not load the source directory `extensions/dsh-browser/`. If dsh web is already running, restart it too so it reloads the updated `web` profile (see Troubleshooting).
+Local use requires no configuration. Open an `http://` or `https://` page, click the DeepSeek whale icon, and wait for **Connected**. Existing tabs are instrumented on the first action; protected pages such as `chrome://` and the Chrome Web Store are not supported.
 
 ## Troubleshooting
 
@@ -107,9 +121,9 @@ pnpm run build
 pnpm run typecheck
 pnpm run test
 
-pnpm --filter @deepseek-ai/dsh-bridge-browser run build
-pnpm --filter @deepseek-ai/dsh-bridge-browser run typecheck
-pnpm --filter @deepseek-ai/dsh-bridge-browser run test
+pnpm --filter @yuxianglin/dsh-bridge-browser run build
+pnpm --filter @yuxianglin/dsh-bridge-browser run typecheck
+pnpm --filter @yuxianglin/dsh-bridge-browser run test
 
 pnpm --filter dsh-browser-extension run build
 pnpm --filter dsh-browser-extension run test
@@ -124,7 +138,7 @@ Notes:
 
 - The bridge path sits outside the `/api` trust boundary and performs its own bearer-token authentication.
 - Privileged gateway methods such as `settings.*`, `credentials.*`, and `host.open*` reject non-loopback sources.
-- The model-facing pipeline is text-only; passwords and payment-card values never leave the page.
-- Only the active tab is operated; the extension never switches tabs silently.
-- Page-authored text is wrapped as untrusted input. The default `auto` mode reads only the active tab without an extra prompt; privacy-sensitive users can select `ask` for per-read confirmation or `off` to block reads entirely. In `ask` mode, the read dialog can allow one read or persistently switch back to `auto`; this can be reversed in Settings. Read page text is sent to the selected model.
+- The browser-page pipeline is text-only and never captures screenshots; explicitly attached chat images use dsh's durable attachment service. Password and payment-card values never leave the page.
+- When work begins, the assistant binds to the active tab (at prompt submission, or at the first direct browser-tool call). If you switch tabs manually, later browser actions pause and the side panel asks whether the assistant should continue on the original tab or follow the new one. Choosing the original tab permits background operation; the extension never silently retargets or changes your visible tab. Closing the controlled tab also pauses tools until you explicitly select the current page.
+- Page-authored text is wrapped as untrusted input. The default `auto` mode reads only the controlled tab without an extra prompt; privacy-sensitive users can select `ask` for per-read confirmation or `off` to block reads entirely. In `ask` mode, the read dialog can allow one read or persistently switch back to `auto`; this can be reversed in Settings. Read page text is sent to the selected model.
 - Click, type, keypress, navigation, history, and reload calls fail closed until the user approves them. An origin may be trusted for the current side-panel session (cleared when the last panel closes or the service worker restarts), while permanent trust is managed explicitly in Settings. Explicit cross-origin `browser_navigate` calls and unknown history destinations always prompt again.

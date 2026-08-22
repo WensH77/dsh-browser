@@ -27,6 +27,23 @@ export interface PanelCopy {
     labels: Record<string, string>
     overflow: (shown: string[], total: number) => string
   }
+  tabHandoff: {
+    eyebrow: string
+    assistant: string
+    you: string
+    unknownTab: string
+    closedTab: string
+    questionTitle: string
+    questionBody: (controlled: string, active: string) => string
+    keep: string
+    follow: string
+    backgroundTitle: (controlled: string) => string
+    backgroundBody: (active: string) => string
+    followCurrent: string
+    lostTitle: string
+    lostBody: string
+    useCurrent: string
+  }
   question: {
     eyebrow: string
     title: string
@@ -52,6 +69,10 @@ export interface PanelCopy {
     sharingAuto: string
     sharingAsk: string
     sharingOff: string
+    approvalNotifications: string
+    approvalNotificationsHelp: string
+    autoResumeSession: string
+    autoResumeSessionHelp: string
     trustedOrigins: string
     trustedOriginsHelp: string
     trustedOriginInput: string
@@ -63,6 +84,33 @@ export interface PanelCopy {
     save: string
     cancel: string
     snapshotHint: (maxChars: number) => string
+  }
+  update: {
+    eyebrow: string
+    title: string
+    idleTitle: string
+    idleBody: string
+    checking: string
+    checkingBody: string
+    currentTitle: string
+    currentBody: (latestVersion: string) => string
+    availableTitle: (latestVersion: string) => string
+    availableLoadingBody: string
+    availableManagedBody: string
+    availableCheckoutBody: string
+    availableUnknownBody: string
+    reloadReminder: string
+    loadingInstall: string
+    managedInstall: string
+    checkoutInstall: string
+    unknownInstall: string
+    errorTitle: string
+    errorBody: string
+    check: string
+    copyManagedCommand: string
+    copyCheckoutCommand: string
+    copied: string
+    copyError: string
   }
   app: {
     openSettings: string
@@ -86,6 +134,26 @@ export interface PanelCopy {
     sendMessage: string
     stopTurn: string
     stoppingTurn: string
+    addImages: string
+    imageUnavailable: string
+    removeImage: (name: string) => string
+    image: string
+    imageLoading: string
+    imageLoadFailed: string
+    openImage: string
+    openNamedImage: (name: string) => string
+    imagePreview: string
+    closeImage: string
+    imageUnsupported: (name: string) => string
+    imageTooMany: (max: number) => string
+    imageTooLarge: (name: string, max: string) => string
+    imageMessageTooLarge: (max: string) => string
+    imageDimensionTooLarge: (name: string, max: number) => string
+    imagePixelsTooLarge: (name: string, max: number) => string
+    imageDecodeFailed: (name: string) => string
+    imageModelUnsupported: string
+    imageSubagentUnsupported: string
+    imageSendFailed: (reason: string) => string
   }
 }
 
@@ -132,6 +200,23 @@ const EN: PanelCopy = {
     },
     overflow: (shown, total) => `${shown.join(' → ')} → ${total - shown.length} more`,
   },
+  tabHandoff: {
+    eyebrow: 'Page handoff',
+    assistant: 'Assistant',
+    you: 'You',
+    unknownTab: 'Untitled tab',
+    closedTab: 'Closed tab',
+    questionTitle: 'Follow your current page?',
+    questionBody: (controlled, active) => `It is still bound to “${controlled}”, while you moved to “${active}”. Browser actions are paused until you choose.`,
+    keep: 'Stay on original',
+    follow: 'Follow current page',
+    backgroundTitle: () => 'Assistant stays on the original page',
+    backgroundBody: (active) => `You are viewing “${active}”. Future browser actions still run on the original page.`,
+    followCurrent: 'Follow current page',
+    lostTitle: 'The controlled tab was closed',
+    lostBody: 'Browser actions are paused to avoid operating the wrong page.',
+    useCurrent: 'Use current page',
+  },
   question: {
     eyebrow: 'Waiting for your answer',
     title: 'The assistant needs your input',
@@ -145,8 +230,8 @@ const EN: PanelCopy = {
   },
   settings: {
     back: 'Back to chat',
-    eyebrow: 'Preferences',
-    title: 'Connection & Privacy',
+    eyebrow: 'Browser assistant',
+    title: 'Settings',
     bridgeAddress: 'Bridge address',
     bridgeHelp: 'Leave blank to detect a local service automatically',
     bridgePlaceholder: 'Auto-detect 3080 / 3081 / 3090 / 14389',
@@ -157,6 +242,10 @@ const EN: PanelCopy = {
     sharingAuto: 'Share automatically (default)',
     sharingAsk: 'Ask every time',
     sharingOff: 'Off',
+    approvalNotifications: 'Browser approval notifications',
+    approvalNotificationsHelp: 'Notify you when an approval arrives while the side panel is closed',
+    autoResumeSession: 'Resume the last conversation',
+    autoResumeSessionHelp: 'Reopen the most recently active browser conversation instead of starting over',
     trustedOrigins: 'Always-allowed domains',
     trustedOriginsHelp: 'The approval dialog can trust a domain for the current side-panel session only. Domains added here permanently skip action confirmation when every known origin is trusted. Wildcards include the base domain and subdomains, and stay scoped to their scheme and port; `*.example.com` defaults to HTTPS.',
     trustedOriginInput: 'Domain to always trust (e.g. https://example.com or https://*.example.com)',
@@ -168,6 +257,33 @@ const EN: PanelCopy = {
     save: 'Save & Connect',
     cancel: 'Cancel',
     snapshotHint: (maxChars) => `Page snapshots are limited to ${maxChars} characters and longer content is truncated. Change snapshotMaxChars in the dsh plugin to adjust this limit.`,
+  },
+  update: {
+    eyebrow: 'Release channel',
+    title: 'Updates',
+    idleTitle: 'Ready to check',
+    idleBody: 'Compare this build with the version on GitHub main.',
+    checking: 'Checking…',
+    checkingBody: 'Reading the latest extension manifest from GitHub.',
+    currentTitle: 'No update found',
+    currentBody: (latestVersion) => `Repository version: v${latestVersion}.`,
+    availableTitle: (latestVersion) => `Version ${latestVersion} is available`,
+    availableLoadingBody: 'Confirming how this extension was installed before offering an update command.',
+    availableManagedBody: 'Copy the managed update command and run it in Terminal.',
+    availableCheckoutBody: 'Pull or switch to the revision you want in the original checkout, then rerun its installer.',
+    availableUnknownBody: 'This copy predates install-source metadata. Use the same update flow you originally installed with; no command will be copied.',
+    reloadReminder: 'After updating, open chrome://extensions, find “dsh Browser Assistant,” click the rotating-arrow Reload button on its card, then restart dsh.',
+    loadingInstall: 'Identifying install…',
+    managedInstall: 'Managed install',
+    checkoutInstall: 'Local checkout',
+    unknownInstall: 'Install source unknown',
+    errorTitle: 'Could not check for updates',
+    errorBody: 'Check your network connection and try again.',
+    check: 'Check for updates',
+    copyManagedCommand: 'Copy update command',
+    copyCheckoutCommand: 'Copy checkout command',
+    copied: 'Command copied',
+    copyError: 'Could not copy the command. Run the installer from the original installation source instead.',
   },
   app: {
     openSettings: 'Open settings',
@@ -191,6 +307,26 @@ const EN: PanelCopy = {
     sendMessage: 'Send message',
     stopTurn: 'Stop generating',
     stoppingTurn: 'Stopping…',
+    addImages: 'Add images',
+    imageUnavailable: 'This dsh host does not advertise image input',
+    removeImage: (name) => `Remove ${name}`,
+    image: 'Image',
+    imageLoading: 'Loading…',
+    imageLoadFailed: 'Could not load · Retry',
+    openImage: 'Open original image',
+    openNamedImage: (name) => `Open ${name}`,
+    imagePreview: 'Image preview',
+    closeImage: 'Close image preview',
+    imageUnsupported: (name) => `${name} is not an image format supported by this dsh host.`,
+    imageTooMany: (max) => `You can attach up to ${max} images to one message.`,
+    imageTooLarge: (name, max) => `${name} is larger than the per-image limit of ${max}.`,
+    imageMessageTooLarge: (max) => `The images in this message exceed the combined limit of ${max}.`,
+    imageDimensionTooLarge: (name, max) => `${name} exceeds the maximum width or height of ${max}px.`,
+    imagePixelsTooLarge: (name, max) => `${name} exceeds the ${max.toLocaleString()}-pixel limit.`,
+    imageDecodeFailed: (name) => `${name} could not be decoded as an image.`,
+    imageModelUnsupported: 'The current model does not support images; switch to a model that does.',
+    imageSubagentUnsupported: 'Subagent sessions do not support images yet.',
+    imageSendFailed: (reason) => `Sending images failed (${reason}). Your draft has been restored; try again.`,
   },
 }
 
@@ -237,6 +373,23 @@ const ZH: PanelCopy = {
     },
     overflow: (shown, total) => `${shown.join(' → ')} 等${total}个工具`,
   },
+  tabHandoff: {
+    eyebrow: '页面交接',
+    assistant: '助手',
+    you: '你',
+    unknownTab: '未命名标签页',
+    closedTab: '已关闭的标签页',
+    questionTitle: '助手要跟随当前页面吗？',
+    questionBody: (controlled, active) => `助手仍绑定“${controlled}”，你刚切到“${active}”。选择前，浏览器操作会暂停。`,
+    keep: '留在原页面',
+    follow: '跟随当前页面',
+    backgroundTitle: () => '助手仍在原页面',
+    backgroundBody: (active) => `你正在查看“${active}”，后续浏览器操作仍会在原页面执行。`,
+    followCurrent: '改为跟随当前页',
+    lostTitle: '受控标签页已关闭',
+    lostBody: '为避免操作错页，浏览器操作已暂停。',
+    useCurrent: '使用当前页面',
+  },
   question: {
     eyebrow: '等待你的回答',
     title: '助手需要你确认',
@@ -250,8 +403,8 @@ const ZH: PanelCopy = {
   },
   settings: {
     back: '返回对话',
-    eyebrow: '偏好设置',
-    title: '连接与隐私',
+    eyebrow: '浏览器助手',
+    title: '设置',
     bridgeAddress: '桥地址',
     bridgeHelp: '留空时自动检测本机服务',
     bridgePlaceholder: '自动检测 3080 / 3081 / 3090 / 14389',
@@ -262,6 +415,10 @@ const ZH: PanelCopy = {
     sharingAuto: '自动共享（默认）',
     sharingAsk: '每次询问',
     sharingOff: '关闭',
+    approvalNotifications: '浏览器审批通知',
+    approvalNotificationsHelp: '侧栏关闭时收到审批请求，通过系统通知提醒你',
+    autoResumeSession: '续接上次会话',
+    autoResumeSessionHelp: '重新打开最近活跃的浏览器会话，而不是从新会话开始',
     trustedOrigins: '永久免确认域名',
     trustedOriginsHelp: '审批框可只信任本次侧栏会话。这里添加的域名仅在所有已知来源均受信任时免除操作确认。通配符包含主域及其子域，并严格区分协议和端口；`*.example.com` 默认使用 HTTPS。',
     trustedOriginInput: '要永久信任的域名（如 https://example.com 或 https://*.example.com）',
@@ -273,6 +430,33 @@ const ZH: PanelCopy = {
     save: '保存并连接',
     cancel: '取消',
     snapshotHint: (maxChars) => `页面快照上限为 ${maxChars} 字符，超出内容会被截断。可在 dsh 插件中调整 snapshotMaxChars。`,
+  },
+  update: {
+    eyebrow: '发布通道',
+    title: '软件更新',
+    idleTitle: '可以检查新版本',
+    idleBody: '与 GitHub main 上的扩展版本进行比较。',
+    checking: '正在检查…',
+    checkingBody: '正在读取 GitHub 上的最新扩展清单。',
+    currentTitle: '未发现更新',
+    currentBody: (latestVersion) => `仓库版本：v${latestVersion}。`,
+    availableTitle: (latestVersion) => `发现新版本 ${latestVersion}`,
+    availableLoadingBody: '正在确认此扩展的安装来源，然后再提供更新命令。',
+    availableManagedBody: '复制托管更新命令并在终端运行。',
+    availableCheckoutBody: '请先在原 checkout 中 pull 或切换到目标 revision，再重新运行其中的安装脚本。',
+    availableUnknownBody: '这个副本没有安装来源记录。请沿用最初的更新方式；这里不会复制可能覆盖来源的命令。',
+    reloadReminder: '更新完成后，打开 chrome://extensions，找到“dsh 浏览器助手”，点击卡片上的“重新加载”旋转箭头，然后重启 dsh。',
+    loadingInstall: '正在识别安装来源…',
+    managedInstall: '托管安装',
+    checkoutInstall: '本地 checkout',
+    unknownInstall: '安装来源未知',
+    errorTitle: '暂时无法检查更新',
+    errorBody: '请检查网络连接，然后重试。',
+    check: '检查更新',
+    copyManagedCommand: '复制更新命令',
+    copyCheckoutCommand: '复制 checkout 命令',
+    copied: '命令已复制',
+    copyError: '无法复制命令，请回到原安装来源重新运行安装脚本。',
   },
   app: {
     openSettings: '打开设置',
@@ -296,6 +480,26 @@ const ZH: PanelCopy = {
     sendMessage: '发送消息',
     stopTurn: '停止生成',
     stoppingTurn: '正在停止…',
+    addImages: '添加图片',
+    imageUnavailable: '当前 dsh 宿主未声明图片输入能力',
+    removeImage: (name) => `移除 ${name}`,
+    image: '图片',
+    imageLoading: '加载中…',
+    imageLoadFailed: '加载失败 · 重试',
+    openImage: '查看原图',
+    openNamedImage: (name) => `查看 ${name}`,
+    imagePreview: '图片预览',
+    closeImage: '关闭图片预览',
+    imageUnsupported: (name) => `${name} 不是当前 dsh 宿主支持的图片格式。`,
+    imageTooMany: (max) => `每条消息最多可添加 ${max} 张图片。`,
+    imageTooLarge: (name, max) => `${name} 超过单张图片 ${max} 的限制。`,
+    imageMessageTooLarge: (max) => `本条消息的图片总大小超过 ${max}。`,
+    imageDimensionTooLarge: (name, max) => `${name} 的宽或高超过 ${max}px。`,
+    imagePixelsTooLarge: (name, max) => `${name} 超过 ${max.toLocaleString()} 像素的限制。`,
+    imageDecodeFailed: (name) => `无法将 ${name} 解码为图片。`,
+    imageModelUnsupported: '当前模型不支持图片，请切换到支持图片的模型。',
+    imageSubagentUnsupported: '子智能体会话暂不支持图片。',
+    imageSendFailed: (reason) => `图片发送失败（${reason}）。草稿已恢复，请重试。`,
   },
 }
 

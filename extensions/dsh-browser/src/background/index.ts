@@ -1,15 +1,19 @@
 /**
  * Background service worker entry: owns the bridge connection, the gateway
- * RPC client, tool dispatch to the active tab, and the panel port service.
+ * RPC client, controlled-tab tool dispatch, and the panel port service.
  *
- * MV3 survival: the service worker is kept alive by the panel's open port
- * plus a half-minute `alarms` keepalive that re-arms the reconnect loop.
+ * MV3 survival: after the user opens the panel, its port plus a half-minute
+ * `alarms` keepalive re-arm the reconnect loop. Merely loading the extension
+ * never probes or claims the single-connection bridge.
  *
  * Panel port protocol (chrome.runtime.connect, name "dsh-panel"):
  *   panel → bg: { type: 'rpc', id, method, payload }
  *   panel → bg: { type: 'respond', id, rpcId, result }
  *   panel → bg: { type: 'settings', settings: Partial<Settings> }
+ *   panel → bg: { type: 'session.active', sessionId }
  *   panel → bg: { type: 'approval.response', id, decision }
+ *   panel → bg: { type: 'tab-affinity.response', revision, decision, sessionId }
+ *   panel → bg: { type: 'tab-affinity.rebind', id }
  *   panel → bg: { type: 'request-status' }
  *   bg → panel: { type: 'rpc.result', id, ok, result? | error? }
  *   bg → panel: { type: 'respond.result', id, ok, result? | error? }
@@ -17,19 +21,27 @@
  *   bg → panel: { type: 'event', frame: ServerFrame }
  *   bg → panel: { type: 'approval.request', request }
  *   bg → panel: { type: 'approval.resolved', id }
+ *   bg → panel: { type: 'session.resume-hint', sessionId }
+ *   bg → panel: { type: 'tab-affinity', state }
+ *   bg → panel: { type: 'tab-affinity.rebind.result', id, ok, error? }
  *
  * @module
  */
 
-import { isRespondResult, type BridgeCaps, type RespondResult } from '@deepseek-ai/dsh-bridge-browser/src/protocol.ts'
-import type { ServerFrame } from '@deepseek-ai/dsh-bridge-browser/src/protocol.ts'
-import { BRIDGE_CONFIG_PATH, BRIDGE_PATH } from '@deepseek-ai/dsh-bridge-browser/src/protocol.ts'
+import {
+  BRIDGE_INJECT_BROWSER_SNAPSHOT_METHOD,
+  isRespondResult,
+  type BridgeCaps,
+  type RespondResult,
+} from '@yuxianglin/dsh-bridge-browser/src/protocol.ts'
+import type { ServerFrame } from '@yuxianglin/dsh-bridge-browser/src/protocol.ts'
+import { BRIDGE_CONFIG_PATH, BRIDGE_PATH } from '@yuxianglin/dsh-bridge-browser/src/protocol.ts'
 import { BridgeClient, type BridgeState } from './bridge.ts'
 import { createRpc } from './rpc.ts'
-import { dispatchToolCall, type ToolCall } from './tools.ts'
+import { dispatchToolCall, resetTabSnapshot, type ToolAnswer, type ToolCall } from './tools.ts'
 import {
   isApprovalDecision,
-  type ApprovalDecision,
+  type ApprovalAuthorization,
   type ApprovalPrompt,
   type ApprovalRequest,
 } from '../security/approval.ts'
@@ -40,6 +52,18 @@ import {
   normalizeTrustedOrigin,
 } from '../security/trusted-origins.ts'
 import { TransientEventCache } from './transient-events.ts'
+import {
+  TabAffinityController,
+  type AffinityTab,
+  type TabAffinityDecision,
+} from './tab-affinity.ts'
+import { FocusedWindowTracker } from './focused-window.ts'
+import { ApprovalCoordinator, type ApprovalRequestResult } from './approval-coordinator.ts'
+import {
+  RECENT_SESSION_STORAGE_KEY,
+  RecentSessionTracker,
+  sessionIdFromFrame,
+} from './session-continuity.ts'
 
 /** User settings persisted in chrome.storage.local. */
 export interface Settings {
@@ -48,6 +72,10 @@ export interface Settings {
   sharePageContent: 'ask' | 'auto' | 'off'
   /** Origins whose state-changing actions may run without another prompt. */
   trustedActionOrigins: string[]
+  /** Show an OS notification when no side panel can display an approval. */
+  approvalNotifications: boolean
+  /** Restore the last active browser conversation when the panel reopens. */
+  autoResumeSession: boolean
 }
 
 const SETTINGS_DEFAULTS: Settings = {
@@ -56,6 +84,8 @@ const SETTINGS_DEFAULTS: Settings = {
   token: '',
   sharePageContent: 'auto',
   trustedActionOrigins: [],
+  approvalNotifications: true,
+  autoResumeSession: true,
 }
 
 /** 自动探测的候选端口（dsh web 默认 3080；桌面应用常用 14389；--port 覆盖的常见值）。 */
@@ -63,12 +93,14 @@ const DISCOVERY_PORTS = [3080, 3081, 3090, 14389]
 const LEGACY_LOCAL_URL = 'ws://127.0.0.1:3080'
 
 /** 探测本机 dsh 的桥地址：fetch /ext/bridge-config 直到成功。 */
-async function discoverBridge(): Promise<string | undefined> {
+async function discoverBridge(shouldContinue: () => boolean = () => true): Promise<string | undefined> {
   for (const port of DISCOVERY_PORTS) {
+    if (!shouldContinue()) return undefined
     try {
       const response = await fetch(`http://127.0.0.1:${port}/ext/bridge-config`, {
         signal: AbortSignal.timeout(1_500),
       })
+      if (!shouldContinue()) return undefined
       if (!response.ok) continue
       const body = await response.json() as { wsUrl?: unknown }
       if (typeof body.wsUrl === 'string' && body.wsUrl.startsWith('ws://')) return body.wsUrl
@@ -98,23 +130,77 @@ async function probeBridge(url: string): Promise<boolean> {
 }
 
 const STORAGE_KEY = 'dshSettings'
+const TAB_AFFINITY_STORAGE_KEY = 'dshTabAffinity'
+
+type StoredTabAffinity =
+  | { controlledTabId: number; keptActiveTabId?: number }
+  | { lost: true }
 
 let settings: Settings = { ...SETTINGS_DEFAULTS }
 let caps: BridgeCaps | null = null
 let bridge: BridgeClient | null = null
 let rpc: ReturnType<typeof createRpc> | null = null
 const panelPorts = new Set<chrome.runtime.Port>()
+const BRIDGE_KEEPALIVE_ALARM = 'bridge-keepalive'
+/** Invalidates an asynchronous discovery attempt when its panel lease ends. */
+let bridgeStartRevision = 0
 const interactionResponses = new InteractionResponseRouter()
 const transientEvents = new TransientEventCache()
+const tabAffinity = new TabAffinityController()
+const focusedWindow = new FocusedWindowTracker()
+const recentSession = new RecentSessionTracker({
+  read: async () => (await chrome.storage.session.get(RECENT_SESSION_STORAGE_KEY))[RECENT_SESSION_STORAGE_KEY],
+  write: async (sessionId) => {
+    await chrome.storage.session.set({ [RECENT_SESSION_STORAGE_KEY]: sessionId })
+  },
+})
 /** Ephemeral allowlist: cleared when the last side panel closes or this worker restarts. */
 const sessionTrustedActionOrigins = new Set<string>()
 /** Tool calls that can still be withdrawn by a bridge `tool.cancel` frame. */
 const activeToolCalls = new Map<string, AbortController>()
-const pendingApprovals = new Map<string, {
-  resolve: (decision: ApprovalDecision) => void
-  timer: ReturnType<typeof setTimeout>
-}>()
-const APPROVAL_TIMEOUT_MS = 30_000
+let lastPersistedAffinity: string | undefined
+let affinityPersistence = Promise.resolve()
+/** The next prompt waits until an accepted follow has refreshed dsh context. */
+let followedPageRefresh: Promise<void> = Promise.resolve()
+let activeFollowRefresh: AbortController | null = null
+const TAB_AFFINITY_REBIND_TIMEOUT_MS = 10_000
+
+class TabAffinityRebindError extends Error {
+  constructor(readonly code: 'no-active-tab' | 'timeout' | 'cancelled', message: string) {
+    super(message)
+    this.name = 'TabAffinityRebindError'
+  }
+}
+
+function rebindAbortReason(signal: AbortSignal): Error {
+  return signal.reason instanceof Error
+    ? signal.reason
+    : new TabAffinityRebindError('cancelled', getUiLocale() === 'zh' ? '标签页绑定已取消' : 'Tab binding was cancelled')
+}
+
+function throwIfRebindAborted(signal: AbortSignal): void {
+  if (signal.aborted) throw rebindAbortReason(signal)
+}
+
+/** Reject promptly on cancellation while safely consuming a late Chrome promise. */
+function abortable<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) return Promise.reject(rebindAbortReason(signal))
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = (): void => { reject(rebindAbortReason(signal)) }
+    signal.addEventListener('abort', onAbort, { once: true })
+    void promise.then(
+      (value) => {
+        signal.removeEventListener('abort', onAbort)
+        if (signal.aborted) reject(rebindAbortReason(signal))
+        else resolve(value)
+      },
+      (error: unknown) => {
+        signal.removeEventListener('abort', onAbort)
+        reject(error)
+      },
+    )
+  })
+}
 
 async function loadSettings(): Promise<Settings> {
   const stored = await chrome.storage.local.get(STORAGE_KEY)
@@ -138,11 +224,37 @@ function normalizeSettings(candidate: Settings): Settings {
   const sharePageContent = candidate.sharePageContent === 'auto' || candidate.sharePageContent === 'off'
     ? candidate.sharePageContent
     : candidate.sharePageContent === 'ask' ? 'ask' : 'auto'
-  return { ...candidate, sharePageContent, trustedActionOrigins: trusted }
+  return {
+    ...candidate,
+    sharePageContent,
+    trustedActionOrigins: trusted,
+    approvalNotifications: candidate.approvalNotifications !== false,
+    autoResumeSession: candidate.autoResumeSession !== false,
+  }
+}
+
+/** Settings load is shared by every lazy connection trigger. */
+const settingsReady = loadSettings().then((loaded) => {
+  settings = loaded
+})
+
+function armBridgeKeepalive(): void {
+  chrome.alarms.create(BRIDGE_KEEPALIVE_ALARM, { periodInMinutes: 0.5 })
+}
+
+function disarmBridgeKeepalive(): void {
+  void Promise.resolve(chrome.alarms.clear(BRIDGE_KEEPALIVE_ALARM)).catch(() => {})
 }
 
 function broadcastStatus(): void {
   const payload = { type: 'status', state: bridge?.state ?? ('stopped' as BridgeState), caps }
+  for (const port of panelPorts) {
+    try { port.postMessage(payload) } catch { /* port already closed */ }
+  }
+}
+
+function broadcastTabAffinity(): void {
+  const payload = { type: 'tab-affinity', state: tabAffinity.snapshot() }
   for (const port of panelPorts) {
     try { port.postMessage(payload) } catch { /* port already closed */ }
   }
@@ -160,6 +272,54 @@ function broadcastApprovalResolved(id: string): void {
   }
 }
 
+const APPROVAL_NOTIFICATION_PREFIX = 'dsh-browser-approval:'
+
+function approvalNotificationId(id: string): string {
+  return `${APPROVAL_NOTIFICATION_PREFIX}${id}`
+}
+
+function deliverApproval(request: ApprovalRequest): boolean {
+  let delivered = false
+  for (const port of panelPorts) {
+    try {
+      port.postMessage({ type: 'approval.request', request })
+      delivered = true
+    } catch { /* port already closed */ }
+  }
+  return delivered
+}
+
+function notifyApproval(request: ApprovalRequest, _windowId: number): void {
+  if (!settings.approvalNotifications) return
+  const copy = getUiLocale() === 'zh'
+    ? {
+        title: '浏览器操作等待确认',
+        message: '点击通知打开 dsh 浏览器助手，并在 60 秒内确认或拒绝。',
+      }
+    : {
+        title: 'Browser action awaiting approval',
+        message: 'Click to open dsh Browser Assistant, then allow or deny within 60 seconds.',
+      }
+  void Promise.resolve(chrome.notifications.create(approvalNotificationId(request.id), {
+    type: 'basic',
+    iconUrl: chrome.runtime.getURL('assets/icons/icon128.png'),
+    title: copy.title,
+    message: copy.message,
+    requireInteraction: true,
+  })).catch(() => {})
+}
+
+function clearApprovalNotification(id: string): void {
+  void Promise.resolve(chrome.notifications.clear(approvalNotificationId(id))).catch(() => {})
+}
+
+const approvals = new ApprovalCoordinator({
+  deliver: deliverApproval,
+  notify: notifyApproval,
+  clearNotification: clearApprovalNotification,
+  resolved: broadcastApprovalResolved,
+})
+
 function responseMessages(): { unavailable: string; timeout: string; duplicate: string; disconnected: string } {
   return getUiLocale() === 'zh'
     ? {
@@ -176,78 +336,319 @@ function responseMessages(): { unavailable: string; timeout: string; duplicate: 
       }
 }
 
-function settleApproval(id: string, decision: ApprovalDecision): void {
-  const pending = pendingApprovals.get(id)
-  if (pending === undefined) return
-  pendingApprovals.delete(id)
-  clearTimeout(pending.timer)
-  pending.resolve(decision)
-  broadcastApprovalResolved(id)
+function cancelPendingApprovals(): void {
+  approvals.cancelAll()
 }
 
-function requestApproval(prompt: ApprovalPrompt, signal: AbortSignal): Promise<ApprovalDecision> {
-  if (panelPorts.size === 0 || signal.aborted) return Promise.resolve('deny')
-  const request: ApprovalRequest = { ...prompt, id: crypto.randomUUID() }
-  return new Promise((resolve) => {
-    const onAbort = (): void => { settleApproval(request.id, 'deny') }
-    const resolveWithCleanup = (decision: ApprovalDecision): void => {
-      signal.removeEventListener('abort', onAbort)
-      resolve(decision)
+function summarizeTab(tab: chrome.tabs.Tab): AffinityTab | null {
+  if (tab.id === undefined) return null
+  return {
+    tabId: tab.id,
+    windowId: tab.windowId,
+    title: tab.title ?? '',
+    url: tab.url ?? '',
+  }
+}
+
+function storedAffinity(): StoredTabAffinity | null {
+  const state = tabAffinity.snapshot()
+  if (state.controlled !== null) {
+    return {
+      controlledTabId: state.controlled.tabId,
+      ...(state.status === 'background' && state.active !== null
+        ? { keptActiveTabId: state.active.tabId }
+        : {}),
     }
-    const timer = setTimeout(() => { settleApproval(request.id, 'deny') }, APPROVAL_TIMEOUT_MS)
-    pendingApprovals.set(request.id, { resolve: resolveWithCleanup, timer })
-    signal.addEventListener('abort', onAbort, { once: true })
-    // Close the small race between the initial check and listener setup.
-    if (signal.aborted) {
-      settleApproval(request.id, 'deny')
-      return
-    }
-    let delivered = false
-    for (const port of panelPorts) {
-      try {
-        port.postMessage({ type: 'approval.request', request })
-        delivered = true
-      } catch { /* port already closed */ }
-    }
-    if (!delivered) settleApproval(request.id, 'deny')
+  }
+  return state.status === 'lost' ? { lost: true } : null
+}
+
+function persistTabAffinity(): void {
+  const record = storedAffinity()
+  const serialized = JSON.stringify(record)
+  if (serialized === lastPersistedAffinity) return
+  lastPersistedAffinity = serialized
+  affinityPersistence = affinityPersistence.catch(() => {}).then(async () => {
+    if (record === null) await chrome.storage.session.remove(TAB_AFFINITY_STORAGE_KEY)
+    else await chrome.storage.session.set({ [TAB_AFFINITY_STORAGE_KEY]: record })
+  }).catch(() => {
+    if (lastPersistedAffinity === serialized) lastPersistedAffinity = undefined
   })
 }
 
-async function authorizeToolCall(prompt: ApprovalPrompt, signal: AbortSignal): Promise<boolean> {
-  if (signal.aborted) return false
+function observeActiveSummary(summary: AffinityTab): void {
+  const previousStatus = tabAffinity.snapshot().status
+  if (!tabAffinity.observeActive(summary)) return
+  if (previousStatus !== 'handoff' && tabAffinity.snapshot().status === 'handoff') {
+    activeFollowRefresh?.abort()
+    cancelPendingApprovals()
+  }
+  persistTabAffinity()
+  broadcastTabAffinity()
+}
+
+function observeActiveTab(tab: chrome.tabs.Tab): void {
+  const summary = summarizeTab(tab)
+  if (summary !== null) observeActiveSummary(summary)
+}
+
+async function syncActiveTab(windowId?: number, signal?: AbortSignal): Promise<chrome.tabs.Tab | undefined> {
+  const queryRevision = focusedWindow.beginQuery()
+  const query = windowId === undefined
+    ? { active: true, lastFocusedWindow: true }
+    : { active: true, windowId }
+  try {
+    const tabs = chrome.tabs.query(query)
+    const [tab] = signal === undefined ? await tabs : await abortable(tabs, signal)
+    if (signal !== undefined) throwIfRebindAborted(signal)
+    if (tab === undefined) return undefined
+    if (!focusedWindow.commitQuery(tab.windowId, queryRevision)) return undefined
+    if (signal !== undefined) throwIfRebindAborted(signal)
+    observeActiveTab(tab)
+    return tab
+  } catch {
+    if (signal !== undefined && signal.aborted) throw rebindAbortReason(signal)
+    return undefined
+  }
+}
+
+async function restoreTabAffinity(): Promise<void> {
+  let record: StoredTabAffinity | null = null
+  try {
+    const stored = await chrome.storage.session.get(TAB_AFFINITY_STORAGE_KEY)
+    const candidate = stored[TAB_AFFINITY_STORAGE_KEY] as Partial<StoredTabAffinity> | undefined
+    const controlledTabId = (candidate as { controlledTabId?: unknown } | undefined)?.controlledTabId
+    if (typeof controlledTabId === 'number' && Number.isInteger(controlledTabId) && controlledTabId >= 0) {
+      const keptActiveTabId = (candidate as { keptActiveTabId?: unknown }).keptActiveTabId
+      record = {
+        controlledTabId,
+        ...(typeof keptActiveTabId === 'number' && Number.isInteger(keptActiveTabId) && keptActiveTabId >= 0
+          ? { keptActiveTabId }
+          : {}),
+      }
+    } else if ((candidate as { lost?: unknown } | undefined)?.lost === true) {
+      record = { lost: true }
+    }
+    lastPersistedAffinity = candidate === undefined || record !== null
+      ? JSON.stringify(record)
+      : undefined
+  } catch {
+    // Session storage is a survival aid, not a reason to disable the bridge.
+  }
+
+  if (record !== null && 'controlledTabId' in record) {
+    try {
+      const controlled = summarizeTab(await chrome.tabs.get(record.controlledTabId))
+      if (controlled === null) tabAffinity.restoreLost()
+      else tabAffinity.restoreControlled(controlled)
+    } catch {
+      tabAffinity.restoreLost()
+    }
+  } else if (record?.lost === true) {
+    tabAffinity.restoreLost()
+  }
+
+  await syncActiveTab()
+  if (record !== null && 'keptActiveTabId' in record) {
+    const state = tabAffinity.snapshot()
+    if (state.status === 'handoff' && state.active?.tabId === record.keptActiveTabId) {
+      tabAffinity.decide('keep', state.revision)
+    }
+  }
+  persistTabAffinity()
+  broadcastTabAffinity()
+}
+
+const affinityReady = restoreTabAffinity()
+
+/** Bind at prompt submission so a switch while the model is thinking is visible. */
+async function ensureInitialTabBinding(): Promise<boolean> {
+  await affinityReady
+  if (tabAffinity.resolveTarget().kind !== 'initial') return true
+  try {
+    const tab = await syncActiveTab()
+    const summary = tab === undefined ? null : summarizeTab(tab)
+    if (summary === null) return false
+    if (tabAffinity.bindInitial(summary)) {
+      persistTabAffinity()
+      broadcastTabAffinity()
+    }
+    return true
+  } catch {
+    return false
+  }
+}
+
+function affinityFailure(kind: 'handoff' | 'lost' | 'missing'): ToolAnswer {
+  if (kind === 'handoff') {
+    return {
+      ok: false,
+      error: { code: 'action-failed', message: 'The user switched tabs, so browser operations are paused. In the side panel, choose whether to keep the previous page or follow the current page.' },
+    }
+  }
+  if (kind === 'lost') {
+    return {
+      ok: false,
+      error: { code: 'content-unavailable', message: 'The controlled tab was closed. Select the current page in the side panel before retrying.' },
+    }
+  }
+  return { ok: false, error: { code: 'no-active-tab', message: 'No active tab is available for browser operations.' } }
+}
+
+/** Resolve one stable tab target without allowing a manual switch to drift it. */
+async function resolveToolTab(): Promise<Pick<chrome.tabs.Tab, 'id' | 'url' | 'windowId'> | ToolAnswer> {
+  await affinityReady
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const resolution = tabAffinity.resolveTarget()
+    if (resolution.kind === 'handoff') return affinityFailure('handoff')
+    if (resolution.kind === 'lost') return affinityFailure('lost')
+    if (resolution.kind === 'initial') {
+      if (!await ensureInitialTabBinding()) return affinityFailure('missing')
+      continue
+    }
+    try {
+      const tab = await chrome.tabs.get(resolution.tab.tabId)
+      const summary = summarizeTab(tab)
+      if (summary === null) return affinityFailure('missing')
+      if (tabAffinity.observeTab(summary)) broadcastTabAffinity()
+      const current = tabAffinity.resolveTarget()
+      if (current.kind === 'handoff') return affinityFailure('handoff')
+      if (current.kind === 'lost') return affinityFailure('lost')
+      if (current.kind === 'target' && current.tab.tabId === summary.tabId) return tab
+    } catch {
+      if (tabAffinity.removeTab(resolution.tab.tabId)) {
+        cancelPendingApprovals()
+        persistTabAffinity()
+        broadcastTabAffinity()
+      }
+      return affinityFailure('lost')
+    }
+  }
+  return affinityFailure('handoff')
+}
+
+async function authorizeToolCall(
+  prompt: ApprovalPrompt,
+  signal: AbortSignal,
+  windowId: number,
+  sessionId?: string,
+): Promise<ApprovalAuthorization> {
+  if (signal.aborted) return 'cancelled'
   if (actionCoveredByTrustedOrigins(
     prompt,
     sessionTrustedActionOrigins,
     settings.trustedActionOrigins,
   )) {
-    return true
+    return 'approved'
   }
-  const decision = await requestApproval(prompt, signal)
-  if (signal.aborted) return false
+  const result: ApprovalRequestResult = await approvals.request(prompt, signal, windowId, sessionId)
+  if (signal.aborted) return 'cancelled'
+  if (result.status !== 'decision') return result.status
+  const { decision } = result
   if (decision === 'always-allow-reads' && prompt.kind === 'read') {
     await persistSettings({ sharePageContent: 'auto' })
-    return true
+    return 'approved'
   }
   if (decision === 'trust-session' && prompt.kind === 'action' && prompt.canTrust && prompt.origins.length === 1) {
     sessionTrustedActionOrigins.add(prompt.origins[0]!)
-    return true
+    return 'approved'
   }
   // Retain wire compatibility with panels from the previous build. The new UI
   // manages permanent trust explicitly in Settings instead of offering it in
   // the action dialog.
   if (decision === 'trust-origin' && prompt.kind === 'action' && prompt.canTrust && prompt.origins.length === 1) {
     await persistSettings({ trustedActionOrigins: [...settings.trustedActionOrigins, prompt.origins[0]!] })
-    return true
+    return 'approved'
   }
-  return decision === 'allow-once'
+  return decision === 'allow-once' ? 'approved' : 'denied'
 }
 
-/** 把协商的快照预算下发到活动标签页的 content script（配置生效）。 */
-async function pushBudgetToActiveTab(negotiated: BridgeCaps): Promise<void> {
-  const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true })
-  if (tab?.id === undefined) return
+/** Capture the newly controlled tab and seed it into this session's next Agent step. */
+async function refreshFollowedPage(sessionId: string, tabId: number): Promise<void> {
+  activeFollowRefresh?.abort()
+  const controller = new AbortController()
+  activeFollowRefresh = controller
   try {
-    await chrome.tabs.sendMessage(tab.id, {
+    const target = await resolveToolTab()
+    if ('ok' in target || target.id !== tabId || controller.signal.aborted) return
+    const budget = caps === null
+      ? undefined
+      : { maxItems: caps.maxInteractiveItems, maxChars: caps.snapshotMaxChars }
+    const answer = await dispatchToolCall(
+      { id: crypto.randomUUID(), name: 'browser_snapshot', args: {} },
+      settings.sharePageContent,
+      budget,
+      (prompt) => authorizeToolCall(prompt, controller.signal, target.windowId, sessionId),
+      controller.signal,
+      target,
+      () => target.id !== undefined && tabAffinity.allowsTarget(target.id),
+    )
+    if (!answer.ok || controller.signal.aborted || !tabAffinity.allowsTarget(tabId)) return
+    if (typeof answer.result !== 'object' || answer.result === null) return
+    const snapshot = (answer.result as { text?: unknown }).text
+    if (typeof snapshot !== 'string' || snapshot.trim() === '') return
+    await gatewayRpc(BRIDGE_INJECT_BROWSER_SNAPSHOT_METHOD, { sessionId, snapshot })
+  } finally {
+    if (activeFollowRefresh === controller) activeFollowRefresh = null
+  }
+}
+
+async function resolveTabAffinityResponse(response: {
+  revision: number
+  decision: TabAffinityDecision
+  sessionId: unknown
+}): Promise<void> {
+  await affinityReady
+  await syncActiveTab()
+  const accepted = tabAffinity.decide(response.decision, response.revision)
+  const controlled = accepted && response.decision === 'follow'
+    ? tabAffinity.snapshot().controlled
+    : null
+  if (controlled !== null) resetTabSnapshot(controlled.tabId)
+  if (accepted) persistTabAffinity()
+  broadcastTabAffinity()
+  if (controlled !== null && typeof response.sessionId === 'string' && response.sessionId.trim() !== '') {
+    await refreshFollowedPage(response.sessionId, controlled.tabId)
+  }
+}
+
+/** Move browser control to the current tab only after a fresh, valid query. */
+async function rebindTabAffinityToActive(signal: AbortSignal): Promise<void> {
+  await abortable(affinityReady, signal)
+  const tab = await syncActiveTab(undefined, signal)
+  throwIfRebindAborted(signal)
+  const summary = tab === undefined ? null : summarizeTab(tab)
+  if (summary === null) {
+    throw new TabAffinityRebindError('no-active-tab', getUiLocale() === 'zh'
+      ? '无法确定当前标签页，原会话和标签页绑定保持不变'
+      : 'The current tab could not be determined; the existing session and tab binding were left unchanged')
+  }
+
+  const previousControlledTabId = tabAffinity.snapshot().controlled?.tabId
+  activeFollowRefresh?.abort()
+  cancelAllToolCalls()
+  cancelPendingApprovals()
+  tabAffinity.rebindActive(summary)
+  if (previousControlledTabId !== undefined && previousControlledTabId !== summary.tabId) {
+    resetTabSnapshot(previousControlledTabId)
+  }
+  resetTabSnapshot(summary.tabId)
+  persistTabAffinity()
+  broadcastTabAffinity()
+}
+
+/** 把协商的快照预算下发到受控页（尚未绑定时使用活动页）。 */
+async function pushBudgetToControlledTab(negotiated: BridgeCaps): Promise<void> {
+  await affinityReady
+  const resolution = tabAffinity.resolveTarget()
+  const tabId = resolution.kind === 'target'
+    ? resolution.tab.tabId
+    : resolution.kind === 'initial'
+      ? (await chrome.tabs.query({ active: true, lastFocusedWindow: true }))[0]?.id
+      : undefined
+  if (tabId === undefined) return
+  try {
+    await chrome.tabs.sendMessage(tabId, {
       type: 'DSH_BUDGET',
       budget: { maxItems: negotiated.maxInteractiveItems, maxChars: negotiated.snapshotMaxChars },
     })
@@ -256,9 +657,10 @@ async function pushBudgetToActiveTab(negotiated: BridgeCaps): Promise<void> {
   }
 }
 
-/** Route one tool.call frame to the active tab and answer over the bridge. */
+/** Route one tool.call frame to the user-approved controlled tab. */
 function routeToolCall(call: ToolCall): void {
   if (bridge === null) return
+  recentSession.remember(call.sessionId)
   activeToolCalls.get(call.id)?.abort()
   const controller = new AbortController()
   activeToolCalls.set(call.id, controller)
@@ -268,13 +670,17 @@ function routeToolCall(call: ToolCall): void {
   const budget = caps === null
     ? undefined
     : { maxItems: caps.maxInteractiveItems, maxChars: caps.snapshotMaxChars }
-  void dispatchToolCall(
-    call,
-    settings.sharePageContent,
-    budget,
-    (prompt) => authorizeToolCall(prompt, controller.signal),
-    controller.signal,
-  ).then(
+  void resolveToolTab().then((target) => 'ok' in target
+    ? target
+    : dispatchToolCall(
+        call,
+        settings.sharePageContent,
+        budget,
+        (prompt) => authorizeToolCall(prompt, controller.signal, target.windowId, call.sessionId),
+        controller.signal,
+        target,
+        () => target.id !== undefined && tabAffinity.allowsTarget(target.id),
+      )).then(
     (answer) => {
       if (controller.signal.aborted) return
       const socket = bridge
@@ -311,10 +717,15 @@ function cancelAllToolCalls(): void {
 
 /** (Re)start the bridge with the current settings. 零配置：地址留空时自动探测；回环连接无需 token。 */
 async function startBridge(): Promise<void> {
+  const revision = ++bridgeStartRevision
+  if (panelPorts.size === 0) return
   let url = settings.bridgeUrl
   if (url === '') {
-    url = await discoverBridge() ?? ''
+    url = await discoverBridge(() => revision === bridgeStartRevision && panelPorts.size > 0) ?? ''
   }
+  // Discovery is asynchronous. A panel may have closed or a newer settings
+  // update may have started while its fetches were in flight.
+  if (revision !== bridgeStartRevision || panelPorts.size === 0) return
   if (url === '') {
     bridge?.stop()
     bridge = null
@@ -340,9 +751,11 @@ async function startBridge(): Promise<void> {
           transientEvents.clear()
         }
         broadcastStatus()
+        if (state === 'stopped' && panelPorts.size === 0) disarmBridgeKeepalive()
       },
       onFrame: (frame) => {
         if (frame.t === 'event') {
+          recentSession.noteActivity(sessionIdFromFrame(frame))
           transientEvents.ingest(frame)
           broadcastEvent(frame)
         }
@@ -354,9 +767,9 @@ async function startBridge(): Promise<void> {
       onHelloOk: (negotiated) => {
         caps = negotiated
         broadcastStatus()
-        void pushBudgetToActiveTab(negotiated)
+        void pushBudgetToControlledTab(negotiated)
       },
-    }, probeBridge)
+    }, probeBridge, () => panelPorts.size > 0)
     bridge = client
     rpc = createRpc(client)
   }
@@ -377,16 +790,36 @@ async function gatewayRpc(method: string, payload: unknown): Promise<unknown> {
 
 chrome.runtime.onConnect.addListener((port) => {
   if (port.name !== 'dsh-panel') return
+  const wasIdle = panelPorts.size === 0
+  const tabAffinityRebinds = new Map<string, {
+    controller: AbortController
+    timer: ReturnType<typeof setTimeout>
+  }>()
   panelPorts.add(port)
-  if (bridge === null) void startBridge()
+  if (wasIdle) armBridgeKeepalive()
+  void settingsReady.then(() => {
+    if (!panelPorts.has(port)) return
+    if (bridge === null || bridge.state === 'stopped') return startBridge()
+  })
   try { port.postMessage({ type: 'status', state: bridge?.state ?? ('stopped' as BridgeState), caps }) } catch { /* port closed */ }
+  void affinityReady.then(async () => {
+    await syncActiveTab()
+    try { port.postMessage({ type: 'tab-affinity', state: tabAffinity.snapshot() }) } catch { /* port closed */ }
+  })
   port.onMessage.addListener((message: unknown) => {
     if (typeof message !== 'object' || message === null) return
     const msg = message as { type?: string }
     switch (msg.type) {
       case 'rpc': {
         const rpcMsg = message as { id: string; method: string; payload?: unknown }
-        void gatewayRpc(rpcMsg.method, rpcMsg.payload).then(
+        const refresh = followedPageRefresh
+        const prepare = rpcMsg.method === 'session.prompt'
+          ? ensureInitialTabBinding().then(async (bound) => {
+              await refresh
+              return bound
+            })
+          : Promise.resolve(true)
+        void prepare.then(() => gatewayRpc(rpcMsg.method, rpcMsg.payload)).then(
           (result) => {
             try { port.postMessage({ type: 'rpc.result', id: rpcMsg.id, ok: true, result }) } catch { /* port closed */ }
           },
@@ -422,43 +855,219 @@ chrome.runtime.onConnect.addListener((port) => {
       }
       case 'settings': {
         const settingsMsg = message as { settings: Partial<Settings> }
-        void persistSettings(settingsMsg.settings).then(async () => {
-          await startBridge()
+        void settingsReady.then(async () => {
+          const previousConnection = { bridgeUrl: settings.bridgeUrl, token: settings.token }
+          await persistSettings(settingsMsg.settings)
+          if (panelPorts.size > 0) {
+            await startBridge()
+            broadcastStatus()
+            return
+          }
+          const connectionChanged = settings.bridgeUrl !== previousConnection.bridgeUrl
+            || settings.token !== previousConnection.token
+          if (!connectionChanged) return
+          // The settings write outlived its originating panel. Do not keep a
+          // healthy socket authenticated with stale connection settings: make
+          // the next explicit panel lease start from the persisted values.
+          bridgeStartRevision += 1
+          bridge?.stop()
+          bridge = null
+          rpc = null
+          caps = null
           broadcastStatus()
+          disarmBridgeKeepalive()
         })
+        break
+      }
+      case 'session.active': {
+        const session = message as { sessionId?: unknown }
+        recentSession.remember(session.sessionId)
         break
       }
       case 'approval.response': {
         const approval = message as { id?: unknown; decision?: unknown }
         if (typeof approval.id === 'string' && isApprovalDecision(approval.decision)) {
-          settleApproval(approval.id, approval.decision)
+          approvals.respond(approval.id, approval.decision)
         }
+        break
+      }
+      case 'tab-affinity.response': {
+        const response = message as { revision?: unknown; decision?: unknown; sessionId?: unknown }
+        if (typeof response.revision !== 'number'
+          || (response.decision !== 'keep' && response.decision !== 'follow')) break
+        const decision = resolveTabAffinityResponse({
+          revision: response.revision,
+          decision: response.decision,
+          sessionId: response.sessionId,
+        })
+        if (response.decision === 'follow') followedPageRefresh = decision.catch(() => {})
+        void decision.catch(() => {})
+        break
+      }
+      case 'tab-affinity.rebind': {
+        const request = message as { id?: unknown }
+        if (typeof request.id !== 'string') break
+        const requestId = request.id
+        if (tabAffinityRebinds.has(requestId)) break
+        const controller = new AbortController()
+        const timer = setTimeout(() => {
+          controller.abort(new TabAffinityRebindError('timeout', getUiLocale() === 'zh'
+            ? '绑定当前标签页超时，请重试'
+            : 'Binding the current tab timed out. Try again.'))
+        }, TAB_AFFINITY_REBIND_TIMEOUT_MS)
+        tabAffinityRebinds.set(requestId, { controller, timer })
+        void rebindTabAffinityToActive(controller.signal).then(
+          () => {
+            try { port.postMessage({ type: 'tab-affinity.rebind.result', id: requestId, ok: true }) } catch { /* port closed */ }
+          },
+          (error: unknown) => {
+            try {
+              port.postMessage({
+                type: 'tab-affinity.rebind.result',
+                id: requestId,
+                ok: false,
+                error: {
+                  code: error instanceof TabAffinityRebindError ? error.code : 'no-active-tab',
+                  message: error instanceof Error ? error.message : String(error),
+                },
+              })
+            } catch { /* port closed */ }
+          },
+        ).finally(() => {
+          const current = tabAffinityRebinds.get(requestId)
+          if (current?.controller !== controller) return
+          clearTimeout(current.timer)
+          tabAffinityRebinds.delete(requestId)
+        })
         break
       }
       case 'request-status':
         try {
           port.postMessage({ type: 'status', state: bridge?.state ?? ('stopped' as BridgeState), caps })
+          port.postMessage({ type: 'tab-affinity', state: tabAffinity.snapshot() })
           for (const frame of transientEvents.replay()) port.postMessage({ type: 'event', frame })
+          approvals.replay((request) => {
+            port.postMessage({ type: 'approval.request', request })
+            return true
+          })
+          void recentSession.ready.then(() => {
+            try {
+              port.postMessage({ type: 'session.resume-hint', sessionId: recentSession.current() })
+            } catch { /* port closed */ }
+          })
         } catch { /* port closed */ }
         break
     }
   })
   port.onDisconnect.addListener(() => {
+    for (const operation of tabAffinityRebinds.values()) {
+      clearTimeout(operation.timer)
+      operation.controller.abort(new TabAffinityRebindError('cancelled', getUiLocale() === 'zh'
+        ? '后台连接已断开，标签页绑定已取消'
+        : 'The background connection was lost, so tab binding was cancelled'))
+    }
+    tabAffinityRebinds.clear()
     panelPorts.delete(port)
     interactionResponses.removePort(port)
     if (panelPorts.size === 0) {
+      bridgeStartRevision += 1
+      bridge?.suspendReconnect()
       sessionTrustedActionOrigins.clear()
-      for (const id of [...pendingApprovals.keys()]) settleApproval(id, 'deny')
+      approvals.notifyPending()
+      if (bridge?.state !== 'connected') disarmBridgeKeepalive()
     }
   })
 })
 
+chrome.notifications.onClicked.addListener((notificationId) => {
+  if (!notificationId.startsWith(APPROVAL_NOTIFICATION_PREFIX)) return
+  const id = notificationId.slice(APPROVAL_NOTIFICATION_PREFIX.length)
+  const windowId = approvals.windowId(id)
+  if (windowId === undefined) return
+  clearApprovalNotification(id)
+  // Notification clicks are extension user gestures; Chrome permits
+  // sidePanel.open() only from such a user-initiated event.
+  void chrome.sidePanel.open({ windowId }).catch(() => {})
+})
+
+// ---- Tab affinity ----
+
+chrome.tabs.onActivated.addListener(({ tabId, windowId }) => {
+  void affinityReady.then(() => {
+    const activationRevision = focusedWindow.acceptActivation(windowId)
+    if (activationRevision === null) return
+    // Mark the switch before awaiting metadata so an already-running trusted
+    // action cannot slip through the handoff boundary.
+    observeActiveSummary({ tabId, windowId, title: '', url: '' })
+    return chrome.tabs.get(tabId).then((tab) => {
+      if (focusedWindow.isCurrent(activationRevision)) observeActiveTab(tab)
+    }).catch(() => {})
+  })
+})
+
+chrome.tabs.onUpdated.addListener((tabId, _changeInfo, tab) => {
+  void affinityReady.then(() => {
+    if (!tabAffinity.tracks(tabId)) return
+    const summary = summarizeTab(tab)
+    if (summary !== null && tabAffinity.observeTab(summary)) broadcastTabAffinity()
+  })
+})
+
+chrome.tabs.onReplaced.addListener((addedTabId, removedTabId) => {
+  void affinityReady.then(() => {
+    // onReplaced is an identity swap (for example prerender activation), not
+    // a close or user-visible switch. Transfer IDs synchronously before any
+    // metadata lookup so tool resolution never observes the removed target.
+    const controlledReplaced = tabAffinity.snapshot().controlled?.tabId === removedTabId
+    if (!tabAffinity.replaceTab(removedTabId, addedTabId)) return
+    // Only work targeting the replaced controlled page is stale. Replacing a
+    // merely visible background-affinity tab must not cancel work on the
+    // separately controlled page.
+    if (controlledReplaced) {
+      activeFollowRefresh?.abort()
+      cancelPendingApprovals()
+    }
+    resetTabSnapshot(removedTabId)
+    resetTabSnapshot(addedTabId)
+    persistTabAffinity()
+    broadcastTabAffinity()
+    return chrome.tabs.get(addedTabId).then((tab) => {
+      const summary = summarizeTab(tab)
+      if (summary !== null && tabAffinity.observeTab(summary)) broadcastTabAffinity()
+    }).catch(() => {})
+  })
+})
+
+chrome.tabs.onRemoved.addListener((tabId) => {
+  void affinityReady.then(() => {
+    if (!tabAffinity.removeTab(tabId)) return
+    activeFollowRefresh?.abort()
+    cancelPendingApprovals()
+    persistTabAffinity()
+    broadcastTabAffinity()
+  })
+})
+
+chrome.windows.onFocusChanged.addListener((windowId) => {
+  if (windowId === chrome.windows.WINDOW_ID_NONE) return
+  focusedWindow.markFocused(windowId)
+  void affinityReady.then(() => syncActiveTab(windowId))
+})
+
 // ---- Keepalive ----
 
-chrome.alarms.create('bridge-keepalive', { periodInMinutes: 0.5 })
 chrome.alarms.onAlarm.addListener((alarm) => {
-  if (alarm.name !== 'bridge-keepalive') return
-  if (bridge === null || bridge.state === 'reconnecting') void startBridge()
+  if (alarm.name !== BRIDGE_KEEPALIVE_ALARM) return
+  if (panelPorts.size === 0) {
+    if (bridge === null || bridge.state !== 'connected') disarmBridgeKeepalive()
+    return
+  }
+  // `stopped` is intentionally terminal until an explicit panel reopen or
+  // settings save. In particular, code 4000 means another browser owns the
+  // single bridge slot and the keepalive must not reclaim it.
+  if (bridge === null || bridge.state === 'reconnecting') {
+    void settingsReady.then(() => startBridge())
+  }
 })
 
 // ---- Boot ----
@@ -479,7 +1088,9 @@ if (typeof chrome.sidePanel !== 'undefined' && typeof chrome.sidePanel.setPanelB
   })
 }
 
-void loadSettings().then(async (loaded) => {
-  settings = loaded
-  await startBridge()
-})
+// Alarms survive some extension/service-worker restarts. Remove any stale
+// schedule left by an older eager-connection build; onConnect re-arms it.
+disarmBridgeKeepalive()
+
+// `settingsReady` intentionally has no bridge-start continuation: opening a
+// side panel is the first action allowed to claim the bridge connection.

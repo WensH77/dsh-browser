@@ -2,35 +2,32 @@
  * Panel ↔ background port client. The panel never touches the bridge or the
  * gateway directly; everything goes through the service worker's port.
  *
- * Firefox note: unlike Chrome, a Firefox MV3 background event page is NOT kept
- * alive by an open `runtime.connect` port — it may be unloaded and later
- * resumed as a fresh context, which invalidates the panel's port without the
- * background noticing. To survive that, this client:
- *   - routes every send through a guarded helper (no "postMessage on
- *     disconnected port" throws escape),
- *   - listens for `onDisconnect` and transparently re-establishes the port,
- *     re-binding the same listeners so the UI keeps working after a Firefox
- *     event-page wake.
- *
  * @module
  */
 
-import type { BridgeCaps, RespondResult } from '@deepseek-ai/dsh-bridge-browser/src/protocol.ts'
-import type { ServerFrame } from '@deepseek-ai/dsh-bridge-browser/src/protocol.ts'
+import type { BridgeCaps, RespondResult } from '@yuxianglin/dsh-bridge-browser/src/protocol.ts'
+import type { ServerFrame } from '@yuxianglin/dsh-bridge-browser/src/protocol.ts'
 import type { BridgeState } from '../background/bridge.ts'
 import type { Settings } from '../background/index.ts'
+import type { TabAffinityDecision, TabAffinityState } from '../background/tab-affinity.ts'
 import type { ApprovalDecision, ApprovalRequest } from '../security/approval.ts'
 import { getUiLocale } from '../i18n.ts'
 
 /** Panel-side subset of the extension settings. */
 export type PanelSettings = Settings
 
+interface RpcFailurePayload {
+  code?: unknown
+  message?: unknown
+  details?: unknown
+}
+
 interface RpcResultMessage {
   type: 'rpc.result'
   id: string
   ok: boolean
   result?: unknown
-  error?: { code: string; message: string }
+  error?: RpcFailurePayload
 }
 
 interface RespondResultMessage {
@@ -62,7 +59,44 @@ interface ApprovalResolvedMessage {
   id: string
 }
 
-type BackgroundMessage = RpcResultMessage | RespondResultMessage | StatusMessage | EventMessage | ApprovalRequestMessage | ApprovalResolvedMessage
+interface TabAffinityMessage {
+  type: 'tab-affinity'
+  state: TabAffinityState
+}
+
+interface TabAffinityRebindResultMessage {
+  type: 'tab-affinity.rebind.result'
+  id: string
+  ok: boolean
+  error?: { code: string; message: string }
+}
+
+interface SessionResumeHintMessage {
+  type: 'session.resume-hint'
+  sessionId: string | null
+}
+
+type BackgroundMessage = RpcResultMessage | RespondResultMessage | StatusMessage | EventMessage | ApprovalRequestMessage | ApprovalResolvedMessage | TabAffinityMessage | TabAffinityRebindResultMessage | SessionResumeHintMessage
+
+/** Structured gateway failure retained for product-level error handling. */
+export class PanelRpcError extends Error {
+  constructor(
+    readonly code: string,
+    message: string,
+    readonly details: unknown = {},
+  ) {
+    super(message)
+    this.name = 'PanelRpcError'
+  }
+}
+
+function panelRpcError(failure: RpcFailurePayload | undefined, fallbackMessage: string): PanelRpcError {
+  return new PanelRpcError(
+    typeof failure?.code === 'string' ? failure.code : 'rpc-failed',
+    typeof failure?.message === 'string' ? failure.message : fallbackMessage,
+    failure?.details ?? {},
+  )
+}
 
 /** The panel API surface. */
 export interface PanelApi {
@@ -72,39 +106,37 @@ export interface PanelApi {
   onEvent(callback: (frame: ServerFrame) => void): () => void
   onApprovalRequest(callback: (request: ApprovalRequest) => void): () => void
   onApprovalResolved(callback: (id: string) => void): () => void
+  onTabAffinity(callback: (state: TabAffinityState) => void): () => void
+  onSessionResumeHint(callback: (sessionId: string | null) => void): () => void
   respondToApproval(id: string, decision: ApprovalDecision): void
+  resolveTabAffinity(revision: number, decision: TabAffinityDecision, sessionId: string | null): void
+  rebindTabAffinity(): Promise<void>
+  setActiveSession(sessionId: string): void
   updateSettings(settings: Partial<PanelSettings>): void
   requestStatus(): void
 }
 
 /** Connect to the background service worker and return the panel API. */
 export function connectPanel(): PanelApi {
+  const port = chrome.runtime.connect({ name: 'dsh-panel' })
   const pending = new Map<string, { resolve: (value: unknown) => void; reject: (error: Error) => void }>()
   const pendingResponses = new Map<string, {
     resolve: (value: unknown) => void
     reject: (error: Error) => void
     timer: ReturnType<typeof setTimeout>
   }>()
+  const pendingRebinds = new Map<string, {
+    resolve: () => void
+    reject: (error: Error) => void
+  }>()
   const statusListeners = new Set<(state: BridgeState, caps: BridgeCaps | null) => void>()
   const eventListeners = new Set<(frame: ServerFrame) => void>()
   const approvalListeners = new Set<(request: ApprovalRequest) => void>()
   const approvalResolvedListeners = new Set<(id: string) => void>()
+  const tabAffinityListeners = new Set<(state: TabAffinityState) => void>()
+  const sessionResumeHintListeners = new Set<(sessionId: string | null) => void>()
 
-  let port: chrome.runtime.Port | null = null
-  /** Set while a reconnect is in flight so a burst of failures only re-connects once. */
-  let reconnecting = false
-
-  function failAll(error: Error): void {
-    for (const entry of pending.values()) entry.reject(error)
-    pending.clear()
-    for (const entry of pendingResponses.values()) {
-      clearTimeout(entry.timer)
-      entry.reject(error)
-    }
-    pendingResponses.clear()
-  }
-
-  function onMessage(message: unknown): void {
+  port.onMessage.addListener((message: unknown) => {
     if (typeof message !== 'object' || message === null) return
     const msg = message as BackgroundMessage
     switch (msg.type) {
@@ -115,11 +147,13 @@ export function connectPanel(): PanelApi {
         // The bridge relays the gateway's ServerResponse envelope verbatim
         // ({ type, rpcId, result: { ok, value | error } }); unwrap the value
         // so callers get the business payload, and surface business errors.
-        const envelope = msg.result as { result?: { ok?: boolean; value?: unknown; error?: { message?: string } } } | undefined
+        const envelope = msg.result as { result?: { ok?: boolean; value?: unknown; error?: RpcFailurePayload } } | undefined
         const business = envelope?.result
         if (msg.ok && business?.ok !== false) entry.resolve(business?.value)
-        else entry.reject(new Error(business?.error?.message ?? msg.error?.message
-          ?? (getUiLocale() === 'zh' ? 'RPC 请求失败' : 'RPC request failed')))
+        else entry.reject(panelRpcError(
+          business?.ok === false ? business.error : msg.error,
+          getUiLocale() === 'zh' ? 'RPC 请求失败' : 'RPC request failed',
+        ))
         break
       }
       case 'respond.result': {
@@ -144,68 +178,45 @@ export function connectPanel(): PanelApi {
       case 'approval.resolved':
         for (const listener of approvalResolvedListeners) listener(msg.id)
         break
-    }
-  }
-
-  /** Bind a fresh port's listeners and attach the disconnect/reconnect hook. */
-  function attach(next: chrome.runtime.Port): void {
-    port = next
-    next.onMessage.addListener(onMessage)
-    next.onDisconnect.addListener(() => {
-      // Reject anything still awaiting the old port, then reconnect.
-      failAll(new Error(getUiLocale() === 'zh' ? '后台连接已断开' : 'Background connection lost'))
-      void reconnect()
-    })
-  }
-
-  function connect(): void {
-    try {
-      const next = chrome.runtime.connect({ name: 'dsh-panel' })
-      attach(next)
-      // A fresh port knows nothing about the UI yet; ask for the current state.
-      safeSend({ type: 'request-status' })
-    } catch {
-      // Background unavailable right now; a later rpc() will retry the connect.
-      port = null
-    }
-  }
-
-  function reconnect(): Promise<void> {
-    if (reconnecting) return Promise.resolve()
-    reconnecting = true
-    // Give Firefox's event page a moment to (re)start before connecting.
-    return new Promise<void>((resolve) => {
-      setTimeout(() => {
-        reconnecting = false
-        connect()
-        resolve()
-      }, 150)
-    })
-  }
-
-  /** Guarded send: never throws on a stale port, and reconnects on failure. */
-  function safeSend(message: unknown): boolean {
-    const current = port
-    if (current !== null) {
-      try {
-        current.postMessage(message)
-        return true
-      } catch {
-        // Port is dead (e.g. Firefox event page was unloaded). Reconnect.
-        void reconnect()
+      case 'tab-affinity':
+        for (const listener of tabAffinityListeners) listener(msg.state)
+        break
+      case 'tab-affinity.rebind.result': {
+        const entry = pendingRebinds.get(msg.id)
+        if (entry === undefined) return
+        pendingRebinds.delete(msg.id)
+        if (msg.ok) entry.resolve()
+        else entry.reject(new Error(msg.error?.message
+          ?? (getUiLocale() === 'zh' ? '无法绑定当前标签页' : 'Failed to bind the current tab')))
+        break
       }
+      case 'session.resume-hint':
+        for (const listener of sessionResumeHintListeners) listener(msg.sessionId)
+        break
     }
-    return false
-  }
+  })
 
-  connect()
+  port.onDisconnect.addListener(() => {
+    const error = new Error(getUiLocale() === 'zh' ? '后台连接已断开' : 'Background connection lost')
+    for (const entry of pending.values()) entry.reject(error)
+    pending.clear()
+    for (const entry of pendingResponses.values()) {
+      clearTimeout(entry.timer)
+      entry.reject(error)
+    }
+    pendingResponses.clear()
+    for (const entry of pendingRebinds.values()) {
+      entry.reject(error)
+    }
+    pendingRebinds.clear()
+  })
 
   return {
     rpc<T>(method: string, payload?: unknown): Promise<T> {
       const id = crypto.randomUUID()
       return new Promise<T>((resolve, reject) => {
         pending.set(id, { resolve: (value) => resolve(value as T), reject })
-        safeSend({ type: 'rpc', id, method, payload })
+        port.postMessage({ type: 'rpc', id, method, payload })
       })
     },
     respond(rpcId, result) {
@@ -216,7 +227,7 @@ export function connectPanel(): PanelApi {
           reject(new Error(getUiLocale() === 'zh' ? '回答提交超时，请重试' : 'Sending the answer timed out. Try again.'))
         }, 35_000)
         pendingResponses.set(id, { resolve, reject, timer })
-        safeSend({ type: 'respond', id, rpcId, result })
+        port.postMessage({ type: 'respond', id, rpcId, result })
       })
     },
     onStatus(callback) {
@@ -235,14 +246,40 @@ export function connectPanel(): PanelApi {
       approvalResolvedListeners.add(callback)
       return () => { approvalResolvedListeners.delete(callback) }
     },
+    onTabAffinity(callback) {
+      tabAffinityListeners.add(callback)
+      return () => { tabAffinityListeners.delete(callback) }
+    },
+    onSessionResumeHint(callback) {
+      sessionResumeHintListeners.add(callback)
+      return () => { sessionResumeHintListeners.delete(callback) }
+    },
     respondToApproval(id, decision) {
-      safeSend({ type: 'approval.response', id, decision })
+      port.postMessage({ type: 'approval.response', id, decision })
+    },
+    resolveTabAffinity(revision, decision, sessionId) {
+      port.postMessage({ type: 'tab-affinity.response', revision, decision, sessionId })
+    },
+    rebindTabAffinity() {
+      const id = crypto.randomUUID()
+      return new Promise<void>((resolve, reject) => {
+        pendingRebinds.set(id, { resolve, reject })
+        try {
+          port.postMessage({ type: 'tab-affinity.rebind', id })
+        } catch (cause) {
+          pendingRebinds.delete(id)
+          reject(cause instanceof Error ? cause : new Error(String(cause)))
+        }
+      })
+    },
+    setActiveSession(sessionId) {
+      port.postMessage({ type: 'session.active', sessionId })
     },
     updateSettings(next) {
-      safeSend({ type: 'settings', settings: next })
+      port.postMessage({ type: 'settings', settings: next })
     },
     requestStatus() {
-      safeSend({ type: 'request-status' })
+      port.postMessage({ type: 'request-status' })
     },
   }
 }

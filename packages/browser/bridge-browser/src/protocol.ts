@@ -18,6 +18,9 @@ export const BRIDGE_PATH = '/ext/bridge'
 /** Zero-config discovery endpoint: returns `{ wsUrl }` for the extension. */
 export const BRIDGE_CONFIG_PATH = '/ext/bridge-config'
 
+/** Internal RPC used after an explicit tab handoff to seed the Agent's next step. */
+export const BRIDGE_INJECT_BROWSER_SNAPSHOT_METHOD = 'bridge.injectBrowserSnapshot'
+
 /** Seconds a fresh socket may take to present `hello` before it is closed. */
 export const HELLO_TIMEOUT_MS = 5_000
 
@@ -26,6 +29,12 @@ export const PING_INTERVAL_MS = 30_000
 
 /** Default bytes of the generated bearer token (256-bit). */
 export const DEFAULT_TOKEN_BYTES = 32
+
+/** Default rendered-snapshot character budget. */
+export const DEFAULT_SNAPSHOT_MAX_CHARS = 32_000
+
+/** Smallest snapshot budget that can carry both trust boundaries and page text. */
+export const MIN_SNAPSHOT_MAX_CHARS = 500
 
 /** Error codes a tool call may settle with. Open set: consumers must tolerate unknown codes. */
 export type ToolErrorCode =
@@ -52,7 +61,7 @@ export type RespondResult =
 export interface BridgeCaps {
   /** The extension renders page state as text only (no screenshots). */
   textOnly: true
-  /** Upper bound on one rendered snapshot's characters (plugin config). */
+  /** Upper bound on one rendered snapshot's characters (plugin config, minimum 500). */
   snapshotMaxChars: number
   /** Upper bound on interactive inventory items per snapshot (plugin config). */
   maxInteractiveItems: number
@@ -84,8 +93,8 @@ export type ServerFrame =
   | { t: 'respond.result'; id: string; ok: false; error: { code: string; message: string } }
   /** One gateway event envelope (the same server-request shape the GUI's /api/events.mux carries). */
   | { t: 'event'; frame: { rpcId: string; method: string; payload: unknown } }
-  /** A model-requested browser action to execute in the active tab. */
-  | { t: 'tool.call'; id: string; name: string; args: Record<string, unknown>; expiresAt: number }
+  /** A model-requested browser action to execute in the user-controlled tab. */
+  | { t: 'tool.call'; id: string; name: string; args: Record<string, unknown>; expiresAt: number; sessionId?: string }
   /** Withdraw a tool call that timed out or whose caller was cancelled. */
   | { t: 'tool.cancel'; id: string }
   /** Liveness probe. */
@@ -188,10 +197,19 @@ export function parseBridgeFrame(text: string): BridgeFrame | undefined {
         ? { t: 'event', frame: frame.frame as ServerFrame extends { t: 'event' } ? ServerFrame['frame'] : never }
         : undefined
     case 'tool.call':
+      if (frame.sessionId !== undefined
+        && (typeof frame.sessionId !== 'string' || frame.sessionId.trim() === '')) return undefined
       return typeof frame.id === 'string' && typeof frame.name === 'string'
         && typeof frame.args === 'object' && frame.args !== null && !Array.isArray(frame.args)
         && typeof frame.expiresAt === 'number' && Number.isFinite(frame.expiresAt) && frame.expiresAt > 0
-        ? { t: 'tool.call', id: frame.id, name: frame.name, args: frame.args as Record<string, unknown>, expiresAt: frame.expiresAt }
+        ? {
+            t: 'tool.call',
+            id: frame.id,
+            name: frame.name,
+            args: frame.args as Record<string, unknown>,
+            expiresAt: frame.expiresAt,
+            ...(typeof frame.sessionId === 'string' ? { sessionId: frame.sessionId } : {}),
+          }
         : undefined
     case 'tool.cancel':
       return typeof frame.id === 'string' ? { t: 'tool.cancel', id: frame.id } : undefined
@@ -210,7 +228,9 @@ function isCaps(value: unknown): value is BridgeCaps {
   if (typeof value !== 'object' || value === null) return false
   const caps = value as Record<string, unknown>
   return caps.textOnly === true
-    && typeof caps.snapshotMaxChars === 'number' && caps.snapshotMaxChars > 0
+    && typeof caps.snapshotMaxChars === 'number'
+    && Number.isInteger(caps.snapshotMaxChars)
+    && caps.snapshotMaxChars >= MIN_SNAPSHOT_MAX_CHARS
     && typeof caps.maxInteractiveItems === 'number' && caps.maxInteractiveItems > 0
 }
 

@@ -18,19 +18,105 @@ import { buildSnapshot, renderSnapshot } from './snapshot.ts'
 /** A settled action result. */
 export interface ActionResult {
   text: string
+  /** Page-authored snapshot delta; the background must wrap it as untrusted. */
+  pageContent?: string
+  /** A same-frame document navigation was scheduled after this response. */
+  navigationPending?: boolean
 }
 
-/** Cooperative settle wait: readyState complete plus a short quiet window. */
-async function settle(timeoutMs = 5_000): Promise<boolean> {
-  const deadline = Date.now() + timeoutMs
-  while (Date.now() < deadline) {
-    if (document.readyState === 'complete') {
-      await sleep(250)
-      return true
+/** How long an action should observe a ready document before returning. */
+export interface PageSettlePolicy {
+  /** Earliest return after the document becomes ready. */
+  minimumMs: number
+  /** Required DOM-quiet period before returning. */
+  quietMs: number
+  /** Hard cap after readiness; continuously animated pages cannot stall tools. */
+  maxAfterReadyMs: number
+  /** Hard cap while waiting for document readiness. */
+  timeoutMs: number
+}
+
+const TYPE_SETTLE: PageSettlePolicy = { minimumMs: 32, quietMs: 32, maxAfterReadyMs: 100, timeoutMs: 5_000 }
+const ACTION_SETTLE: PageSettlePolicy = { minimumMs: 100, quietMs: 50, maxAfterReadyMs: 250, timeoutMs: 5_000 }
+const SCROLL_SETTLE: PageSettlePolicy = { minimumMs: 50, quietMs: 50, maxAfterReadyMs: 150, timeoutMs: 5_000 }
+const EXPLICIT_WAIT_SETTLE: PageSettlePolicy = { minimumMs: 100, quietMs: 100, maxAfterReadyMs: 1_000, timeoutMs: 5_000 }
+/** Keep automatic action context focused while preserving the negotiated full snapshot budget. */
+const ACTION_DELTA_MAX_CHARS = 4_000
+
+/**
+ * Wait for document readiness and a mutation-free window. The old fixed delay
+ * charged every action equally and still returned too early when a late DOM
+ * update landed near its boundary. This observer returns early on already
+ * stable pages, extends only for real mutations, and stays bounded on pages
+ * with continuous animation.
+ */
+export function waitForPageSettled(policy: PageSettlePolicy = ACTION_SETTLE): Promise<boolean> {
+  const startedAt = performance.now()
+  let readyAt = document.readyState === 'complete' ? startedAt : undefined
+  let lastMutationAt = startedAt
+  let timer: ReturnType<typeof setTimeout> | undefined
+  let finished = false
+  let observer: MutationObserver | undefined
+
+  return new Promise((resolve) => {
+    const finish = (settled: boolean): void => {
+      if (finished) return
+      finished = true
+      if (timer !== undefined) clearTimeout(timer)
+      observer?.disconnect()
+      document.removeEventListener('readystatechange', schedule)
+      window.removeEventListener('load', schedule)
+      resolve(settled)
     }
-    await sleep(100)
-  }
-  return false
+    const check = (): void => {
+      timer = undefined
+      const now = performance.now()
+      if (readyAt === undefined && document.readyState === 'complete') {
+        readyAt = now
+        lastMutationAt = now
+      }
+      if (readyAt !== undefined) {
+        const afterReady = now - readyAt
+        const quietFor = now - lastMutationAt
+        if ((afterReady >= policy.minimumMs && quietFor >= policy.quietMs)
+          || afterReady >= policy.maxAfterReadyMs) {
+          finish(true)
+          return
+        }
+        const untilMinimum = Math.max(0, policy.minimumMs - afterReady)
+        const untilQuiet = Math.max(0, policy.quietMs - quietFor)
+        timer = setTimeout(check, Math.max(1, Math.min(policy.maxAfterReadyMs - afterReady, Math.max(untilMinimum, untilQuiet))))
+        return
+      }
+      const elapsed = now - startedAt
+      if (elapsed >= policy.timeoutMs) {
+        finish(false)
+        return
+      }
+      timer = setTimeout(check, Math.max(1, Math.min(100, policy.timeoutMs - elapsed)))
+    }
+    function schedule(): void {
+      if (finished) return
+      if (timer !== undefined) clearTimeout(timer)
+      timer = setTimeout(check, 0)
+    }
+
+    if (document.documentElement !== null) {
+      observer = new MutationObserver(() => {
+        lastMutationAt = performance.now()
+        schedule()
+      })
+      observer.observe(document.documentElement, {
+        subtree: true,
+        childList: true,
+        attributes: true,
+        characterData: true,
+      })
+    }
+    document.addEventListener('readystatechange', schedule)
+    window.addEventListener('load', schedule)
+    schedule()
+  })
 }
 
 function sleep(ms: number): Promise<void> {
@@ -40,7 +126,7 @@ function sleep(ms: number): Promise<void> {
 function elementOrThrow(ids: ElementIds, index: number): Element {
   const el = ids.elementByIndex(index)
   if (el === undefined) {
-    throw new ActionError('action-failed', `编号 ${index} 不存在：页面可能已变化，请重新 browser_snapshot 获取最新编号`)
+    throw new ActionError('action-failed', `Element [${index}] does not exist; the page may have changed. Call browser_snapshot again to get current indices.`)
   }
   return el
 }
@@ -75,6 +161,8 @@ function setNativeValue(input: HTMLInputElement | HTMLTextAreaElement, value: st
 export interface ActionContext {
   ids: ElementIds
   budget: SnapshotBudget
+  /** Enabled only when the background may share page content without another approval. */
+  includePageDelta?: boolean
 }
 
 /** Run one named action with its args. */
@@ -87,9 +175,9 @@ export async function runAction(action: string, args: Record<string, unknown>, c
     case 'browser_type':
       return typeAction(args, ctx)
     case 'browser_press':
-      return pressAction(args)
+      return pressAction(args, ctx)
     case 'browser_scroll':
-      return scrollAction(args)
+      return scrollAction(args, ctx)
     case 'browser_navigate':
       return navigateAction(args)
     case 'browser_back':
@@ -97,14 +185,13 @@ export async function runAction(action: string, args: Record<string, unknown>, c
     case 'browser_forward':
       return historyAction(1)
     case 'browser_reload':
-      location.reload()
-      return { text: '页面正在重新加载…' }
+      return reloadAction()
     case 'browser_get_text':
       return getTextAction(args)
     case 'browser_wait':
-      return waitAction(args)
+      return waitAction(args, ctx)
     default:
-      throw new ActionError('bad-args', `未知动作: ${action}`)
+      throw new ActionError('bad-args', `Unknown action: ${action}`)
   }
 }
 
@@ -125,35 +212,93 @@ function resetDeltaState(): void {
   lastSnapshot = null
 }
 
+/** Attach the settled page change while retaining the full view as the next delta baseline. */
+function withPageDelta(text: string, ctx: ActionContext): ActionResult {
+  if (ctx.includePageDelta !== true || lastSnapshot === null) return { text }
+  const view = buildSnapshot(ctx.ids, { delta: true, budget: ctx.budget }, lastSnapshot)
+  lastSnapshot = view
+  return {
+    text,
+    pageContent: renderSnapshot(view, true, Math.min(ctx.budget.maxChars, ACTION_DELTA_MAX_CHARS)),
+  }
+}
+
 async function clickAction(args: Record<string, unknown>, ctx: ActionContext): Promise<ActionResult> {
   const index = numberArg(args, 'index')
   const el = elementOrThrow(ctx.ids, index)
   el.scrollIntoView({ block: 'center', behavior: 'instant' })
   if (el instanceof HTMLAnchorElement) {
-    const urlBefore = location.href
-    el.click()
-    await settle()
-    return location.href !== urlBefore
-      ? { text: `已点击链接 [${index}]，页面正在跳转… 加载后请重新 browser_snapshot。` }
-      : { text: `已点击链接 [${index}]，页面未跳转。` }
+    const target = el.target.trim().toLowerCase()
+    const sameFrameTarget = target === '' || target === '_self'
+    let href: URL | undefined
+    try { href = new URL(el.href) } catch { /* let the native click handle unusual links */ }
+    const controlledNavigation = sameFrameTarget
+      && !el.hasAttribute('download')
+      && (href?.protocol === 'http:' || href?.protocol === 'https:')
+    if (controlledNavigation && href !== undefined) {
+      // Manual location assignment cannot preserve browser-managed link
+      // semantics such as referrer suppression, hyperlink auditing, or
+      // attribution registration. Keep native activation for those links,
+      // but do not claim a replacement document is guaranteed: an SPA may
+      // still cancel the click and remain in this document.
+      const hasReferrerPolicy = typeof el.referrerPolicy === 'string' && el.referrerPolicy !== ''
+      const requiresNativeActivation = el.relList.contains('noreferrer')
+        || hasReferrerPolicy
+        || el.hasAttribute('ping')
+        || el.hasAttribute('attributionsrc')
+      if (requiresNativeActivation) {
+        setTimeout(() => { el.click() }, 0)
+        return {
+          text: `Clicked link [${index}] using native browser activation. Call browser_snapshot to read the resulting state.`,
+        }
+      }
+      // Dispatch the click handlers without its default navigation so a
+      // client-side router can cancel synchronously and keep this document.
+      const shouldNavigate = el.dispatchEvent(new MouseEvent('click', {
+        bubbles: true,
+        cancelable: true,
+        composed: true,
+      }))
+      if (!shouldNavigate) {
+        await waitForPageSettled(ACTION_SETTLE)
+        return withPageDelta(`Clicked link [${index}].`, ctx)
+      }
+      const sameDocument = href.origin === location.origin
+        && href.pathname === location.pathname
+        && href.search === location.search
+      if (sameDocument) {
+        if (href.hash !== location.hash) location.hash = href.hash
+        await waitForPageSettled(ACTION_SETTLE)
+        return withPageDelta(`Clicked link [${index}].`, ctx)
+      }
+      // A cross-document navigation can unload this content script before an
+      // awaited response. Answer first and navigate in the next task.
+      setTimeout(() => { location.href = href.href }, 0)
+      return {
+        text: `Clicked link [${index}]. Call browser_snapshot again after navigation settles.`,
+        navigationPending: true,
+      }
+    }
+    setTimeout(() => { el.click() }, 0)
+    return { text: `Clicked link [${index}]. The link may open outside the controlled frame.` }
   }
   if (el instanceof HTMLButtonElement && el.disabled) {
-    throw new ActionError('action-failed', `按钮 [${index}] 处于禁用状态`)
+    throw new ActionError('action-failed', `Button [${index}] is disabled.`)
   }
   ;(el as HTMLElement).click()
-  await settle()
-  return { text: `已点击 [${index}]。` }
+  await waitForPageSettled(ACTION_SETTLE)
+  return withPageDelta(`Clicked [${index}].`, ctx)
 }
 
 async function typeAction(args: Record<string, unknown>, ctx: ActionContext): Promise<ActionResult> {
   const index = numberArg(args, 'index')
   const text = typeof args.text === 'string' ? args.text : ''
-  if (text === '') throw new ActionError('bad-args', 'text 不能为空')
+  if (text === '') throw new ActionError('bad-args', 'text must not be empty.')
   const replace = args.replace === true
   const el = elementOrThrow(ctx.ids, index)
   const contentEditable = el instanceof HTMLElement && el.isContentEditable
   if (!(el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement || contentEditable)) {
-    throw new ActionError('action-failed', `编号 ${index} 不是可输入元素（${el.tagName.toLowerCase()}）`)
+    throw new ActionError('action-failed', `Element [${index}] is not editable (${el.tagName.toLowerCase()}).`)
   }
   if (contentEditable) {
     if (replace) el.textContent = ''
@@ -163,24 +308,24 @@ async function typeAction(args: Record<string, unknown>, ctx: ActionContext): Pr
     if (replace) setNativeValue(el, '')
     setNativeValue(el, `${el.value}${text}`)
   }
-  await settle()
-  return { text: `已向 [${index}] 输入 ${text.length} 字符。` }
+  await waitForPageSettled(TYPE_SETTLE)
+  return withPageDelta(`Entered ${text.length} characters into [${index}].`, ctx)
 }
 
-async function pressAction(args: Record<string, unknown>): Promise<ActionResult> {
+async function pressAction(args: Record<string, unknown>, ctx: ActionContext): Promise<ActionResult> {
   const key = typeof args.key === 'string' && args.key !== '' ? args.key : ''
-  if (key === '') throw new ActionError('bad-args', 'key 不能为空')
+  if (key === '') throw new ActionError('bad-args', 'key must not be empty.')
   const target = document.activeElement instanceof HTMLElement ? document.activeElement : document.body
   target.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true }))
   target.dispatchEvent(new KeyboardEvent('keyup', { key, bubbles: true, cancelable: true }))
   if (key === 'Enter' && target instanceof HTMLInputElement && target.form !== null) {
     target.form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }))
   }
-  await settle()
-  return { text: `已发送按键 ${key}。` }
+  await waitForPageSettled(ACTION_SETTLE)
+  return withPageDelta(`Sent key "${key}".`, ctx)
 }
 
-async function scrollAction(args: Record<string, unknown>): Promise<ActionResult> {
+async function scrollAction(args: Record<string, unknown>, ctx: ActionContext): Promise<ActionResult> {
   const direction = typeof args.direction === 'string' ? args.direction : ''
   const amount = typeof args.amount === 'number' ? args.amount : Math.floor(window.innerHeight * 0.8)
   switch (direction) {
@@ -197,58 +342,73 @@ async function scrollAction(args: Record<string, unknown>): Promise<ActionResult
       window.scrollBy({ top: amount, behavior: 'instant' })
       break
     default:
-      throw new ActionError('bad-args', `direction 必须是 up/down/top/bottom，收到 "${direction}"`)
+      throw new ActionError('bad-args', `direction must be up, down, top, or bottom; received "${direction}".`)
   }
-  await settle()
-  return { text: `已滚动（${direction}）。` }
+  await waitForPageSettled(SCROLL_SETTLE)
+  return withPageDelta(`Scrolled ${direction}.`, ctx)
 }
 
 async function navigateAction(args: Record<string, unknown>): Promise<ActionResult> {
   const url = typeof args.url === 'string' && args.url !== '' ? args.url : ''
-  if (url === '') throw new ActionError('bad-args', 'url 不能为空')
+  if (url === '') throw new ActionError('bad-args', 'url must not be empty.')
   let parsed: URL
   try {
     parsed = new URL(url)
   } catch {
-    throw new ActionError('bad-args', `url 不是合法地址: ${url}`)
+    throw new ActionError('bad-args', `url is not valid: ${url}`)
   }
   if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
-    throw new ActionError('bad-args', `仅支持 http/https 地址，收到 ${parsed.protocol}`)
+    throw new ActionError('bad-args', `Only http and https URLs are supported; received ${parsed.protocol}.`)
   }
   resetDeltaState()
   // Cross-document navigation unloads this content script and destroys the
   // tabs.sendMessage response port before any await settles — so answer
   // FIRST, then navigate in a fresh task. The model re-snapshots after load.
   setTimeout(() => { location.href = parsed.href }, 0)
-  return { text: `正在导航到 ${parsed.href}… 页面加载后请重新 browser_snapshot。` }
+  return {
+    text: `Navigating to ${parsed.href}. Call browser_snapshot again after the page loads.`,
+    navigationPending: true,
+  }
 }
 
 async function historyAction(delta: 1 | -1): Promise<ActionResult> {
   resetDeltaState()
   // 同 navigate：先响应再导航（文档卸载会销毁响应端口）。
   setTimeout(() => { if (delta === -1) history.back(); else history.forward() }, 0)
-  return { text: '正在导航… 页面加载后请重新 browser_snapshot。' }
+  return {
+    text: 'Navigating through browser history. Call browser_snapshot again after the page loads.',
+    navigationPending: true,
+  }
+}
+
+function reloadAction(): ActionResult {
+  resetDeltaState()
+  setTimeout(() => { location.reload() }, 0)
+  return {
+    text: 'The page is reloading. Call browser_snapshot again after it loads.',
+    navigationPending: true,
+  }
 }
 
 async function getTextAction(args: Record<string, unknown>): Promise<ActionResult> {
   const selector = typeof args.selector === 'string' && args.selector !== '' ? args.selector : undefined
   const source = selector !== undefined ? document.querySelector(selector) : null
-  const text = source !== null ? pageText(source) : selector !== undefined ? `未找到元素: ${selector}` : pageText()
+  const text = source !== null ? pageText(source) : selector !== undefined ? `No element matched selector: ${selector}` : pageText()
   const truncated = truncate(text, 8_000)
-  return { text: truncated.text + (truncated.truncated > 0 ? `\n(截断 ${truncated.truncated} 字符)` : '') }
+  return { text: truncated.text + (truncated.truncated > 0 ? `\n(Truncated ${truncated.truncated} characters.)` : '') }
 }
 
-async function waitAction(args: Record<string, unknown>): Promise<ActionResult> {
+async function waitAction(args: Record<string, unknown>, ctx: ActionContext): Promise<ActionResult> {
   const ms = typeof args.ms === 'number' && args.ms > 0 ? args.ms : 0
-  await settle()
+  await waitForPageSettled(EXPLICIT_WAIT_SETTLE)
   if (ms > 0) await sleep(ms)
-  return { text: `页面已稳定${ms > 0 ? `（额外等待 ${ms}ms）` : ''}。` }
+  return withPageDelta(`The page is stable${ms > 0 ? ` after an additional ${ms}ms wait` : ''}.`, ctx)
 }
 
 function numberArg(args: Record<string, unknown>, name: string): number {
   const value = args[name]
   if (typeof value !== 'number' || !Number.isInteger(value) || value < 0) {
-    throw new ActionError('bad-args', `${name} 必须是非负整数，收到 ${String(value)}`)
+    throw new ActionError('bad-args', `${name} must be a non-negative integer; received ${String(value)}.`)
   }
   return value
 }

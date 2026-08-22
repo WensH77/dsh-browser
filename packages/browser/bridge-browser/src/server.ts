@@ -25,6 +25,7 @@ import type { Duplex } from 'node:stream'
 import { WebSocket, WebSocketServer } from 'ws'
 import type { MuxFrame, RpcRequest } from '@deepseek-ai/dsh-host-apiproxy/api'
 import {
+  BRIDGE_INJECT_BROWSER_SNAPSHOT_METHOD,
   HELLO_TIMEOUT_MS,
   PING_INTERVAL_MS,
   parseBridgeFrame,
@@ -55,7 +56,11 @@ const PRIVILEGED_METHODS = new Set([
 ])
 
 /** Session mutations whose WebSocket arrival order is behaviorally significant. */
-const ORDERED_SESSION_METHODS = new Set(['session.prompt', 'session.cancel'])
+const ORDERED_SESSION_METHODS = new Set([
+  BRIDGE_INJECT_BROWSER_SNAPSHOT_METHOD,
+  'session.prompt',
+  'session.cancel',
+])
 
 /** Loopback IPv4/IPv6 literals (IPv4-mapped included). Exported for tests and reuse. */
 export function isLoopbackAddress(address: string | undefined): boolean {
@@ -85,6 +90,8 @@ export interface BridgeServerDeps {
   toolTimeoutMs: number
   /** Capabilities to echo in `hello.ok` (negotiated snapshot budgets). */
   caps: BridgeCaps
+  /** Seed a followed-page snapshot into a live or deferred Agent session. */
+  injectBrowserSnapshot: (sessionId: string, snapshot: string) => void | Promise<void>
   /**
    * Test seam: force the remote address seen by the privilege gate. The
    * sandbox cannot bind arbitrary loopback literals, so the non-loopback
@@ -165,6 +172,7 @@ export class BridgeServer {
    * @param args - validated tool arguments.
    * @param signal - caller cancellation (abort settles the call as cancelled).
    * @param timeoutMs - per-call budget; defaults to the plugin config value.
+   * @param sessionId - optional owning Agent session for approval continuity.
    * @returns the extension's action result.
    * @throws BridgeToolError when no extension is connected, the call times
    *   out, is cancelled, or the extension reports a failure.
@@ -174,6 +182,7 @@ export class BridgeServer {
     args: Record<string, unknown>,
     signal: AbortSignal,
     timeoutMs: number = this.deps.toolTimeoutMs,
+    sessionId?: string,
   ): Promise<unknown> {
     const conn = this.current
     if (conn === null) {
@@ -210,7 +219,14 @@ export class BridgeServer {
       }, timeoutMs)
       signal.addEventListener('abort', onAbort, { once: true })
       this.pendingTools.set(id, { resolve, reject, timer })
-      conn.ws.send(JSON.stringify({ t: 'tool.call', id, name, args, expiresAt } satisfies BridgeFrame), (error) => {
+      conn.ws.send(JSON.stringify({
+        t: 'tool.call',
+        id,
+        name,
+        args,
+        expiresAt,
+        ...(sessionId === undefined ? {} : { sessionId }),
+      } satisfies BridgeFrame), (error) => {
         /* v8 ignore next -- teardown race: when the write fails, the socket's
         close handler settles the same call with the same code; the callback
         path is a defensive second settle, covered via the close path */
@@ -391,6 +407,30 @@ export class BridgeServer {
       sendFrame(conn.ws, { t: 'rpc.result', id: frame.id, ok: false, error: { code: 'forbidden', message: 'method is loopback-only' } })
       return
     }
+    if (frame.method === BRIDGE_INJECT_BROWSER_SNAPSHOT_METHOD) {
+      const payload = browserSnapshotPayload(frame.payload)
+      if (payload === undefined) {
+        sendFrame(conn.ws, {
+          t: 'rpc.result',
+          id: frame.id,
+          ok: false,
+          error: { code: 'bad-request', message: 'sessionId and snapshot must be non-empty strings' },
+        })
+        return
+      }
+      try {
+        await this.deps.injectBrowserSnapshot(payload.sessionId, payload.snapshot)
+        sendFrame(conn.ws, { t: 'rpc.result', id: frame.id, ok: true, result: { accepted: true } })
+      } catch (error: unknown) {
+        sendFrame(conn.ws, {
+          t: 'rpc.result',
+          id: frame.id,
+          ok: false,
+          error: { code: 'internal', message: String(error) },
+        })
+      }
+      return
+    }
     const body = JSON.stringify({ type: 'client-request', rpcId: frame.id, method: frame.method, payload: frame.payload })
     const request = new Request(new URL(`/api/${frame.method}`, 'http://dsh.internal'), {
       method: 'POST',
@@ -470,6 +510,14 @@ export class BridgeServer {
       pending.reject(new BridgeToolError('bridge-closed', 'the extension connection was replaced'))
     }
   }
+}
+
+function browserSnapshotPayload(payload: unknown): { sessionId: string; snapshot: string } | undefined {
+  if (typeof payload !== 'object' || payload === null || Array.isArray(payload)) return undefined
+  const { sessionId, snapshot } = payload as Record<string, unknown>
+  if (typeof sessionId !== 'string' || sessionId.trim() === '') return undefined
+  if (typeof snapshot !== 'string' || snapshot.trim() === '') return undefined
+  return { sessionId, snapshot }
 }
 
 function orderedSessionId(frame: Extract<ClientFrame, { t: 'rpc' }>): string | undefined {
