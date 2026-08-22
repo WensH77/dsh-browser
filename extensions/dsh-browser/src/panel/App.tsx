@@ -478,7 +478,9 @@ export function App(): React.JSX.Element {
     const offResumeHint = api.onSessionResumeHint((sessionId) => {
       setResumeHint({ ready: true, sessionId })
     })
-    api.requestStatus()
+    void api.requestStatus().catch((cause: unknown) => {
+      setError(cause instanceof Error ? cause.message : String(cause))
+    })
     return () => { offStatus(); offEvent(); offApproval(); offApprovalResolved(); offTabAffinity(); offResumeHint() }
   }, [api])
 
@@ -684,7 +686,7 @@ export function App(): React.JSX.Element {
     const created = await api.rpc<{ sessionId: string }>('session.create', {})
     if (sessionTransitionRef.current !== transition) return
     sessionRef.current = created.sessionId
-    api.setActiveSession(created.sessionId)
+    await api.setActiveSession(created.sessionId)
     setSessionTitle(null)
     sessionRuntimeRef.current.seedRunning(created.sessionId, false)
     applyHistory(created.sessionId, await readHistory(created.sessionId))
@@ -714,7 +716,7 @@ export function App(): React.JSX.Element {
             const runtime = sessionRuntimeRef.current.snapshot(id, entry?.running ?? false)
             prepareSessionSwitch(runtime.running, runtime.questions)
             sessionRef.current = id
-            api.setActiveSession(id)
+            await api.setActiveSession(id)
             setSessionTitle(entry === undefined ? null : projectedSessionTitle(entry) ?? sessionDisplayTitle(entry))
             applyHistory(id, history)
             return
@@ -767,7 +769,7 @@ export function App(): React.JSX.Element {
     const runtime = sessionRuntimeRef.current.snapshot(entry.sessionId, entry.running)
     prepareSessionSwitch(runtime.running, runtime.questions)
     sessionRef.current = entry.sessionId
-    api.setActiveSession(entry.sessionId)
+    await api.setActiveSession(entry.sessionId)
     setSessionTitle(projectedSessionTitle(entry) ?? sessionDisplayTitle(entry))
     try {
       await refreshHistory(entry.sessionId)
@@ -794,7 +796,7 @@ export function App(): React.JSX.Element {
       const runtime = sessionRuntimeRef.current.snapshot(sessionId)
       prepareSessionSwitch(runtime.running, runtime.questions)
       sessionRef.current = sessionId
-      api.setActiveSession(sessionId)
+      await api.setActiveSession(sessionId)
       setSessionTitle(sessionId)
       if (history !== undefined) applyHistory(sessionId, history)
       else setError(historyError instanceof Error ? historyError.message : String(historyError))
@@ -933,25 +935,37 @@ export function App(): React.JSX.Element {
     }
   }
 
-  function saveSettings(): void {
+  async function saveSettings(): Promise<void> {
     if (settings === null) return
-    api.updateSettings(settings)
-    setShowSettings(false)
+    try {
+      await api.updateSettings(settings)
+      setShowSettings(false)
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause))
+    }
   }
 
-  function decideApproval(decision: ApprovalDecision): void {
+  async function decideApproval(decision: ApprovalDecision): Promise<void> {
     const request = approvalQueue[0]
     if (request === undefined) return
-    api.respondToApproval(request.id, decision)
-    if (decision === 'always-allow-reads') {
-      setSettings((current) => current === null ? current : { ...current, sharePageContent: 'auto' })
+    try {
+      await api.respondToApproval(request.id, decision)
+      if (decision === 'always-allow-reads') {
+        setSettings((current) => current === null ? current : { ...current, sharePageContent: 'auto' })
+      }
+      updateApprovalQueue((current) => current.filter((entry) => entry.id !== request.id))
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause))
     }
-    updateApprovalQueue((current) => current.filter((entry) => entry.id !== request.id))
   }
 
-  function decideTabAffinity(decision: TabAffinityDecision): void {
+  async function decideTabAffinity(decision: TabAffinityDecision): Promise<void> {
     if (tabAffinity === null) return
-    api.resolveTabAffinity(tabAffinity.revision, decision, sessionRef.current)
+    try {
+      await api.resolveTabAffinity(tabAffinity.revision, decision, sessionRef.current)
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause))
+    }
   }
 
   function addTrustedOrigin(): void {

@@ -108,17 +108,16 @@ export interface PanelApi {
   onApprovalResolved(callback: (id: string) => void): () => void
   onTabAffinity(callback: (state: TabAffinityState) => void): () => void
   onSessionResumeHint(callback: (sessionId: string | null) => void): () => void
-  respondToApproval(id: string, decision: ApprovalDecision): void
-  resolveTabAffinity(revision: number, decision: TabAffinityDecision, sessionId: string | null): void
+  respondToApproval(id: string, decision: ApprovalDecision): Promise<void>
+  resolveTabAffinity(revision: number, decision: TabAffinityDecision, sessionId: string | null): Promise<void>
   rebindTabAffinity(): Promise<void>
-  setActiveSession(sessionId: string): void
-  updateSettings(settings: Partial<PanelSettings>): void
-  requestStatus(): void
+  setActiveSession(sessionId: string): Promise<void>
+  updateSettings(settings: Partial<PanelSettings>): Promise<void>
+  requestStatus(): Promise<void>
 }
 
 /** Connect to the background service worker and return the panel API. */
 export function connectPanel(): PanelApi {
-  const port = chrome.runtime.connect({ name: 'dsh-panel' })
   const pending = new Map<string, { resolve: (value: unknown) => void; reject: (error: Error) => void }>()
   const pendingResponses = new Map<string, {
     resolve: (value: unknown) => void
@@ -136,7 +135,10 @@ export function connectPanel(): PanelApi {
   const tabAffinityListeners = new Set<(state: TabAffinityState) => void>()
   const sessionResumeHintListeners = new Set<(sessionId: string | null) => void>()
 
-  port.onMessage.addListener((message: unknown) => {
+  let port: chrome.runtime.Port | null = null
+  let reconnectPromise: Promise<chrome.runtime.Port> | null = null
+
+  function onMessage(message: unknown): void {
     if (typeof message !== 'object' || message === null) return
     const msg = message as BackgroundMessage
     switch (msg.type) {
@@ -194,29 +196,122 @@ export function connectPanel(): PanelApi {
         for (const listener of sessionResumeHintListeners) listener(msg.sessionId)
         break
     }
-  })
+  }
 
-  port.onDisconnect.addListener(() => {
-    const error = new Error(getUiLocale() === 'zh' ? '后台连接已断开' : 'Background connection lost')
-    for (const entry of pending.values()) entry.reject(error)
-    pending.clear()
-    for (const entry of pendingResponses.values()) {
+  function connectionError(cause?: unknown): Error {
+    const fallback = getUiLocale() === 'zh' ? '后台连接已断开' : 'Background connection lost'
+    return cause instanceof Error ? cause : new Error(fallback)
+  }
+
+  function failAll(error: Error, preserve?: { kind: 'rpc' | 'respond' | 'rebind'; id: string }): void {
+    for (const [id, entry] of pending) {
+      if (preserve?.kind === 'rpc' && preserve.id === id) continue
+      entry.reject(error)
+      pending.delete(id)
+    }
+    for (const [id, entry] of pendingResponses) {
+      if (preserve?.kind === 'respond' && preserve.id === id) continue
       clearTimeout(entry.timer)
       entry.reject(error)
+      pendingResponses.delete(id)
     }
-    pendingResponses.clear()
-    for (const entry of pendingRebinds.values()) {
+    for (const [id, entry] of pendingRebinds) {
+      if (preserve?.kind === 'rebind' && preserve.id === id) continue
       entry.reject(error)
+      pendingRebinds.delete(id)
     }
-    pendingRebinds.clear()
-  })
+  }
+
+  function attach(next: chrome.runtime.Port): chrome.runtime.Port {
+    port = next
+    next.onMessage.addListener(onMessage)
+    next.onDisconnect.addListener(() => {
+      if (port !== next) return
+      port = null
+      failAll(connectionError())
+      // Firefox event pages and extension reloads can invalidate a live Port.
+      // Reconnect once while the panel is still open; later sends share the
+      // same attempt instead of opening competing ports.
+      void ensurePort(150).catch(() => {})
+    })
+    return next
+  }
+
+  function ensurePort(delayMs = 0): Promise<chrome.runtime.Port> {
+    if (port !== null) return Promise.resolve(port)
+    if (reconnectPromise !== null) return reconnectPromise
+
+    const attempt = new Promise<void>((resolve) => { setTimeout(resolve, delayMs) })
+      .then(() => port ?? attach(chrome.runtime.connect({ name: 'dsh-panel' })))
+    reconnectPromise = attempt
+    void attempt.then(
+      () => { if (reconnectPromise === attempt) reconnectPromise = null },
+      () => { if (reconnectPromise === attempt) reconnectPromise = null },
+    )
+    return attempt
+  }
+
+  function invalidate(
+    stale: chrome.runtime.Port,
+    error: Error,
+    preserve?: { kind: 'rpc' | 'respond' | 'rebind'; id: string },
+  ): void {
+    if (port !== stale) return
+    port = null
+    failAll(error, preserve)
+  }
+
+  /**
+   * Post once on the live port. Calls made during reconnect wait for the shared
+   * replacement; a synchronous stale-port failure retries only the message
+   * that is known not to have been accepted. Requests already accepted by the
+   * old port are rejected by invalidate() and are never replayed.
+   */
+  function send(
+    message: unknown,
+    preserve?: { kind: 'rpc' | 'respond' | 'rebind'; id: string },
+  ): Promise<void> {
+    const current = port
+    if (current !== null) {
+      try {
+        current.postMessage(message)
+        return Promise.resolve()
+      } catch (cause) {
+        invalidate(current, connectionError(cause), preserve)
+      }
+    }
+
+    return ensurePort(150).then((next) => {
+      try {
+        next.postMessage(message)
+      } catch (cause) {
+        const error = connectionError(cause)
+        invalidate(next, error)
+        throw error
+      }
+    })
+  }
+
+  try {
+    attach(chrome.runtime.connect({ name: 'dsh-panel' }))
+  } catch {
+    void ensurePort(150).catch(() => {})
+  }
 
   return {
     rpc<T>(method: string, payload?: unknown): Promise<T> {
       const id = crypto.randomUUID()
       return new Promise<T>((resolve, reject) => {
-        pending.set(id, { resolve: (value) => resolve(value as T), reject })
-        port.postMessage({ type: 'rpc', id, method, payload })
+        const entry = { resolve: (value: unknown) => resolve(value as T), reject }
+        pending.set(id, entry)
+        void send(
+          { type: 'rpc', id, method, payload },
+          { kind: 'rpc', id },
+        ).catch((error: unknown) => {
+          if (pending.get(id) !== entry) return
+          pending.delete(id)
+          reject(connectionError(error))
+        })
       })
     },
     respond(rpcId, result) {
@@ -226,8 +321,17 @@ export function connectPanel(): PanelApi {
           pendingResponses.delete(id)
           reject(new Error(getUiLocale() === 'zh' ? '回答提交超时，请重试' : 'Sending the answer timed out. Try again.'))
         }, 35_000)
-        pendingResponses.set(id, { resolve, reject, timer })
-        port.postMessage({ type: 'respond', id, rpcId, result })
+        const entry = { resolve, reject, timer }
+        pendingResponses.set(id, entry)
+        void send(
+          { type: 'respond', id, rpcId, result },
+          { kind: 'respond', id },
+        ).catch((error: unknown) => {
+          if (pendingResponses.get(id) !== entry) return
+          pendingResponses.delete(id)
+          clearTimeout(timer)
+          reject(connectionError(error))
+        })
       })
     },
     onStatus(callback) {
@@ -255,31 +359,34 @@ export function connectPanel(): PanelApi {
       return () => { sessionResumeHintListeners.delete(callback) }
     },
     respondToApproval(id, decision) {
-      port.postMessage({ type: 'approval.response', id, decision })
+      return send({ type: 'approval.response', id, decision })
     },
     resolveTabAffinity(revision, decision, sessionId) {
-      port.postMessage({ type: 'tab-affinity.response', revision, decision, sessionId })
+      return send({ type: 'tab-affinity.response', revision, decision, sessionId })
     },
     rebindTabAffinity() {
       const id = crypto.randomUUID()
       return new Promise<void>((resolve, reject) => {
-        pendingRebinds.set(id, { resolve, reject })
-        try {
-          port.postMessage({ type: 'tab-affinity.rebind', id })
-        } catch (cause) {
+        const entry = { resolve, reject }
+        pendingRebinds.set(id, entry)
+        void send(
+          { type: 'tab-affinity.rebind', id },
+          { kind: 'rebind', id },
+        ).catch((cause: unknown) => {
+          if (pendingRebinds.get(id) !== entry) return
           pendingRebinds.delete(id)
-          reject(cause instanceof Error ? cause : new Error(String(cause)))
-        }
+          reject(connectionError(cause))
+        })
       })
     },
     setActiveSession(sessionId) {
-      port.postMessage({ type: 'session.active', sessionId })
+      return send({ type: 'session.active', sessionId })
     },
     updateSettings(next) {
-      port.postMessage({ type: 'settings', settings: next })
+      return send({ type: 'settings', settings: next })
     },
     requestStatus() {
-      port.postMessage({ type: 'request-status' })
+      return send({ type: 'request-status' })
     },
   }
 }

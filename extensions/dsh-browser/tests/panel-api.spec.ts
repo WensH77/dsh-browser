@@ -251,4 +251,108 @@ describe('panel protocol', () => {
     })
     await expect(pending).rejects.toThrow('connection lost')
   })
+
+  it('waits for the replacement port when a call starts during reconnect', async () => {
+    vi.useFakeTimers()
+    let disconnectFirst: (() => void) | undefined
+    let receiveSecond: ((message: unknown) => void) | undefined
+    const firstPost = vi.fn()
+    const secondPost = vi.fn()
+    const first = {
+      postMessage: firstPost,
+      onMessage: { addListener: vi.fn() },
+      onDisconnect: { addListener: vi.fn((listener: () => void) => { disconnectFirst = listener }) },
+    }
+    const second = {
+      postMessage: secondPost,
+      onMessage: { addListener: vi.fn((listener: (message: unknown) => void) => { receiveSecond = listener }) },
+      onDisconnect: { addListener: vi.fn() },
+    }
+    const connect = vi.fn()
+      .mockReturnValueOnce(first)
+      .mockReturnValueOnce(second)
+    vi.stubGlobal('chrome', { runtime: { connect } })
+    vi.spyOn(crypto, 'randomUUID').mockReturnValue('12345678-1234-4234-8234-123456789ac0')
+    const api = connectPanel()
+
+    disconnectFirst?.()
+    const pending = api.rpc<string>('session.list', {})
+    expect(secondPost).not.toHaveBeenCalled()
+
+    await vi.advanceTimersByTimeAsync(150)
+    expect(connect).toHaveBeenCalledTimes(2)
+    expect(secondPost).toHaveBeenCalledWith({
+      type: 'rpc',
+      id: '12345678-1234-4234-8234-123456789ac0',
+      method: 'session.list',
+      payload: {},
+    })
+    receiveSecond?.({
+      type: 'rpc.result',
+      id: '12345678-1234-4234-8234-123456789ac0',
+      ok: true,
+      result: { result: { ok: true, value: 'reconnected' } },
+    })
+
+    await expect(pending).resolves.toBe('reconnected')
+  })
+
+  it('rejects in-flight work from a disconnected port without replaying side effects', async () => {
+    vi.useFakeTimers()
+    let disconnectFirst: (() => void) | undefined
+    const firstPost = vi.fn()
+    const secondPost = vi.fn()
+    const first = {
+      postMessage: firstPost,
+      onMessage: { addListener: vi.fn() },
+      onDisconnect: { addListener: vi.fn((listener: () => void) => { disconnectFirst = listener }) },
+    }
+    const second = {
+      postMessage: secondPost,
+      onMessage: { addListener: vi.fn() },
+      onDisconnect: { addListener: vi.fn() },
+    }
+    const connect = vi.fn()
+      .mockReturnValueOnce(first)
+      .mockReturnValueOnce(second)
+    vi.stubGlobal('chrome', { runtime: { connect } })
+    vi.spyOn(crypto, 'randomUUID').mockReturnValue('12345678-1234-4234-8234-123456789ac1')
+    const api = connectPanel()
+
+    const pending = api.rpc('session.prompt', { sessionId: 'session-1' })
+    disconnectFirst?.()
+    await expect(pending).rejects.toThrow('Background connection lost')
+    await vi.advanceTimersByTimeAsync(150)
+
+    expect(secondPost).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'rpc' }))
+  })
+
+  it('retries a message that a stale port synchronously refuses', async () => {
+    vi.useFakeTimers()
+    const first = {
+      postMessage: vi.fn(() => { throw new Error('Attempting to use a disconnected port object') }),
+      onMessage: { addListener: vi.fn() },
+      onDisconnect: { addListener: vi.fn() },
+    }
+    const secondPost = vi.fn()
+    const second = {
+      postMessage: secondPost,
+      onMessage: { addListener: vi.fn() },
+      onDisconnect: { addListener: vi.fn() },
+    }
+    const connect = vi.fn()
+      .mockReturnValueOnce(first)
+      .mockReturnValueOnce(second)
+    vi.stubGlobal('chrome', { runtime: { connect } })
+    const api = connectPanel()
+
+    const sent = api.updateSettings({ bridgeUrl: 'ws://127.0.0.1:3080' })
+    await vi.advanceTimersByTimeAsync(150)
+    await expect(sent).resolves.toBeUndefined()
+
+    expect(secondPost).toHaveBeenCalledWith({
+      type: 'settings',
+      settings: { bridgeUrl: 'ws://127.0.0.1:3080' },
+    })
+  })
 })
