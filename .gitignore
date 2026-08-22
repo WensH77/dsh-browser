@@ -4,3 +4,4 @@ node_modules/
 !benchmark/lib/
 !benchmark/lib/**
 **/dist/
+**/dist-firefox/

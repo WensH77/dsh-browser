@@ -88,8 +88,8 @@ const SETTINGS_DEFAULTS: Settings = {
   autoResumeSession: true,
 }
 
-/** 自动探测的候选端口（dsh web 默认 3080；--port 覆盖的常见值）。 */
-const DISCOVERY_PORTS = [3080, 3081, 3090]
+/** 自动探测的候选端口（dsh web 默认 3080；桌面应用常用 14389；--port 覆盖的常见值）。 */
+const DISCOVERY_PORTS = [3080, 3081, 3090, 14389]
 const LEGACY_LOCAL_URL = 'ws://127.0.0.1:3080'
 
 /** 探测本机 dsh 的桥地址：fetch /ext/bridge-config 直到成功。 */
@@ -985,9 +985,9 @@ chrome.notifications.onClicked.addListener((notificationId) => {
   const windowId = approvals.windowId(id)
   if (windowId === undefined) return
   clearApprovalNotification(id)
-  // Notification clicks are extension user gestures; Chrome permits
-  // sidePanel.open() only from such a user-initiated event.
-  void chrome.sidePanel.open({ windowId }).catch(() => {})
+  // Notification clicks are extension user gestures; both panel APIs require
+  // the call to remain inside this handler.
+  openAssistantPanel(windowId)
 })
 
 // ---- Tab affinity ----
@@ -1072,8 +1072,28 @@ chrome.alarms.onAlarm.addListener((alarm) => {
 
 // ---- Boot ----
 
-// Clicking the toolbar icon opens the side panel directly (Chrome 116+).
-void chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(() => {})
+interface FirefoxSidebarAction {
+  open(): Promise<void> | void
+}
+
+function openAssistantPanel(windowId?: number): void {
+  if (import.meta.env.EXT_TARGET === 'firefox') {
+    const sidebar = (chrome as unknown as { sidebarAction?: FirefoxSidebarAction }).sidebarAction
+    if (sidebar === undefined) return
+    void Promise.resolve(sidebar.open()).catch(() => {})
+    return
+  }
+  if (windowId !== undefined) void chrome.sidePanel.open({ windowId }).catch(() => {})
+}
+
+// Open the side panel when the toolbar icon is clicked.
+// Chrome 116+ uses chrome.sidePanel; Firefox has no sidePanel API, so the
+// action click opens the sidebar via sidebarAction.open() (user gesture).
+if (import.meta.env.EXT_TARGET === 'firefox') {
+  chrome.action.onClicked.addListener(() => { openAssistantPanel() })
+} else {
+  void chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(() => {})
+}
 
 // Alarms survive some extension/service-worker restarts. Remove any stale
 // schedule left by an older eager-connection build; onConnect re-arms it.

@@ -293,8 +293,10 @@ export class BridgeServer {
         // open a cross-origin socket to 127.0.0.1 with a loopback remote —
         // the loopback shortcut therefore requires a chrome-extension://
         // Origin (only extension contexts can present one; pages cannot
-        // forge the header). Non-loopback remotes must still present the
-        // bearer token.
+        // forge the header). Firefox moz-extension:// origins contain a
+        // per-install UUID rather than the manifest's stable Gecko ID, so
+        // they are not an identity boundary and must present the bearer token.
+        // Non-loopback remotes must also present the bearer token.
         const loopbackNoToken = isLoopbackAddress(remoteAddress)
           && typeof origin === 'string'
           && origin.startsWith('chrome-extension://')

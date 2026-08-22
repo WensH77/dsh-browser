@@ -1,4 +1,4 @@
-# dsh Browser Control Extension (Chrome MV3)
+# dsh Browser Control Extension (Chrome and Firefox MV3)
 
 English | [中文](README.zh.md)
 
@@ -23,7 +23,7 @@ The **browser-operation end** of dsh: the model reads and operates the browser p
 ## Architecture
 
 ```
-side panel (React) ◄─port─► background SW ◄─WS─► dsh bridge plugin
+side panel (React) ◄─port─► background SW/event page ◄─WS─► dsh bridge plugin
                                  │
                   tabs.sendMessage (DSH_ACTION)
                                  ▼
@@ -40,10 +40,11 @@ side panel (React) ◄─port─► background SW ◄─WS─► dsh bridge plug
 ```sh
 pnpm install
 pnpm --filter dsh-browser-extension run build
+pnpm --filter dsh-browser-extension run build:firefox
 pnpm --filter dsh-browser-extension run test
 ```
 
-Run these commands from the repository root; the build outputs `extensions/dsh-browser/dist/`.
+Run these commands from the repository root. Chrome outputs to `extensions/dsh-browser/dist/`; Firefox outputs to `extensions/dsh-browser/dist-firefox/`.
 
 ## Install and use
 
@@ -83,11 +84,11 @@ The recommended zero-configuration command does not require Git or a local clone
 
    Loading or reloading the extension is passive: it does not probe local ports or open a WebSocket until the side panel is opened. A healthy connection established by the user may remain available for background approvals after the panel closes, but it will not reconnect without an open panel if it drops or another browser replaces it.
 
-3. **Use it**: open a normal `http://` or `https://` page and click the DeepSeek whale icon. The extension auto-discovers local dsh and loopback connections require no address or token; settings are only needed for remote deployment. Chat directly or click "Read page" first.
+3. **Use it**: open a normal `http://` or `https://` page and click the DeepSeek whale icon. Both builds auto-discover local dsh. Chrome loopback connections need no address or token; Firefox must be given the token from `~/.dsh/ext-bridge-token` because a `moz-extension://` UUID is not an add-on identity. Chat directly or click "Read page" first.
 
 Pages that were already open before extension installation or reload are instrumented automatically on the first action, so they do not require a manual refresh. Browser-internal and protected pages such as `chrome://` and the Chrome Web Store cannot be read or operated.
 
-For extension-only development, clone the repository, run `pnpm --filter dsh-browser-extension run build` from its root, and load `extensions/dsh-browser/dist/` directly. Rebuild and reload the extension from `chrome://extensions` after code changes.
+For extension-only development, load `extensions/dsh-browser/dist/` from `chrome://extensions`, or run `build:firefox` and load `extensions/dsh-browser/dist-firefox/manifest.json` from `about:debugging#/runtime/this-firefox`. Rebuild and reload after code changes.
 
 ## Why browser operation stays text-only
 
@@ -102,7 +103,7 @@ For extension-only development, clone the repository, run `pnpm --filter dsh-bro
 
 ## Permissions
 
-`sidePanel` (sidebar), `storage` (settings and recent-session continuity), `notifications` (optional reminders for approvals received while the panel is closed), `tabs` + `activeTab` + `scripting` (observe tab changes and inject/message the explicitly controlled tab, including lazy recovery for pages opened before install), `webNavigation` (enumerate and bind messages to that tab's frame documents), `alarms` (SW keepalive, armed only after a panel first claims the bridge), and `http/https` (content-script injection on normal pages). The extension never changes the visible tab or silently follows a manual switch; background operation happens only after the user chooses to stay on the original tab.
+Chrome uses `sidePanel`; Firefox uses `sidebar_action`. Both request `storage` (settings and recent-session continuity), `notifications` (optional reminders for approvals received while the panel is closed), `tabs` + `activeTab` + `scripting` (observe tab changes and inject/message the explicitly controlled tab, including lazy recovery for pages opened before install), `webNavigation` (enumerate and bind messages to that tab's frame documents), `alarms` (background keepalive), and `http/https` (content-script injection on normal pages). Firefox's AMO manifest declares the browsing activity, website content/activity, and personal communications that the add-on sends to the configured dsh/model service. The extension never changes the visible tab or silently follows a manual switch; background operation happens only after the user chooses to stay on the original tab.
 
 ## Known limitations
 

@@ -11,6 +11,7 @@ const TOKEN = 'deadbeefdeadbeefdeadbeefdeadbeef'
 
 /** 扩展上下文的 Origin（回环免 token 的必要条件）。 */
 const EXT_ORIGIN = 'chrome-extension://test-extension-id'
+const FIREFOX_EXT_ORIGIN = 'moz-extension://per-install-uuid'
 
 /** Extension caps used by every hello in this suite. */
 const CAPS = { textOnly: true as const, snapshotMaxChars: 12_000, maxInteractiveItems: 60 }
@@ -120,6 +121,25 @@ describe('BridgeServer', () => {
     harnesses.push(h)
     const { ws, frames } = await connect(h.url, EXT_ORIGIN)
     send(ws, { t: 'hello', token: '', caps: CAPS })
+    await waitFor(() => frames.some((f) => f.t === 'hello.ok'))
+    expect(frames.find((f) => f.t === 'hello.ok')).toBeDefined()
+    ws.close()
+  })
+
+  it('requires a token from Firefox extension origins because their UUID is not an extension identity', async () => {
+    const h = await startBridge()
+    harnesses.push(h)
+    const { ws, done } = await connect(h.url, FIREFOX_EXT_ORIGIN)
+    send(ws, { t: 'hello', token: '', caps: CAPS })
+    await done
+    expect(ws.readyState).toBe(WebSocket.CLOSED)
+  })
+
+  it('accepts an authenticated Firefox extension origin', async () => {
+    const h = await startBridge()
+    harnesses.push(h)
+    const { ws, frames } = await connect(h.url, FIREFOX_EXT_ORIGIN)
+    send(ws, { t: 'hello', token: TOKEN, caps: CAPS })
     await waitFor(() => frames.some((f) => f.t === 'hello.ok'))
     expect(frames.find((f) => f.t === 'hello.ok')).toBeDefined()
     ws.close()
