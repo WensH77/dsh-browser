@@ -84,10 +84,30 @@ find_chrome_command() {
   local browser
 
   if is_macos; then
-    if [ -d "/Applications/Google Chrome.app" ]; then
-      printf '%s\n' "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
-      return 0
-    fi
+    local app bin name
+    local candidates=(
+      "/Applications/Google Chrome.app"
+      "/Applications/Google Chrome Canary.app"
+      "/Applications/Chromium.app"
+      "$HOME/Applications/Google Chrome.app"
+      "$HOME/Applications/Google Chrome Canary.app"
+      "$HOME/Applications/Chromium.app"
+    )
+    for app in "${candidates[@]}"; do
+      bin="$app/Contents/MacOS/$(basename "$app" .app)"
+      if [ -x "$bin" ]; then
+        printf '%s\n' "$bin"
+        return 0
+      fi
+    done
+
+    # Fallback: recognize apps registered with LaunchServices in non-standard locations.
+    for name in "Google Chrome" "Google Chrome Canary" "Chromium"; do
+      if open -Ra "$name" >/dev/null 2>&1; then
+        printf '%s\n' "$name"
+        return 0
+      fi
+    done
     return 1
   fi
 
@@ -105,8 +125,13 @@ open_chrome_extensions() {
   local chrome_cmd
 
   if is_macos; then
-    open -a "Google Chrome" "$url" 2>/dev/null && return 0
-    open -b com.google.Chrome "$url" 2>/dev/null && return 0
+    local name
+    for name in "Google Chrome" "Google Chrome Canary" "Chromium"; do
+      if open -Ra "$name" >/dev/null 2>&1; then
+        open -a "$name" "$url" >/dev/null 2>&1 && return 0
+      fi
+    done
+    open -b com.google.Chrome "$url" >/dev/null 2>&1 && return 0
     return 1
   fi
 
@@ -304,9 +329,13 @@ if [ "$IS_UPDATE" -eq 1 ]; then
   printf '\n'
   print_pair "    地址栏输入 chrome://extensions" "    Type chrome://extensions in the address bar"
   printf '\n'
-  print_pair "打开右上角 “开发者模式”" "Enable “Developer mode” in the upper-right corner"
-  print_pair "点左上角 “加载已解压的扩展程序”" "Click “Load unpacked” in the upper-left corner"
-  print_pair "选择这个目录：" "Select this directory:"
+  print_pair "如果页面上已有“dsh 浏览器助手”卡片：" "If the “dsh Browser Assistant” card is already listed:"
+  print_pair "  点击卡片上的“重新加载”按钮，让扩展加载新文件。" "  Click “Reload” on that card so it picks up the updated files."
+  printf '\n'
+  print_pair "如果没有该卡片（例如从未加载过）：" "If the card is not listed (e.g. it was never loaded):"
+  print_pair "  打开右上角 “开发者模式”" "  Enable “Developer mode” in the upper-right corner"
+  print_pair "  点左上角 “加载已解压的扩展程序”" "  Click “Load unpacked” in the upper-left corner"
+  print_pair "  选择这个目录：" "  Select this directory:"
   printf '   %s\n' "$DIST_DIR"
   printf '\n'
   print_pair "出现 “dsh 浏览器助手” 卡片即成功。" "When the “dsh Browser Assistant” card appears, it is loaded."
