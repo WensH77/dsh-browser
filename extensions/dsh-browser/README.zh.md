@@ -56,6 +56,12 @@ pnpm --filter dsh-browser-extension run test
    curl -fsSL https://raw.githubusercontent.com/Lum1104/dsh-browser/refs/heads/main/scripts/install.sh | bash
    ```
 
+   Windows 请改在 PowerShell 中运行：
+
+   ```powershell
+   $s="$env:TEMP\dsh-install.ps1"; irm https://raw.githubusercontent.com/Lum1104/dsh-browser/refs/heads/main/scripts/install.ps1 -OutFile $s; powershell -NoProfile -ExecutionPolicy Bypass -File $s
+   ```
+
    脚本会把托管 workspace 下载到 `~/.dsh/dsh-browser`，构建桥插件，把它的官方 bundle 注册到本机 dsh 的 `web` profile，再构建扩展并把产物复制到稳定目录 `~/.dsh/browser-extension`，然后打开 `chrome://extensions`。开启开发者模式，选择「加载已解压的扩展程序」，加载扩展目录。再次运行该命令会更新托管安装。
 
    clone 得到的 checkout 也使用同一个安装器，而且不会下载或覆盖源码：
@@ -65,6 +71,8 @@ pnpm --filter dsh-browser-extension run test
    cd dsh-browser
    ./scripts/install.sh
    ```
+
+   Windows checkout 请运行 `.\scripts\install.ps1`。
 
 2. **启动 dsh 并挂载桥插件**。可以使用 workspace 固定的运行时：
 
