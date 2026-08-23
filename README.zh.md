@@ -78,6 +78,8 @@ curl -fsSL https://raw.githubusercontent.com/Lum1104/dsh-browser/refs/heads/main
 
 安装器会下载 `main`、构建并注册桥插件、把 Chrome 扩展构建到 `~/.dsh/browser-extension`，然后打开 `chrome://extensions`。首次安装时，请把该目录作为已解压扩展加载；更新时点击**重新加载**。如果 dsh 已在运行，请重启。
 
+安装器支持 macOS 与 Linux。当系统提供 `pbcopy`、`wl-copy`、`xclip` 或 `xsel` 时，会把扩展路径复制到剪贴板；无论是否复制成功都会打印该路径。若未检测到 Chrome/Chromium，安装器会打印对应的安装命令；设置 `DSH_INSTALL_BROWSER=1` 可让安装器尝试自动安装。
+
 如需从源码 checkout 安装当前分支：
 
 ```sh

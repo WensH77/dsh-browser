@@ -78,6 +78,8 @@ curl -fsSL https://raw.githubusercontent.com/Lum1104/dsh-browser/refs/heads/main
 
 The installer downloads `main`, builds and registers the bridge plugin, builds the Chrome extension into `~/.dsh/browser-extension`, and opens `chrome://extensions`. On the first install, load that directory as an unpacked extension; on updates, click **Reload**. Restart dsh if it is already running.
 
+The installer supports macOS and Linux. It copies the extension path to the clipboard when `pbcopy`, `wl-copy`, `xclip`, or `xsel` is available, and prints the path either way. When no Chrome or Chromium install is found, it prints the command that installs one; set `DSH_INSTALL_BROWSER=1` to let the installer attempt that install itself.
+
 To install the current branch from a source checkout instead:
 
 ```sh
