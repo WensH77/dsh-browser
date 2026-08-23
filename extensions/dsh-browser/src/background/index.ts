@@ -14,6 +14,7 @@
  *   panel → bg: { type: 'approval.response', id, decision }
  *   panel → bg: { type: 'tab-affinity.response', revision, decision, sessionId }
  *   panel → bg: { type: 'tab-affinity.rebind', id }
+ *   panel → bg: { type: 'selection.clear' }
  *   panel → bg: { type: 'request-status' }
  *   bg → panel: { type: 'rpc.result', id, ok, result? | error? }
  *   bg → panel: { type: 'respond.result', id, ok, result? | error? }
@@ -22,6 +23,7 @@
  *   bg → panel: { type: 'approval.request', request }
  *   bg → panel: { type: 'approval.resolved', id }
  *   bg → panel: { type: 'session.resume-hint', sessionId }
+ *   bg → panel: { type: 'selection', selection }
  *   bg → panel: { type: 'tab-affinity', state }
  *   bg → panel: { type: 'tab-affinity.rebind.result', id, ok, error? }
  *
@@ -58,6 +60,8 @@ import {
   type TabAffinityDecision,
 } from './tab-affinity.ts'
 import { FocusedWindowTracker } from './focused-window.ts'
+import { SelectionTracker } from './selection.ts'
+import { parseSelectionCapture } from '../selection.ts'
 import { ApprovalCoordinator, type ApprovalRequestResult } from './approval-coordinator.ts'
 import {
   RECENT_SESSION_STORAGE_KEY,
@@ -148,6 +152,7 @@ const interactionResponses = new InteractionResponseRouter()
 const transientEvents = new TransientEventCache()
 const tabAffinity = new TabAffinityController()
 const focusedWindow = new FocusedWindowTracker()
+const selections = new SelectionTracker()
 const recentSession = new RecentSessionTracker({
   read: async () => (await chrome.storage.session.get(RECENT_SESSION_STORAGE_KEY))[RECENT_SESSION_STORAGE_KEY],
   write: async (sessionId) => {
@@ -258,6 +263,53 @@ function broadcastTabAffinity(): void {
   for (const port of panelPorts) {
     try { port.postMessage(payload) } catch { /* port already closed */ }
   }
+}
+
+function broadcastSelection(): void {
+  const payload = { type: 'selection', selection: selections.current() }
+  for (const port of panelPorts) {
+    try { port.postMessage(payload) } catch { /* port already closed */ }
+  }
+}
+
+/** Page selections are captured only for an open panel that may share text. */
+function selectionWatchEnabled(): boolean {
+  return panelPorts.size > 0 && settings.sharePageContent !== 'off'
+}
+
+let selectionWatchArmed = false
+
+/**
+ * Arm or disarm every content script. `selectionchange` fires on each drag in
+ * each tab, so the watcher stays off until a panel can actually show a quote.
+ */
+function syncSelectionWatch(): void {
+  const enabled = selectionWatchEnabled()
+  if (enabled === selectionWatchArmed) return
+  selectionWatchArmed = enabled
+  if (!enabled && selections.clear()) broadcastSelection()
+  void Promise.resolve(chrome.tabs.query({})).then((tabs) => {
+    for (const tab of tabs) {
+      if (tab.id === undefined) continue
+      void Promise.resolve(chrome.tabs.sendMessage(tab.id, { type: 'DSH_SELECTION_WATCH', enabled }))
+        .catch(() => { /* no content script in this tab */ })
+    }
+  }).catch(() => {})
+}
+
+/** Accept a capture from the page the user is actually looking at. */
+async function recordSelection(tabId: number, frameId: number, value: unknown): Promise<void> {
+  if (!selectionWatchEnabled()) return
+  const capture = parseSelectionCapture(value)
+  if (capture === null) return
+  await affinityReady
+  if (!tabAffinity.tracks(tabId)) {
+    // A selection in a tab this worker has not observed yet is normal right
+    // after a restart; re-query before rejecting the user's own highlight.
+    await syncActiveTab()
+    if (!tabAffinity.tracks(tabId)) return
+  }
+  if (selections.capture({ tabId, frameId }, capture)) broadcastSelection()
 }
 
 function broadcastEvent(frame: ServerFrame): void {
@@ -786,6 +838,24 @@ async function gatewayRpc(method: string, payload: unknown): Promise<unknown> {
   return rpc.request(method, payload)
 }
 
+// ---- Content script messages ----
+
+chrome.runtime.onMessage.addListener((message: unknown, sender, sendResponse) => {
+  if (typeof message !== 'object' || message === null) return
+  if (sender.id !== chrome.runtime.id) return
+  const tabId = sender.tab?.id
+  if (tabId === undefined) return
+  const type = (message as { type?: unknown }).type
+  if (type === 'DSH_CONTENT_READY') {
+    // navigation.ts also listens for this frame-ready announcement; only this
+    // listener answers it, telling a fresh document whether to watch selections.
+    sendResponse({ selectionWatch: selectionWatchEnabled() })
+    return
+  }
+  if (type !== 'DSH_SELECTION') return
+  void recordSelection(tabId, sender.frameId ?? 0, (message as { selection?: unknown }).selection)
+})
+
 // ---- Panel ports ----
 
 chrome.runtime.onConnect.addListener((port) => {
@@ -797,6 +867,7 @@ chrome.runtime.onConnect.addListener((port) => {
   }>()
   panelPorts.add(port)
   if (wasIdle) armBridgeKeepalive()
+  void settingsReady.then(syncSelectionWatch)
   void settingsReady.then(() => {
     if (!panelPorts.has(port)) return
     if (bridge === null || bridge.state === 'stopped') return startBridge()
@@ -804,7 +875,10 @@ chrome.runtime.onConnect.addListener((port) => {
   try { port.postMessage({ type: 'status', state: bridge?.state ?? ('stopped' as BridgeState), caps }) } catch { /* port closed */ }
   void affinityReady.then(async () => {
     await syncActiveTab()
-    try { port.postMessage({ type: 'tab-affinity', state: tabAffinity.snapshot() }) } catch { /* port closed */ }
+    try {
+      port.postMessage({ type: 'tab-affinity', state: tabAffinity.snapshot() })
+      port.postMessage({ type: 'selection', selection: selections.current() })
+    } catch { /* port closed */ }
   })
   port.onMessage.addListener((message: unknown) => {
     if (typeof message !== 'object' || message === null) return
@@ -858,6 +932,7 @@ chrome.runtime.onConnect.addListener((port) => {
         void settingsReady.then(async () => {
           const previousConnection = { bridgeUrl: settings.bridgeUrl, token: settings.token }
           await persistSettings(settingsMsg.settings)
+          syncSelectionWatch()
           if (panelPorts.size > 0) {
             await startBridge()
             broadcastStatus()
@@ -877,6 +952,11 @@ chrome.runtime.onConnect.addListener((port) => {
           broadcastStatus()
           disarmBridgeKeepalive()
         })
+        break
+      }
+      case 'selection.clear': {
+        // The user sent or dismissed the quote; every panel drops it together.
+        if (selections.clear()) broadcastSelection()
         break
       }
       case 'session.active': {
@@ -945,6 +1025,7 @@ chrome.runtime.onConnect.addListener((port) => {
         try {
           port.postMessage({ type: 'status', state: bridge?.state ?? ('stopped' as BridgeState), caps })
           port.postMessage({ type: 'tab-affinity', state: tabAffinity.snapshot() })
+          port.postMessage({ type: 'selection', selection: selections.current() })
           for (const frame of transientEvents.replay()) port.postMessage({ type: 'event', frame })
           approvals.replay((request) => {
             port.postMessage({ type: 'approval.request', request })
@@ -969,6 +1050,7 @@ chrome.runtime.onConnect.addListener((port) => {
     tabAffinityRebinds.clear()
     panelPorts.delete(port)
     interactionResponses.removePort(port)
+    syncSelectionWatch()
     if (panelPorts.size === 0) {
       bridgeStartRevision += 1
       bridge?.suspendReconnect()
@@ -1005,7 +1087,11 @@ chrome.tabs.onActivated.addListener(({ tabId, windowId }) => {
   })
 })
 
-chrome.tabs.onUpdated.addListener((tabId, _changeInfo, tab) => {
+chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+  // A quote from a page the user has left is stale, not context.
+  if ((changeInfo.status === 'loading' || changeInfo.url !== undefined) && selections.clearTab(tabId)) {
+    broadcastSelection()
+  }
   void affinityReady.then(() => {
     if (!tabAffinity.tracks(tabId)) return
     const summary = summarizeTab(tab)
@@ -1014,6 +1100,7 @@ chrome.tabs.onUpdated.addListener((tabId, _changeInfo, tab) => {
 })
 
 chrome.tabs.onReplaced.addListener((addedTabId, removedTabId) => {
+  if (selections.clearTab(removedTabId)) broadcastSelection()
   void affinityReady.then(() => {
     // onReplaced is an identity swap (for example prerender activation), not
     // a close or user-visible switch. Transfer IDs synchronously before any
@@ -1039,6 +1126,7 @@ chrome.tabs.onReplaced.addListener((addedTabId, removedTabId) => {
 })
 
 chrome.tabs.onRemoved.addListener((tabId) => {
+  if (selections.clearTab(tabId)) broadcastSelection()
   void affinityReady.then(() => {
     if (!tabAffinity.removeTab(tabId)) return
     activeFollowRefresh?.abort()

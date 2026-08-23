@@ -2,9 +2,11 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 const LISTENER_KEY = '__dshBrowserContentScriptListener__'
+const WATCHER_KEY = '__dshBrowserSelectionWatcher__'
 
 afterEach(() => {
   delete (globalThis as Record<string, unknown>)[LISTENER_KEY]
+  delete (globalThis as Record<string, unknown>)[WATCHER_KEY]
   vi.unstubAllGlobals()
   vi.resetModules()
 })
@@ -31,5 +33,44 @@ describe('content script registration', () => {
     expect(addListener.mock.calls[1]?.[0]).not.toBe(firstListener)
     expect(sendMessage).toHaveBeenCalledTimes(2)
     expect(sendMessage).toHaveBeenLastCalledWith({ type: 'DSH_CONTENT_READY' })
+  })
+})
+
+describe('selection watch arming', () => {
+  function stubChrome(readyResponse: unknown) {
+    const sendMessage = vi.fn(async (message: { type: string }) =>
+      message.type === 'DSH_CONTENT_READY' ? readyResponse : undefined)
+    vi.stubGlobal('chrome', {
+      runtime: { onMessage: { addListener: vi.fn(), removeListener: vi.fn() }, sendMessage },
+    })
+    return sendMessage
+  }
+
+  it('does not report selections until the service worker asks for them', async () => {
+    const sendMessage = stubChrome({ selectionWatch: false })
+    await import('../src/content/index.ts')
+    await vi.waitFor(() => { expect(sendMessage).toHaveBeenCalledTimes(1) })
+
+    window.getSelection = () => ({ toString: () => 'quoted text' }) as unknown as Selection
+    document.dispatchEvent(new Event('selectionchange'))
+    await new Promise((resolve) => { setTimeout(resolve, 400) })
+
+    expect(sendMessage).toHaveBeenCalledTimes(1)
+  })
+
+  it('reports a settled selection once a panel has armed the document', async () => {
+    const sendMessage = stubChrome({ selectionWatch: true })
+    await import('../src/content/index.ts')
+    await vi.waitFor(() => { expect(sendMessage).toHaveBeenCalledTimes(1) })
+
+    window.getSelection = () => ({ toString: () => 'quoted text' }) as unknown as Selection
+    document.dispatchEvent(new Event('selectionchange'))
+
+    await vi.waitFor(() => {
+      expect(sendMessage).toHaveBeenCalledWith({
+        type: 'DSH_SELECTION',
+        selection: expect.objectContaining({ text: 'quoted text' }),
+      })
+    }, { timeout: 2_000 })
   })
 })

@@ -54,10 +54,12 @@ describe('panel session transitions', () => {
       onApprovalRequest: vi.fn(() => unsubscribe),
       onApprovalResolved: vi.fn(() => unsubscribe),
       onTabAffinity: vi.fn(() => unsubscribe),
+      onSelection: vi.fn(() => unsubscribe),
       onSessionResumeHint: vi.fn((callback) => { onResumeHint = callback; return unsubscribe }),
       respondToApproval: vi.fn(async () => {}),
       resolveTabAffinity: vi.fn(async () => {}),
       rebindTabAffinity: vi.fn(async () => {}),
+      clearSelection: vi.fn(async () => {}),
       setActiveSession: vi.fn()
         .mockResolvedValueOnce(undefined)
         .mockRejectedValueOnce(new Error('runtime port unavailable')),

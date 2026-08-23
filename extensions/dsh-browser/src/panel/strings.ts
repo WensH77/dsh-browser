@@ -154,6 +154,10 @@ export interface PanelCopy {
     imageModelUnsupported: string
     imageSubagentUnsupported: string
     imageSendFailed: (reason: string) => string
+    selectionCount: (count: number) => string
+    selectionAttached: string
+    selectionTruncated: string
+    removeSelection: string
   }
 }
 
@@ -327,6 +331,10 @@ const EN: PanelCopy = {
     imageModelUnsupported: 'The current model does not support images; switch to a model that does.',
     imageSubagentUnsupported: 'Subagent sessions do not support images yet.',
     imageSendFailed: (reason) => `Sending images failed (${reason}). Your draft has been restored; try again.`,
+    selectionCount: (count) => count === 1 ? '1 selection' : `${count} selections`,
+    selectionAttached: 'Selected text',
+    selectionTruncated: '(truncated)',
+    removeSelection: 'Remove the selected text',
   },
 }
 
@@ -500,6 +508,10 @@ const ZH: PanelCopy = {
     imageModelUnsupported: '当前模型不支持图片，请切换到支持图片的模型。',
     imageSubagentUnsupported: '子智能体会话暂不支持图片。',
     imageSendFailed: (reason) => `图片发送失败（${reason}）。草稿已恢复，请重试。`,
+    selectionCount: (count) => `${count} 处选中内容`,
+    selectionAttached: '选中的网页内容',
+    selectionTruncated: '（已截断）',
+    removeSelection: '移除选中内容',
   },
 }
 
