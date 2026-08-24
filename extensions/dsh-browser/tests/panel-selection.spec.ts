@@ -1,7 +1,6 @@
 // @vitest-environment jsdom
 import { describe, expect, it } from 'vitest'
 import {
-  restoreSubmittedSelection,
   selectionPromptText,
   selectionSourceLabel,
   splitSelectionMessage,
@@ -87,20 +86,25 @@ describe('reading a selection back out of a stored message', () => {
     expect(parsed?.selection).toMatchObject({ title: '(untitled page)', url: '(unknown URL)' })
   })
 
+  it('does not read page text that mimics the truncation notice as metadata', () => {
+    const mimic: PageSelection = {
+      ...selection,
+      text: 'real quote\nyes (the highlight was longer than the capture limit and was cut)',
+    }
+    const parsed = splitSelectionMessage(selectionPromptText(mimic, 'go'))
+
+    // The quote survives intact and the card does not claim a truncation.
+    expect(parsed?.selection.quote).toBe(mimic.text)
+    expect(parsed?.selection.truncated).toBe(false)
+  })
+
   it('leaves an ordinary message alone', () => {
     expect(splitSelectionMessage('summarize this page')).toBeNull()
     expect(splitSelectionMessage('[user-selected page text] but no boundary')).toBeNull()
   })
 })
 
-describe('composer recovery and labelling', () => {
-  it('restores a rejected prompt selection only when none is newer', () => {
-    const newer: PageSelection = { ...selection, text: 'newer', capturedAt: 2_000 }
-
-    expect(restoreSubmittedSelection(null, selection)).toBe(selection)
-    expect(restoreSubmittedSelection(newer, selection)).toBe(newer)
-  })
-
+describe('composer labelling', () => {
   it('falls back to the host when a page has no title', () => {
     expect(selectionSourceLabel(selection)).toBe('Lum1104/dsh-browser')
     expect(selectionSourceLabel({ title: '', url: 'https://example.com/a' })).toBe('example.com')

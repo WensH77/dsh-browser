@@ -8,7 +8,9 @@
  *
  * The composed text is what the transcript stores, so the panel parses its own
  * format back into a quote card. Parsing survives a session resume, where the
- * only record of the attachment is the message itself.
+ * only record of the attachment is the message itself. Every field the parser
+ * reads is a labelled header line above the quote, so page text can never be
+ * mistaken for metadata by ending with the right sentence.
  *
  * @module
  */
@@ -19,8 +21,9 @@ import type { PageSelection } from '../selection.ts'
 const SELECTION_HEADER = '[user-selected page text] The user highlighted this text in their browser and attached it to the message below.'
 const TITLE_LABEL = 'Source title: '
 const URL_LABEL = 'Source URL: '
+const TRUNCATED_LABEL = 'Truncated: '
 const TEXT_LABEL = 'Selected text:'
-const TRUNCATED_NOTE = '(the highlight was longer than the capture limit and was cut here)'
+const TRUNCATED_NOTE = 'yes (the highlight was longer than the capture limit and was cut)'
 const OPEN_PREFIX = '<UNTRUSTED_PAGE_CONTENT nonce="'
 /** Generous ceiling: a capture is already bounded well below the boundary cost. */
 const SELECTION_BLOCK_MAX_CHARS = 8_000
@@ -43,9 +46,9 @@ export function selectionPromptText(selection: PageSelection, message: string): 
   const body = [
     `${TITLE_LABEL}${selection.title === '' ? '(untitled page)' : selection.title}`,
     `${URL_LABEL}${selection.url === '' ? '(unknown URL)' : selection.url}`,
+    `${TRUNCATED_LABEL}${selection.truncated ? TRUNCATED_NOTE : 'no'}`,
     TEXT_LABEL,
     selection.text,
-    ...(selection.truncated ? [TRUNCATED_NOTE] : []),
   ].join('\n')
   const block = `${SELECTION_HEADER}\n${wrapUntrustedContent(body, SELECTION_BLOCK_MAX_CHARS)}`
   return message === '' ? block : `${block}\n\n${message}`
@@ -69,18 +72,26 @@ export function splitSelectionMessage(text: string): { selection: AttachedSelect
   if (bodyEnd === -1) return null
 
   const lines = text.slice(bodyStart, bodyEnd).split('\n')
-  const title = lines[0]?.startsWith(TITLE_LABEL) === true ? lines[0].slice(TITLE_LABEL.length) : ''
-  const url = lines[1]?.startsWith(URL_LABEL) === true ? lines[1].slice(URL_LABEL.length) : ''
-  if (lines[2] !== TEXT_LABEL) return null
-  const quoteLines = lines.slice(3)
-  const truncated = quoteLines[quoteLines.length - 1] === TRUNCATED_NOTE
-  const quote = (truncated ? quoteLines.slice(0, -1) : quoteLines).join('\n')
+  const [titleLine, urlLine, truncatedLine, textLine] = lines
+  if (titleLine?.startsWith(TITLE_LABEL) !== true
+    || urlLine?.startsWith(URL_LABEL) !== true
+    || truncatedLine?.startsWith(TRUNCATED_LABEL) !== true
+    || textLine !== TEXT_LABEL) return null
 
-  // The trailing notice closes the boundary; the user's own words follow it.
-  const afterBoundary = text.indexOf('\n\n', bodyEnd + closing.length)
+  // Everything after the last header line is quote, so page text cannot be
+  // read as metadata however it happens to end.
   return {
-    selection: { title, url, quote, truncated },
-    message: afterBoundary === -1 ? '' : text.slice(afterBoundary + 2),
+    selection: {
+      title: titleLine.slice(TITLE_LABEL.length),
+      url: urlLine.slice(URL_LABEL.length),
+      quote: lines.slice(4).join('\n'),
+      truncated: truncatedLine.slice(TRUNCATED_LABEL.length) === TRUNCATED_NOTE,
+    },
+    // The trailing notice closes the boundary; the user's own words follow it.
+    message: (() => {
+      const afterBoundary = text.indexOf('\n\n', bodyEnd + closing.length)
+      return afterBoundary === -1 ? '' : text.slice(afterBoundary + 2)
+    })(),
   }
 }
 
