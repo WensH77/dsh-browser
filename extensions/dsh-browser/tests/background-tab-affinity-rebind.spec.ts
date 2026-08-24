@@ -85,9 +85,13 @@ function mockChrome() {
       onReplaced: chromeEvent<[number, number]>(),
       onRemoved: chromeEvent<[number]>(),
     },
+    webNavigation: {
+      onCommitted: chromeEvent<[{ tabId: number; frameId: number }]>(),
+    },
     windows: {
       WINDOW_ID_NONE: -1,
       onFocusChanged: chromeEvent<[number]>(),
+      onRemoved: chromeEvent<[number]>(),
     },
   } as unknown as typeof chrome)
   return { onConnect, query }
