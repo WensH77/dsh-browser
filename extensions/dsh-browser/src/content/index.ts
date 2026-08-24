@@ -48,7 +48,16 @@ function onMessage(message: unknown, _sender: chrome.runtime.MessageSender, send
     return
   }
   if (msg.type === 'DSH_SELECTION_WATCH') {
-    selectionWatcher.setEnabled((message as { enabled?: unknown }).enabled === true)
+    const command = message as { enabled?: unknown; epoch?: unknown; revision?: unknown }
+    const epoch = typeof command.epoch === 'string' ? command.epoch : undefined
+    const revision = typeof command.revision === 'number' ? command.revision : undefined
+    selectionWatcher.setEnabled(command.enabled === true, revision, epoch)
+    sendResponse({ ok: true })
+    return
+  }
+  if (msg.type === 'DSH_SELECTION_RESET') {
+    // The panel dropped this frame's quote; let the same passage be re-reported.
+    selectionWatcher.resetDedupe()
     sendResponse({ ok: true })
     return
   }
@@ -100,5 +109,12 @@ chrome.runtime.onMessage.addListener(onMessage)
 // and learns from the reply whether a side panel wants selection reports.
 void chrome.runtime.sendMessage({ type: 'DSH_CONTENT_READY' }).then((response: unknown) => {
   if (typeof response !== 'object' || response === null) return
-  selectionWatcher.setEnabled((response as { selectionWatch?: unknown }).selectionWatch === true)
+  const ready = response as {
+    selectionWatch?: unknown
+    selectionWatchEpoch?: unknown
+    selectionWatchRevision?: unknown
+  }
+  const epoch = typeof ready.selectionWatchEpoch === 'string' ? ready.selectionWatchEpoch : undefined
+  const revision = typeof ready.selectionWatchRevision === 'number' ? ready.selectionWatchRevision : undefined
+  selectionWatcher.setEnabled(ready.selectionWatch === true, revision, epoch)
 }).catch(() => {})

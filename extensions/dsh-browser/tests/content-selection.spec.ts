@@ -3,14 +3,30 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { MAX_SELECTION_CHARS } from '../src/selection.ts'
 import { SelectionWatcher, readSelectionCapture } from '../src/content/selection.ts'
 
-function selectText(value: string): void {
-  vi.stubGlobal('getSelection', () => ({ toString: () => value }))
-  window.getSelection = () => ({ toString: () => value }) as unknown as Selection
+function selectText(value: string, anchor: Node | null = document.body): void {
+  const selection = {
+    toString: () => value,
+    anchorNode: anchor,
+    focusNode: anchor,
+    rangeCount: 0,
+    getRangeAt: () => { throw new Error('no range') },
+  }
+  vi.stubGlobal('getSelection', () => selection)
+  window.getSelection = () => selection as unknown as Selection
+}
+
+/** Transient activation is what separates a user drag from a page's own call. */
+function setUserGesture(active: boolean): void {
+  Object.defineProperty(navigator, 'userActivation', {
+    configurable: true,
+    value: { isActive: active, hasBeenActive: true },
+  })
 }
 
 afterEach(() => {
   document.body.innerHTML = ''
   document.title = ''
+  Reflect.deleteProperty(navigator, 'userActivation')
   vi.unstubAllGlobals()
   vi.useRealTimers()
 })
@@ -57,9 +73,97 @@ describe('reading a page selection', () => {
 
     expect(readSelectionCapture()).toBeNull()
   })
+
+  it('never reads a contenteditable card-number widget', () => {
+    document.body.innerHTML = '<div id="cc" contenteditable="true" aria-label="Credit card number">4111 1111</div>'
+    selectText('4111 1111', document.getElementById('cc'))
+
+    expect(readSelectionCapture()).toBeNull()
+  })
+
+  it('never reads a password field inside a shadow root', () => {
+    document.body.innerHTML = '<div id="host"></div>'
+    const host = document.getElementById('host')!
+    const shadow = host.attachShadow({ mode: 'open' })
+    shadow.innerHTML = '<input id="inner" type="password" value="hunter2">'
+    const inner = shadow.getElementById('inner') as HTMLInputElement
+    inner.focus()
+    inner.setSelectionRange(0, 7)
+    selectText('')
+
+    expect(readSelectionCapture()).toBeNull()
+  })
 })
 
 describe('selection watcher', () => {
+  it('ignores a selection the page moved without a user gesture', () => {
+    vi.useFakeTimers()
+    const emit = vi.fn()
+    const watcher = new SelectionWatcher(emit, 10)
+    watcher.setEnabled(true)
+
+    // An iframe calling getSelection().selectAllChildren() looks like this.
+    setUserGesture(false)
+    selectText('attacker text')
+    document.dispatchEvent(new Event('selectionchange'))
+    vi.advanceTimersByTime(50)
+    expect(emit).not.toHaveBeenCalled()
+
+    setUserGesture(true)
+    selectText('the user own highlight')
+    document.dispatchEvent(new Event('selectionchange'))
+    vi.advanceTimersByTime(50)
+    expect(emit).toHaveBeenCalledTimes(1)
+  })
+
+  it('reports the same passage again after the panel dropped it', () => {
+    vi.useFakeTimers()
+    const emit = vi.fn()
+    const watcher = new SelectionWatcher(emit, 10)
+    watcher.setEnabled(true)
+
+    selectText('quoted text')
+    document.dispatchEvent(new Event('selectionchange'))
+    vi.advanceTimersByTime(20)
+    expect(emit).toHaveBeenCalledTimes(1)
+
+    watcher.resetDedupe()
+    document.dispatchEvent(new Event('selectionchange'))
+    vi.advanceTimersByTime(20)
+
+    expect(emit).toHaveBeenCalledTimes(2)
+  })
+
+  it('ignores an arm command older than the one already applied', () => {
+    vi.useFakeTimers()
+    const emit = vi.fn()
+    const watcher = new SelectionWatcher(emit, 10)
+
+    expect(watcher.setEnabled(true, 5, 'worker-a')).toBe(true)
+    // A slow DSH_CONTENT_READY reply computed before the panel opened.
+    expect(watcher.setEnabled(false, 2, 'worker-a')).toBe(false)
+
+    selectText('quoted text')
+    document.dispatchEvent(new Event('selectionchange'))
+    vi.advanceTimersByTime(20)
+
+    expect(emit).toHaveBeenCalledTimes(1)
+  })
+
+  it('accepts a fresh worker even when its revision counter restarted', () => {
+    vi.useFakeTimers()
+    const emit = vi.fn()
+    const watcher = new SelectionWatcher(emit, 10)
+
+    expect(watcher.setEnabled(true, 5, 'worker-a')).toBe(true)
+    expect(watcher.setEnabled(false, 0, 'worker-b')).toBe(true)
+    selectText('quoted text')
+    document.dispatchEvent(new Event('selectionchange'))
+    vi.advanceTimersByTime(20)
+
+    expect(emit).not.toHaveBeenCalled()
+  })
+
   it('stays silent until a panel arms it', () => {
     vi.useFakeTimers()
     const emit = vi.fn()
@@ -121,6 +225,42 @@ describe('selection watcher', () => {
     vi.advanceTimersByTime(20)
 
     expect(emit).toHaveBeenCalledTimes(1)
+  })
+
+  it('reports the same passage after the highlight was cleared', () => {
+    vi.useFakeTimers()
+    const emit = vi.fn()
+    const watcher = new SelectionWatcher(emit, 10)
+    watcher.setEnabled(true)
+
+    selectText('quoted text')
+    document.dispatchEvent(new Event('selectionchange'))
+    vi.advanceTimersByTime(20)
+    selectText('')
+    document.dispatchEvent(new Event('selectionchange'))
+    vi.advanceTimersByTime(20)
+    selectText('quoted text')
+    document.dispatchEvent(new Event('selectionchange'))
+    vi.advanceTimersByTime(20)
+
+    expect(emit).toHaveBeenCalledTimes(2)
+  })
+
+  it('reports when the same captured prefix becomes truncated', () => {
+    vi.useFakeTimers()
+    const emit = vi.fn()
+    const watcher = new SelectionWatcher(emit, 10)
+    watcher.setEnabled(true)
+
+    selectText('x'.repeat(MAX_SELECTION_CHARS))
+    document.dispatchEvent(new Event('selectionchange'))
+    vi.advanceTimersByTime(20)
+    selectText('x'.repeat(MAX_SELECTION_CHARS + 1))
+    document.dispatchEvent(new Event('selectionchange'))
+    vi.advanceTimersByTime(20)
+
+    expect(emit).toHaveBeenCalledTimes(2)
+    expect(emit.mock.calls[1]?.[0]).toMatchObject({ truncated: true })
   })
 
   it('does not resend an unchanged highlight', () => {

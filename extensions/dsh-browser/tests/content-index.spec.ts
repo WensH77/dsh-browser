@@ -5,6 +5,7 @@ const LISTENER_KEY = '__dshBrowserContentScriptListener__'
 const WATCHER_KEY = '__dshBrowserSelectionWatcher__'
 
 afterEach(() => {
+  Reflect.deleteProperty(navigator, 'userActivation')
   delete (globalThis as Record<string, unknown>)[LISTENER_KEY]
   delete (globalThis as Record<string, unknown>)[WATCHER_KEY]
   vi.unstubAllGlobals()
@@ -38,11 +39,19 @@ describe('content script registration', () => {
 
 describe('selection watch arming', () => {
   function stubChrome(readyResponse: unknown) {
+    // An event-driven capture requires the user's own transient activation.
+    Object.defineProperty(navigator, 'userActivation', {
+      configurable: true,
+      value: { isActive: true, hasBeenActive: true },
+    })
     const sendMessage = vi.fn(async (message: { type: string }) =>
       message.type === 'DSH_CONTENT_READY' ? readyResponse : undefined)
     vi.stubGlobal('chrome', {
       runtime: { onMessage: { addListener: vi.fn(), removeListener: vi.fn() }, sendMessage },
     })
+    // Each import starts without a pre-existing highlight unless the test
+    // explicitly installs one. Other tests replace this writable JSDOM method.
+    window.getSelection = () => null
     return sendMessage
   }
 
