@@ -836,6 +836,19 @@ export function App(): React.JSX.Element {
     applyHistory(created.sessionId, await readHistory(created.sessionId))
   }
 
+  /** 拉取会话列表并排除已归档条目：上游 session.list 不做归档过滤，已删除会话会以冷/附着形态残留。 */
+  async function loadVisibleSessions(): Promise<SessionPickerEntry[]> {
+    const [listed, workspaces] = await Promise.all([
+      api.rpc<{ items: SessionPickerEntry[] }>('session.list', {}),
+      api.rpc<{ archivedSessionIds?: string[] }>('workspace.list', {}).catch(() => ({ archivedSessionIds: [] as string[] })),
+    ])
+    const archived = new Set(workspaces.archivedSessionIds ?? [])
+    for (const entry of listed.items ?? []) {
+      sessionRuntimeRef.current.seedRunning(entry.sessionId, entry.running)
+    }
+    return resumableSessions(listed.items ?? []).filter((entry) => !archived.has(entry.sessionId))
+  }
+
   /** Restore the last browser conversation, then the latest durable one, before creating a chat. */
   async function initializeSession(): Promise<void> {
     if (sessionInitializationRef.current || sessionChangingRef.current || sessionRef.current !== null) return
@@ -845,8 +858,7 @@ export function App(): React.JSX.Element {
       if (settings?.autoResumeSession === true) {
         let entries: SessionPickerEntry[] = []
         try {
-          const listed = await api.rpc<{ items: SessionPickerEntry[] }>('session.list', {})
-          entries = resumableSessions(listed.items ?? [])
+          entries = await loadVisibleSessions()
         } catch {
           // The direct resume hint may still identify a live provisional session.
         }
@@ -890,11 +902,7 @@ export function App(): React.JSX.Element {
     setShowSessionPicker(true)
     setLoadingSessions(true)
     try {
-      const result = await api.rpc<{ items: SessionPickerEntry[] }>('session.list', {})
-      for (const entry of result.items ?? []) {
-        sessionRuntimeRef.current.seedRunning(entry.sessionId, entry.running)
-      }
-      const items = resumableSessions(result.items ?? [])
+      const items = await loadVisibleSessions()
       const current = items.find((entry) => entry.sessionId === sessionRef.current)
       const currentTitle = current === undefined ? undefined : projectedSessionTitle(current)
       if (currentTitle !== undefined) setSessionTitle(currentTitle)
@@ -934,12 +942,17 @@ export function App(): React.JSX.Element {
     if (!window.confirm(copy.app.deleteSessionConfirm(title))) return
     try {
       await api.rpc('workspace.archiveSession', { sessionId: entry.sessionId })
+      let purgeFailure: string | null = null
       try {
         await api.rpc(BRIDGE_SESSION_PURGE_METHOD, { sessionId: entry.sessionId })
-      } catch {
-        // 文件清理是尽力而为：索引已移除，残留文件不影响列表。
+      } catch (cause) {
+        purgeFailure = cause instanceof Error ? cause.message : String(cause)
       }
       setSessionList((prev) => prev.filter((item) => item.sessionId !== entry.sessionId))
+      if (purgeFailure !== null) {
+        // 归档已生效（列表不再显示），但磁盘清理失败需要用户知道。
+        setError(copy.app.deletePurgeFailed(purgeFailure))
+      }
       if (sessionRef.current === entry.sessionId) {
         setShowSessionPicker(false)
         await startNewSession()
