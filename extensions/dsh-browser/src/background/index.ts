@@ -14,6 +14,8 @@
  *   panel → bg: { type: 'approval.response', id, decision }
  *   panel → bg: { type: 'tab-affinity.response', revision, decision, sessionId }
  *   panel → bg: { type: 'tab-affinity.rebind', id }
+ *   panel → bg: { type: 'panel.window', windowId }
+ *   panel → bg: { type: 'selection.clear', selection? }
  *   panel → bg: { type: 'request-status' }
  *   bg → panel: { type: 'rpc.result', id, ok, result? | error? }
  *   bg → panel: { type: 'respond.result', id, ok, result? | error? }
@@ -22,6 +24,7 @@
  *   bg → panel: { type: 'approval.request', request }
  *   bg → panel: { type: 'approval.resolved', id }
  *   bg → panel: { type: 'session.resume-hint', sessionId }
+ *   bg → panel: { type: 'selection', selection }
  *   bg → panel: { type: 'tab-affinity', state }
  *   bg → panel: { type: 'tab-affinity.rebind.result', id, ok, error? }
  *
@@ -58,6 +61,8 @@ import {
   type TabAffinityDecision,
 } from './tab-affinity.ts'
 import { FocusedWindowTracker } from './focused-window.ts'
+import { SelectionTracker, type SelectionSource } from './selection.ts'
+import { parsePageSelection, parseSelectionCapture } from '../selection.ts'
 import { ApprovalCoordinator, type ApprovalRequestResult } from './approval-coordinator.ts'
 import {
   RECENT_SESSION_STORAGE_KEY,
@@ -148,6 +153,7 @@ const interactionResponses = new InteractionResponseRouter()
 const transientEvents = new TransientEventCache()
 const tabAffinity = new TabAffinityController()
 const focusedWindow = new FocusedWindowTracker()
+const selections = new SelectionTracker()
 const recentSession = new RecentSessionTracker({
   read: async () => (await chrome.storage.session.get(RECENT_SESSION_STORAGE_KEY))[RECENT_SESSION_STORAGE_KEY],
   write: async (sessionId) => {
@@ -234,8 +240,10 @@ function normalizeSettings(candidate: Settings): Settings {
 }
 
 /** Settings load is shared by every lazy connection trigger. */
+let settingsLoaded = false
 const settingsReady = loadSettings().then((loaded) => {
   settings = loaded
+  settingsLoaded = true
 })
 
 function armBridgeKeepalive(): void {
@@ -257,6 +265,121 @@ function broadcastTabAffinity(): void {
   const payload = { type: 'tab-affinity', state: tabAffinity.snapshot() }
   for (const port of panelPorts) {
     try { port.postMessage(payload) } catch { /* port already closed */ }
+  }
+}
+
+/** Which window each panel port belongs to, so a quote stays in its window. */
+const panelWindows = new WeakMap<chrome.runtime.Port, number>()
+
+/**
+ * Send one window's selection to that window's panels only.
+ *
+ * A panel must never be offered a quote from a page its own window is not
+ * looking at, which also keeps an incognito window's highlight out of a
+ * normal window's composer.
+ */
+function broadcastSelection(windowId: number): void {
+  const payload = { type: 'selection', selection: selections.current(windowId) }
+  for (const port of panelPorts) {
+    if (panelWindows.get(port) !== windowId) continue
+    try { port.postMessage(payload) } catch { /* port already closed */ }
+  }
+}
+
+function broadcastSelections(windowIds: readonly number[]): void {
+  for (const windowId of windowIds) broadcastSelection(windowId)
+}
+
+/** Whether a window currently has a panel that can display its selection. */
+function hasPanelInWindow(windowId: number): boolean {
+  for (const port of panelPorts) {
+    if (panelWindows.get(port) === windowId) return true
+  }
+  return false
+}
+
+/**
+ * Tell a frame its quote is gone so re-selecting the same passage reports it
+ * again; the content script deduplicates against the last text it sent.
+ */
+function resetSelectionDedupe(sources: readonly SelectionSource[]): void {
+  for (const { tabId, frameId } of sources) {
+    void Promise.resolve(chrome.tabs.sendMessage(
+      tabId,
+      { type: 'DSH_SELECTION_RESET' },
+      { frameId },
+    ))
+      .catch(() => { /* no content script in this tab */ })
+  }
+}
+
+/** Whether saved privacy settings currently allow page-selection capture. */
+function selectionSharingEnabled(): boolean {
+  // Until storage answers, `settings` still holds the defaults. Reporting the
+  // default here would arm watchers for a user whose saved choice is `off`.
+  return settingsLoaded && settings.sharePageContent !== 'off'
+}
+
+/** Page selections are captured only in a window with an open panel. */
+function selectionWatchEnabled(windowId: number): boolean {
+  return selectionSharingEnabled() && hasPanelInWindow(windowId)
+}
+
+let selectionWatchArmed = false
+/** Distinguishes revisions issued by different MV3 worker lifetimes. */
+const selectionWatchEpoch = crypto.randomUUID()
+/** Orders arm/disarm commands so a slow delivery cannot undo a newer one. */
+let selectionWatchRevision = 0
+
+/**
+ * Arm or disarm every content script. `selectionchange` fires on each drag in
+ * each tab, so the watcher stays off until a panel can actually show a quote.
+ *
+ * Delivery is asynchronous, so each command carries a revision: a panel that
+ * closes and reopens quickly must not leave watchers in the state of whichever
+ * `tabs.query` happened to resolve last.
+ */
+function syncSelectionWatch(): void {
+  const anyEnabled = selectionSharingEnabled()
+    && [...panelPorts].some((port) => panelWindows.get(port) !== undefined)
+  const wasArmed = selectionWatchArmed
+  selectionWatchArmed = anyEnabled
+  const revision = ++selectionWatchRevision
+  if (wasArmed && !anyEnabled) {
+    resetSelectionDedupe(selections.sourcesWithSelection())
+    broadcastSelections(selections.clearAll())
+  }
+  void Promise.resolve(chrome.tabs.query({})).then((tabs) => {
+    if (revision !== selectionWatchRevision) return
+    for (const tab of tabs) {
+      if (tab.id === undefined) continue
+      const enabled = selectionWatchEnabled(tab.windowId)
+      void Promise.resolve(chrome.tabs.sendMessage(tab.id, {
+        type: 'DSH_SELECTION_WATCH',
+        enabled,
+        epoch: selectionWatchEpoch,
+        revision,
+      }))
+        .catch(() => { /* no content script in this tab */ })
+    }
+  }).catch(() => {})
+}
+
+/**
+ * Accept a capture from the page the user is actually looking at.
+ *
+ * `sender.tab` already carries the tab's window, active state, and incognito
+ * flag, so admission needs no `chrome.tabs` call: a background page cannot
+ * make the worker query Chrome by moving its own selection in a loop.
+ */
+function recordSelection(tab: chrome.tabs.Tab, frameId: number, value: unknown): void {
+  if (!selectionWatchEnabled(tab.windowId)) return
+  // Only the tab the user is looking at, in its own window, may set a quote.
+  if (tab.id === undefined || tab.active !== true) return
+  const capture = parseSelectionCapture(value)
+  if (capture === null) return
+  if (selections.capture({ windowId: tab.windowId, tabId: tab.id, frameId }, capture)) {
+    broadcastSelection(tab.windowId)
   }
 }
 
@@ -786,6 +909,28 @@ async function gatewayRpc(method: string, payload: unknown): Promise<unknown> {
   return rpc.request(method, payload)
 }
 
+// ---- Content script messages ----
+
+chrome.runtime.onMessage.addListener((message: unknown, sender, sendResponse) => {
+  if (typeof message !== 'object' || message === null) return
+  if (sender.id !== chrome.runtime.id) return
+  if (sender.tab?.id === undefined) return
+  const type = (message as { type?: unknown }).type
+  if (type === 'DSH_CONTENT_READY') {
+    // navigation.ts also listens for this frame-ready announcement; only this
+    // listener answers it, telling a fresh document whether to watch
+    // selections. The revision lets a slow reply lose to a newer broadcast.
+    sendResponse({
+      selectionWatch: selectionWatchEnabled(sender.tab.windowId),
+      selectionWatchEpoch: selectionWatchEpoch,
+      selectionWatchRevision: selectionWatchRevision,
+    })
+    return
+  }
+  if (type !== 'DSH_SELECTION' || sender.tab === undefined) return
+  recordSelection(sender.tab, sender.frameId ?? 0, (message as { selection?: unknown }).selection)
+})
+
 // ---- Panel ports ----
 
 chrome.runtime.onConnect.addListener((port) => {
@@ -797,6 +942,7 @@ chrome.runtime.onConnect.addListener((port) => {
   }>()
   panelPorts.add(port)
   if (wasIdle) armBridgeKeepalive()
+  void settingsReady.then(syncSelectionWatch)
   void settingsReady.then(() => {
     if (!panelPorts.has(port)) return
     if (bridge === null || bridge.state === 'stopped') return startBridge()
@@ -858,6 +1004,7 @@ chrome.runtime.onConnect.addListener((port) => {
         void settingsReady.then(async () => {
           const previousConnection = { bridgeUrl: settings.bridgeUrl, token: settings.token }
           await persistSettings(settingsMsg.settings)
+          syncSelectionWatch()
           if (panelPorts.size > 0) {
             await startBridge()
             broadcastStatus()
@@ -877,6 +1024,37 @@ chrome.runtime.onConnect.addListener((port) => {
           broadcastStatus()
           disarmBridgeKeepalive()
         })
+        break
+      }
+      case 'panel.window': {
+        // The panel reports its own window; a side panel has no sender.tab.
+        const registration = message as { windowId?: unknown }
+        if (typeof registration.windowId !== 'number'
+          || !Number.isInteger(registration.windowId)
+          || registration.windowId < 0) break
+        panelWindows.set(port, registration.windowId)
+        syncSelectionWatch()
+        try {
+          port.postMessage({ type: 'selection', selection: selections.current(registration.windowId) })
+        } catch { /* port closed */ }
+        break
+      }
+      case 'selection.clear': {
+        // The user sent, dismissed, or explicitly abandoned this window's
+        // quote. A send/dismiss names the value it acted on so a newer capture
+        // that arrived while work was in flight cannot be cleared by mistake.
+        const windowId = panelWindows.get(port)
+        if (windowId === undefined) break
+        const request = message as { selection?: unknown }
+        const expected = request.selection === undefined ? undefined : parsePageSelection(request.selection)
+        if (expected === null) break
+        const source = selections.source(windowId)
+        const cleared = expected === undefined
+          ? selections.clear(windowId)
+          : selections.clearIfCurrent(windowId, expected)
+        if (cleared && source !== null) resetSelectionDedupe([source])
+        // Also repairs a panel that acted on a stale attachment.
+        broadcastSelection(windowId)
         break
       }
       case 'session.active': {
@@ -945,6 +1123,10 @@ chrome.runtime.onConnect.addListener((port) => {
         try {
           port.postMessage({ type: 'status', state: bridge?.state ?? ('stopped' as BridgeState), caps })
           port.postMessage({ type: 'tab-affinity', state: tabAffinity.snapshot() })
+          const statusWindowId = panelWindows.get(port)
+          if (statusWindowId !== undefined) {
+            port.postMessage({ type: 'selection', selection: selections.current(statusWindowId) })
+          }
           for (const frame of transientEvents.replay()) port.postMessage({ type: 'event', frame })
           approvals.replay((request) => {
             port.postMessage({ type: 'approval.request', request })
@@ -967,8 +1149,14 @@ chrome.runtime.onConnect.addListener((port) => {
         : 'The background connection was lost, so tab binding was cancelled'))
     }
     tabAffinityRebinds.clear()
+    const panelWindowId = panelWindows.get(port)
     panelPorts.delete(port)
     interactionResponses.removePort(port)
+    if (panelWindowId !== undefined && !hasPanelInWindow(panelWindowId)) {
+      const source = selections.source(panelWindowId)
+      if (selections.clear(panelWindowId) && source !== null) resetSelectionDedupe([source])
+    }
+    syncSelectionWatch()
     if (panelPorts.size === 0) {
       bridgeStartRevision += 1
       bridge?.suspendReconnect()
@@ -1014,6 +1202,8 @@ chrome.tabs.onUpdated.addListener((tabId, _changeInfo, tab) => {
 })
 
 chrome.tabs.onReplaced.addListener((addedTabId, removedTabId) => {
+  // The old document is gone even though Chrome transfers the tab identity.
+  broadcastSelections(selections.clearTab(removedTabId))
   void affinityReady.then(() => {
     // onReplaced is an identity swap (for example prerender activation), not
     // a close or user-visible switch. Transfer IDs synchronously before any
@@ -1039,6 +1229,7 @@ chrome.tabs.onReplaced.addListener((addedTabId, removedTabId) => {
 })
 
 chrome.tabs.onRemoved.addListener((tabId) => {
+  broadcastSelections(selections.clearTab(tabId))
   void affinityReady.then(() => {
     if (!tabAffinity.removeTab(tabId)) return
     activeFollowRefresh?.abort()
@@ -1046,6 +1237,20 @@ chrome.tabs.onRemoved.addListener((tabId) => {
     persistTabAffinity()
     broadcastTabAffinity()
   })
+})
+
+// A committed navigation replaces a document; a same-document history or
+// fragment update does not, and must not drop a quote still on the screen.
+// Matching the exact frame keeps an iframe's navigation from invalidating a
+// quote taken from its parent page, and vice versa.
+chrome.webNavigation.onCommitted.addListener(({ tabId, frameId }) => {
+  broadcastSelections(selections.clearTab(tabId, frameId))
+})
+
+// Ports are cleaned up by their own disconnect; only the window's quote is
+// left behind when the whole window goes away.
+chrome.windows.onRemoved.addListener((windowId) => {
+  selections.clear(windowId)
 })
 
 chrome.windows.onFocusChanged.addListener((windowId) => {

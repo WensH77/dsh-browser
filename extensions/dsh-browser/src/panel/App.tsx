@@ -30,6 +30,12 @@ import {
   upsertPendingQuestion,
 } from './pending-questions.ts'
 import { normalizeTrustedOrigin } from '../security/trusted-origins.ts'
+import type { PageSelection } from '../selection.ts'
+import {
+  selectionPromptText,
+  selectionSourceLabel,
+  splitSelectionMessage,
+} from './selection.ts'
 import { approvalReadyForSession, approvalSessionToFocus } from './approvals.ts'
 import {
   browserTimeZone,
@@ -115,6 +121,14 @@ function AttachmentIcon(): React.JSX.Element {
   return (
     <svg viewBox="0 0 20 20" aria-hidden="true">
       <path d="m7.25 10.75 4.9-4.9a2.3 2.3 0 0 1 3.25 3.25l-6.2 6.2a3.55 3.55 0 1 1-5.02-5.02l6.2-6.2" />
+    </svg>
+  )
+}
+
+function QuoteIcon(): React.JSX.Element {
+  return (
+    <svg viewBox="0 0 20 20" aria-hidden="true">
+      <path d="M8.4 5.5 6.9 8.2h1.9v4.8H4.5V8.5l2-3h1.9Zm7 0L13.9 8.2h1.9v4.8h-4.3V8.5l2-3h1.9Z" />
     </svg>
   )
 }
@@ -269,6 +283,47 @@ function ApprovalDialog({
 }
 
 /**
+ * A page quote: the highlighted text plus where it came from. The quote is
+ * page-authored, so it renders as plain text and never as markdown.
+ */
+function SelectionQuote({
+  selection,
+  copy,
+  label,
+  onRemove,
+}: {
+  selection: { title: string; url: string; quote: string; truncated: boolean }
+  copy: PanelCopy
+  label: string
+  onRemove?: () => void
+}): React.JSX.Element {
+  const source = selectionSourceLabel(selection)
+  return (
+    <div className="page-selection">
+      <blockquote className="page-selection-quote" title={selection.quote}>
+        {selection.quote}
+        {selection.truncated && <span className="page-selection-truncated"> {copy.app.selectionTruncated}</span>}
+      </blockquote>
+      <div className="page-selection-meta">
+        <span className="page-selection-chip">
+          <QuoteIcon />
+          <span>{label}</span>
+          {onRemove !== undefined && (
+            <button
+              type="button"
+              aria-label={copy.app.removeSelection}
+              title={copy.app.removeSelection}
+              onClick={onRemove}
+            >×</button>
+          )}
+        </span>
+        {source !== '' && <span className="page-selection-source" title={selection.url}>{source}</span>}
+      </div>
+    </div>
+  )
+}
+
+/**
  * One conversation row body. Memoized: rows are immutable (append/merge copy
  * the array but reuse row objects), so markdown is re-parsed only when a
  * row's text actually changes — typing must not re-render every message.
@@ -285,6 +340,9 @@ const MessageBody = memo(function MessageBody({
   copy: PanelCopy
 }): React.JSX.Element {
   if (row.kind === 'user' || row.kind === 'assistant') {
+    // A user message may carry a page quote; show the quote, not its fence.
+    const attached = row.kind === 'user' ? splitSelectionMessage(row.text) : null
+    const text = attached === null ? row.text : attached.message
     return (
       <div className="body message-body md">
         <MessageImages
@@ -294,7 +352,14 @@ const MessageBody = memo(function MessageBody({
           align={row.kind === 'user' ? 'end' : 'start'}
           copy={copy}
         />
-        {row.text.trim() !== '' && <div className="md" dangerouslySetInnerHTML={{ __html: renderMarkdown(row.text) }} />}
+        {attached !== null && (
+          <SelectionQuote
+            selection={attached.selection}
+            copy={copy}
+            label={copy.app.selectionAttached}
+          />
+        )}
+        {text.trim() !== '' && <div className="md" dangerouslySetInnerHTML={{ __html: renderMarkdown(text) }} />}
       </div>
     )
   }
@@ -336,6 +401,7 @@ export function App(): React.JSX.Element {
   const [draft, setDraft] = useState<ComposerDraft<DraftImage>>(() => emptyComposerDraft())
   const input = draft.text
   const draftImages = draft.images
+  const [selection, setSelection] = useState<PageSelection | null>(null)
   const [imageLimits, setImageLimits] = useState<ImageAttachmentLimits | null>(null)
   const [addingImages, setAddingImages] = useState(false)
   const [busy, setBusy] = useState(false)
@@ -475,13 +541,22 @@ export function App(): React.JSX.Element {
       updateApprovalQueue((current) => current.filter((request) => request.id !== id))
     })
     const offTabAffinity = api.onTabAffinity(setTabAffinity)
+    const offSelection = api.onSelection(setSelection)
+    // A side panel has no sender.tab, so it reports its own window; the
+    // background answers with whatever that window already had selected.
+    void Promise.resolve(chrome.windows.getCurrent())
+      .then((window) => { if (window.id !== undefined) return api.registerWindow(window.id) })
+      .catch(() => {})
     const offResumeHint = api.onSessionResumeHint((sessionId) => {
       setResumeHint({ ready: true, sessionId })
     })
     void api.requestStatus().catch((cause: unknown) => {
       setError(cause instanceof Error ? cause.message : String(cause))
     })
-    return () => { offStatus(); offEvent(); offApproval(); offApprovalResolved(); offTabAffinity(); offResumeHint() }
+    return () => {
+      offStatus(); offEvent(); offApproval(); offApprovalResolved()
+      offTabAffinity(); offSelection(); offResumeHint()
+    }
   }, [api])
 
   useEffect(() => {
@@ -714,7 +789,9 @@ export function App(): React.JSX.Element {
             if (sessionTransitionRef.current !== transition) return
             const entry = entries.find((candidate) => candidate.sessionId === id)
             const runtime = sessionRuntimeRef.current.snapshot(id, entry?.running ?? false)
-            prepareSessionSwitch(runtime.running, runtime.questions)
+            // A highlight captured while startup history is loading belongs to
+            // the still-open page, so automatic restoration must not erase it.
+            prepareSessionSwitch(runtime.running, runtime.questions, true)
             sessionRef.current = id
             await api.setActiveSession(id)
             setSessionTitle(entry === undefined ? null : projectedSessionTitle(entry) ?? sessionDisplayTitle(entry))
@@ -843,9 +920,26 @@ export function App(): React.JSX.Element {
     setSessionChanging(false)
   }
 
-  function prepareSessionSwitch(nextWorking: boolean, nextQuestions: PendingQuestion[] = []): void {
+  /** Drop the attached quote here and in every other open panel. */
+  function dismissSelection(): void {
+    const dismissed = selection
+    setSelection(null)
+    if (dismissed !== null) void api.clearSelection(dismissed).catch(() => {})
+  }
+
+  function prepareSessionSwitch(
+    nextWorking: boolean,
+    nextQuestions: PendingQuestion[] = [],
+    preserveSelection = false,
+  ): void {
     setRows([])
     setDraft(emptyComposerDraft())
+    if (!preserveSelection) {
+      setSelection(null)
+      // An explicit conversation switch abandons whatever attachment is
+      // current when the background processes it, rather than a stale render.
+      void api.clearSelection().catch(() => {})
+    }
     setImageLimits(null)
     imageProjectionRef.current = { sessionId: null, seq: Number.NEGATIVE_INFINITY, limits: null }
     setWorking(nextWorking)
@@ -883,9 +977,11 @@ export function App(): React.JSX.Element {
   async function send(textOverride?: string): Promise<void> {
     const text = (textOverride ?? input).trim()
     const submittedImages = textOverride === undefined ? draftImages : []
+    // A quick-start prompt asks about the whole page, not about a quote.
+    const submittedSelection = textOverride === undefined ? selection : null
     const id = sessionRef.current
     // busy state 是异步的：连续回车可能都通过 state 检查——用 ref 同步锁。
-    if ((text === '' && submittedImages.length === 0)
+    if ((text === '' && submittedImages.length === 0 && submittedSelection === null)
       || busy || addingImagesRef.current || sendingRef.current || sessionChangingRef.current || id === null) return
     sendingRef.current = true
     const submittedDraft: ComposerDraft<DraftImage> = { text, images: submittedImages }
@@ -901,9 +997,20 @@ export function App(): React.JSX.Element {
       await api.rpc('session.prompt', {
         sessionId: id,
         mode: 'queue',
-        content: promptContent(text, submittedImages),
+        content: promptContent(
+          submittedSelection === null ? text : selectionPromptText(submittedSelection, text),
+          submittedImages,
+        ),
         ...(clientTimeZone === undefined ? {} : { clientTimeZone }),
       })
+      if (submittedSelection !== null) {
+        // Keep the background authoritative while the prompt is in flight.
+        // Conditional clearing cannot consume a newer highlight captured in
+        // the meantime, and its broadcast updates every panel together.
+        void api.clearSelection(submittedSelection).then(() => {
+          setSelection((current) => current?.capturedAt === submittedSelection.capturedAt ? null : current)
+        }).catch(() => {})
+      }
     } catch (cause) {
       if (sessionRef.current === id) {
         setError(imageErrorMessage(cause, copy, imageLimits ?? undefined))
@@ -1208,6 +1315,14 @@ export function App(): React.JSX.Element {
       {error !== null && <div className="error">{error}</div>}
       <footer className="composer">
         <div className="composer-box">
+          {selection !== null && (
+            <SelectionQuote
+              selection={{ ...selection, quote: selection.text }}
+              copy={copy}
+              label={copy.app.selectionChip}
+              onRemove={dismissSelection}
+            />
+          )}
           {draftImages.length > 0 && (
             <div className="draft-images" aria-label={copy.app.addImages}>
               {draftImages.map((image) => {
@@ -1284,7 +1399,8 @@ export function App(): React.JSX.Element {
               </button>
             ) : (
               <button onClick={() => void send()}
-                disabled={!sessionReady || busy || addingImages || (input.trim() === '' && draftImages.length === 0)}
+                disabled={!sessionReady || busy || addingImages
+                  || (input.trim() === '' && draftImages.length === 0 && selection === null)}
                 aria-label={copy.app.sendMessage}><SendIcon /></button>
             )}
           </div>
