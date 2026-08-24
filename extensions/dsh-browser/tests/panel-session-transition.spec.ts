@@ -85,7 +85,7 @@ describe('panel session transitions', () => {
       onResumeHint?.(null)
     })
     await vi.waitFor(() => {
-      expect(panelApi.setActiveSession).toHaveBeenCalledWith('session-current')
+      expect(panelApi.setActiveSession).toHaveBeenCalledWith('session-current', true)
     })
 
     const sessionMenu = document.querySelector<HTMLButtonElement>('.session-menu-trigger')!

@@ -122,7 +122,7 @@ export interface PanelApi {
   clearSelection(selection?: PageSelection): Promise<void>
   /** Scope this panel's selections to its own browser window. */
   registerWindow(windowId: number): Promise<void>
-  setActiveSession(sessionId: string): Promise<void>
+  setActiveSession(sessionId: string, isNew?: boolean): Promise<void>
   updateSettings(settings: Partial<PanelSettings>): Promise<void>
   requestStatus(): Promise<void>
 }
@@ -407,8 +407,8 @@ export function connectPanel(): PanelApi {
     registerWindow(windowId) {
       return send({ type: 'panel.window', windowId })
     },
-    setActiveSession(sessionId) {
-      return send({ type: 'session.active', sessionId })
+    setActiveSession(sessionId, isNew) {
+      return send({ type: 'session.active', sessionId, isNew })
     },
     updateSettings(next) {
       return send({ type: 'settings', settings: next })
