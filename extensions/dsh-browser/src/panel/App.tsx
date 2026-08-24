@@ -686,7 +686,7 @@ export function App(): React.JSX.Element {
     const created = await api.rpc<{ sessionId: string }>('session.create', {})
     if (sessionTransitionRef.current !== transition) return
     sessionRef.current = created.sessionId
-    await api.setActiveSession(created.sessionId)
+    await api.setActiveSession(created.sessionId, true)
     setSessionTitle(null)
     sessionRuntimeRef.current.seedRunning(created.sessionId, false)
     applyHistory(created.sessionId, await readHistory(created.sessionId))

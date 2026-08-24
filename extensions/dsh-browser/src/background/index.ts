@@ -593,6 +593,15 @@ async function refreshFollowedPage(sessionId: string, tabId: number): Promise<vo
   }
 }
 
+async function refreshSessionSnapshot(sessionId: string): Promise<void> {
+  await affinityReady
+  await ensureInitialTabBinding()
+  const target = await resolveToolTab()
+  if (!('ok' in target) && target.id !== undefined) {
+    await refreshFollowedPage(sessionId, target.id)
+  }
+}
+
 async function resolveTabAffinityResponse(response: {
   revision: number
   decision: TabAffinityDecision
@@ -880,8 +889,14 @@ chrome.runtime.onConnect.addListener((port) => {
         break
       }
       case 'session.active': {
-        const session = message as { sessionId?: unknown }
+        const session = message as { sessionId?: unknown; isNew?: boolean }
         recentSession.remember(session.sessionId)
+        if (session.isNew === true && typeof session.sessionId === 'string' && session.sessionId.trim() !== '') {
+          const sid = session.sessionId
+          const refresh = refreshSessionSnapshot(sid).catch(() => {})
+          followedPageRefresh = refresh
+          void refresh
+        }
         break
       }
       case 'approval.response': {
