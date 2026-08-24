@@ -32,7 +32,6 @@ import {
 import { normalizeTrustedOrigin } from '../security/trusted-origins.ts'
 import type { PageSelection } from '../selection.ts'
 import {
-  restoreSubmittedSelection,
   selectionPromptText,
   selectionSourceLabel,
   splitSelectionMessage,
@@ -543,6 +542,11 @@ export function App(): React.JSX.Element {
     })
     const offTabAffinity = api.onTabAffinity(setTabAffinity)
     const offSelection = api.onSelection(setSelection)
+    // A side panel has no sender.tab, so it reports its own window; the
+    // background answers with whatever that window already had selected.
+    void Promise.resolve(chrome.windows.getCurrent())
+      .then((window) => { if (window.id !== undefined) return api.registerWindow(window.id) })
+      .catch(() => {})
     const offResumeHint = api.onSessionResumeHint((sessionId) => {
       setResumeHint({ ready: true, sessionId })
     })
@@ -785,7 +789,9 @@ export function App(): React.JSX.Element {
             if (sessionTransitionRef.current !== transition) return
             const entry = entries.find((candidate) => candidate.sessionId === id)
             const runtime = sessionRuntimeRef.current.snapshot(id, entry?.running ?? false)
-            prepareSessionSwitch(runtime.running, runtime.questions)
+            // A highlight captured while startup history is loading belongs to
+            // the still-open page, so automatic restoration must not erase it.
+            prepareSessionSwitch(runtime.running, runtime.questions, true)
             sessionRef.current = id
             await api.setActiveSession(id)
             setSessionTitle(entry === undefined ? null : projectedSessionTitle(entry) ?? sessionDisplayTitle(entry))
@@ -916,14 +922,24 @@ export function App(): React.JSX.Element {
 
   /** Drop the attached quote here and in every other open panel. */
   function dismissSelection(): void {
+    const dismissed = selection
     setSelection(null)
-    void api.clearSelection().catch(() => {})
+    if (dismissed !== null) void api.clearSelection(dismissed).catch(() => {})
   }
 
-  function prepareSessionSwitch(nextWorking: boolean, nextQuestions: PendingQuestion[] = []): void {
+  function prepareSessionSwitch(
+    nextWorking: boolean,
+    nextQuestions: PendingQuestion[] = [],
+    preserveSelection = false,
+  ): void {
     setRows([])
     setDraft(emptyComposerDraft())
-    dismissSelection()
+    if (!preserveSelection) {
+      setSelection(null)
+      // An explicit conversation switch abandons whatever attachment is
+      // current when the background processes it, rather than a stale render.
+      void api.clearSelection().catch(() => {})
+    }
     setImageLimits(null)
     imageProjectionRef.current = { sessionId: null, seq: Number.NEGATIVE_INFINITY, limits: null }
     setWorking(nextWorking)
@@ -971,7 +987,6 @@ export function App(): React.JSX.Element {
     const submittedDraft: ComposerDraft<DraftImage> = { text, images: submittedImages }
     if (textOverride === undefined) {
       setDraft(emptyComposerDraft())
-      if (submittedSelection !== null) dismissSelection()
     }
     setBusy(true)
     setWorking(true)
@@ -988,15 +1003,20 @@ export function App(): React.JSX.Element {
         ),
         ...(clientTimeZone === undefined ? {} : { clientTimeZone }),
       })
+      if (submittedSelection !== null) {
+        // Keep the background authoritative while the prompt is in flight.
+        // Conditional clearing cannot consume a newer highlight captured in
+        // the meantime, and its broadcast updates every panel together.
+        void api.clearSelection(submittedSelection).then(() => {
+          setSelection((current) => current?.capturedAt === submittedSelection.capturedAt ? null : current)
+        }).catch(() => {})
+      }
     } catch (cause) {
       if (sessionRef.current === id) {
         setError(imageErrorMessage(cause, copy, imageLimits ?? undefined))
         setWorking(false)
         if (textOverride === undefined) {
           setDraft((current) => restoreSubmittedDraft(current, submittedDraft))
-          if (submittedSelection !== null) {
-            setSelection((current) => restoreSubmittedSelection(current, submittedSelection))
-          }
         }
       }
     } finally {
@@ -1299,7 +1319,7 @@ export function App(): React.JSX.Element {
             <SelectionQuote
               selection={{ ...selection, quote: selection.text }}
               copy={copy}
-              label={copy.app.selectionCount(1)}
+              label={copy.app.selectionChip}
               onRemove={dismissSelection}
             />
           )}

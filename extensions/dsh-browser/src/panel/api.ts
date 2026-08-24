@@ -118,7 +118,10 @@ export interface PanelApi {
   respondToApproval(id: string, decision: ApprovalDecision): Promise<void>
   resolveTabAffinity(revision: number, decision: TabAffinityDecision, sessionId: string | null): Promise<void>
   rebindTabAffinity(): Promise<void>
-  clearSelection(): Promise<void>
+  /** Clear all selection state, or only the exact selection supplied. */
+  clearSelection(selection?: PageSelection): Promise<void>
+  /** Scope this panel's selections to its own browser window. */
+  registerWindow(windowId: number): Promise<void>
   setActiveSession(sessionId: string): Promise<void>
   updateSettings(settings: Partial<PanelSettings>): Promise<void>
   requestStatus(): Promise<void>
@@ -398,8 +401,11 @@ export function connectPanel(): PanelApi {
         })
       })
     },
-    clearSelection() {
-      return send({ type: 'selection.clear' })
+    clearSelection(selection) {
+      return send({ type: 'selection.clear', ...(selection === undefined ? {} : { selection }) })
+    },
+    registerWindow(windowId) {
+      return send({ type: 'panel.window', windowId })
     },
     setActiveSession(sessionId) {
       return send({ type: 'session.active', sessionId })

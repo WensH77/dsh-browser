@@ -38,6 +38,7 @@ describe('attaching a page selection in the composer', () => {
     HTMLElement.prototype.scrollTo = vi.fn()
     vi.stubGlobal('chrome', {
       storage: { local: { get: vi.fn(async () => ({ dshSettings: { autoResumeSession: false } })) } },
+      windows: { getCurrent: vi.fn(async () => ({ id: 1 })) },
     })
 
     rpc = vi.fn(async (method: string) => {
@@ -61,6 +62,7 @@ describe('attaching a page selection in the composer', () => {
       resolveTabAffinity: vi.fn(async () => {}),
       rebindTabAffinity: vi.fn(async () => {}),
       clearSelection: vi.fn(async () => {}),
+      registerWindow: vi.fn(async () => {}),
       setActiveSession: vi.fn(async () => {}),
       updateSettings: vi.fn(async () => {}),
       requestStatus: vi.fn(async () => {}),
@@ -106,8 +108,8 @@ describe('attaching a page selection in the composer', () => {
     expect(prompt.content[0]?.text.endsWith('summarize this')).toBe(true)
 
     // Sending consumes the quote here and in every other open panel.
-    expect(document.querySelector('.composer-box .page-selection')).toBeNull()
-    expect(panelApi.clearSelection).toHaveBeenCalled()
+    await vi.waitFor(() => { expect(document.querySelector('.composer-box .page-selection')).toBeNull() })
+    expect(panelApi.clearSelection).toHaveBeenCalledWith(selection)
   })
 
   it('sends a selection that carries no typed message', async () => {
@@ -147,5 +149,67 @@ describe('attaching a page selection in the composer', () => {
       expect(document.querySelector('.composer-box .page-selection-quote')?.textContent).toContain(selection.text)
     })
     expect(document.querySelector('.error')?.textContent).toContain('bridge unavailable')
+    expect(panelApi.clearSelection).not.toHaveBeenCalled()
+  })
+
+  it('does not consume a newer highlight when an earlier send succeeds', async () => {
+    await startPanel()
+    await act(async () => { onSelection?.(selection) })
+    let acceptPrompt: (() => void) | undefined
+    rpc.mockImplementation(async (method: string) => {
+      if (method === 'session.prompt') {
+        await new Promise<void>((resolve) => { acceptPrompt = resolve })
+        return {}
+      }
+      return {}
+    })
+
+    await act(async () => { document.querySelector<HTMLButtonElement>('.composer-actions > button')!.click() })
+    await vi.waitFor(() => { expect(acceptPrompt).toBeDefined() })
+    const newer = { ...selection, text: 'newer highlight', capturedAt: 2_000 }
+    await act(async () => { onSelection?.(newer) })
+    await act(async () => { acceptPrompt?.() })
+
+    await vi.waitFor(() => { expect(panelApi.clearSelection).toHaveBeenCalledWith(selection) })
+    expect(document.querySelector('.composer-box .page-selection-quote')?.textContent).toContain(newer.text)
+  })
+
+  it('preserves a highlight captured while automatic restoration loads history', async () => {
+    const storageGet = chrome.storage.local.get as unknown as Mock
+    storageGet.mockResolvedValue({ dshSettings: { autoResumeSession: true } })
+    let finishHistory: ((value: { events: never[] }) => void) | undefined
+    rpc.mockImplementation(async (method: string) => {
+      if (method === 'session.list') {
+        return { items: [{ sessionId: 'session-saved', updatedAt: 1, running: false, blank: false }] }
+      }
+      if (method === 'session.history') {
+        return await new Promise<{ events: never[] }>((resolve) => { finishHistory = resolve })
+      }
+      return {}
+    })
+
+    await act(async () => { root.render(createElement(App)) })
+    await act(async () => {
+      onStatus?.('connected', null)
+      onResumeHint?.('session-saved')
+    })
+    await vi.waitFor(() => { expect(finishHistory).toBeDefined() })
+    await act(async () => { onSelection?.(selection) })
+    await act(async () => { finishHistory?.({ events: [] }) })
+
+    await vi.waitFor(() => {
+      expect(document.querySelector('.composer-box .page-selection-quote')?.textContent).toContain(selection.text)
+    })
+    expect(panelApi.clearSelection).not.toHaveBeenCalled()
+  })
+
+  it('clears the attachment when the user explicitly starts a new session', async () => {
+    await startPanel()
+    await act(async () => { onSelection?.(selection) })
+
+    await act(async () => { document.querySelector<HTMLButtonElement>('.new-session-trigger')!.click() })
+
+    await vi.waitFor(() => { expect(panelApi.clearSelection).toHaveBeenCalledWith() })
+    expect(document.querySelector('.composer-box .page-selection')).toBeNull()
   })
 })

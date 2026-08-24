@@ -95,14 +95,6 @@ export function splitSelectionMessage(text: string): { selection: AttachedSelect
   }
 }
 
-/** Restore a rejected prompt's selection unless the user captured a newer one. */
-export function restoreSubmittedSelection(
-  current: PageSelection | null,
-  submitted: PageSelection,
-): PageSelection {
-  return current ?? submitted
-}
-
 /** Label a quote's origin: the page title, else its host, else nothing. */
 export function selectionSourceLabel(selection: { title: string; url: string }): string {
   if (selection.title !== '') return selection.title
