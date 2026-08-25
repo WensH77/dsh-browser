@@ -585,14 +585,14 @@ async function restoreTabAffinity(): Promise<void> {
 const affinityReady = restoreTabAffinity()
 
 /** Bind at prompt submission so a switch while the model is thinking is visible. */
-async function ensureInitialTabBinding(): Promise<boolean> {
+async function ensureInitialTabBinding(sessionId?: string): Promise<boolean> {
   await affinityReady
-  if (tabAffinity.resolveTarget().kind !== 'initial') return true
+  if (tabAffinity.resolveTarget(sessionId).kind !== 'initial') return true
   try {
     const tab = await syncActiveTab()
     const summary = tab === undefined ? null : summarizeTab(tab)
     if (summary === null) return false
-    if (tabAffinity.bindInitial(summary)) {
+    if (tabAffinity.bindInitial(summary, sessionId)) {
       persistTabAffinity()
       broadcastTabAffinity()
     }
@@ -619,14 +619,14 @@ function affinityFailure(kind: 'handoff' | 'lost' | 'missing'): ToolAnswer {
 }
 
 /** Resolve one stable tab target without allowing a manual switch to drift it. */
-async function resolveToolTab(): Promise<Pick<chrome.tabs.Tab, 'id' | 'url' | 'windowId'> | ToolAnswer> {
+async function resolveToolTab(sessionId?: string): Promise<Pick<chrome.tabs.Tab, 'id' | 'url' | 'windowId'> | ToolAnswer> {
   await affinityReady
   for (let attempt = 0; attempt < 3; attempt += 1) {
-    const resolution = tabAffinity.resolveTarget()
+    const resolution = tabAffinity.resolveTarget(sessionId)
     if (resolution.kind === 'handoff') return affinityFailure('handoff')
     if (resolution.kind === 'lost') return affinityFailure('lost')
     if (resolution.kind === 'initial') {
-      if (!await ensureInitialTabBinding()) return affinityFailure('missing')
+      if (!await ensureInitialTabBinding(sessionId)) return affinityFailure('missing')
       continue
     }
     try {
@@ -634,7 +634,7 @@ async function resolveToolTab(): Promise<Pick<chrome.tabs.Tab, 'id' | 'url' | 'w
       const summary = summarizeTab(tab)
       if (summary === null) return affinityFailure('missing')
       if (tabAffinity.observeTab(summary)) broadcastTabAffinity()
-      const current = tabAffinity.resolveTarget()
+      const current = tabAffinity.resolveTarget(sessionId)
       if (current.kind === 'handoff') return affinityFailure('handoff')
       if (current.kind === 'lost') return affinityFailure('lost')
       if (current.kind === 'target' && current.tab.tabId === summary.tabId) return tab
@@ -692,7 +692,7 @@ async function refreshFollowedPage(sessionId: string, tabId: number): Promise<vo
   const controller = new AbortController()
   activeFollowRefresh = controller
   try {
-    const target = await resolveToolTab()
+    const target = await resolveToolTab(sessionId)
     if ('ok' in target || target.id !== tabId || controller.signal.aborted) return
     const budget = caps === null
       ? undefined
@@ -704,9 +704,9 @@ async function refreshFollowedPage(sessionId: string, tabId: number): Promise<vo
       (prompt) => authorizeToolCall(prompt, controller.signal, target.windowId, sessionId),
       controller.signal,
       target,
-      () => target.id !== undefined && tabAffinity.allowsTarget(target.id),
+      () => target.id !== undefined && tabAffinity.allowsTarget(target.id, sessionId),
     )
-    if (!answer.ok || controller.signal.aborted || !tabAffinity.allowsTarget(tabId)) return
+    if (!answer.ok || controller.signal.aborted || !tabAffinity.allowsTarget(tabId, sessionId)) return
     if (typeof answer.result !== 'object' || answer.result === null) return
     const snapshot = (answer.result as { text?: unknown }).text
     if (typeof snapshot !== 'string' || snapshot.trim() === '') return
@@ -718,8 +718,8 @@ async function refreshFollowedPage(sessionId: string, tabId: number): Promise<vo
 
 async function refreshSessionSnapshot(sessionId: string): Promise<void> {
   await affinityReady
-  await ensureInitialTabBinding()
-  const target = await resolveToolTab()
+  await ensureInitialTabBinding(sessionId)
+  const target = await resolveToolTab(sessionId)
   if (!('ok' in target) && target.id !== undefined) {
     await refreshFollowedPage(sessionId, target.id)
   }
@@ -732,7 +732,8 @@ async function resolveTabAffinityResponse(response: {
 }): Promise<void> {
   await affinityReady
   await syncActiveTab()
-  const accepted = tabAffinity.decide(response.decision, response.revision)
+  const sid = typeof response.sessionId === 'string' ? response.sessionId : undefined
+  const accepted = tabAffinity.decide(response.decision, response.revision, sid)
   const controlled = accepted && response.decision === 'follow'
     ? tabAffinity.snapshot().controlled
     : null
@@ -745,7 +746,7 @@ async function resolveTabAffinityResponse(response: {
 }
 
 /** Move browser control to the current tab only after a fresh, valid query. */
-async function rebindTabAffinityToActive(signal: AbortSignal): Promise<void> {
+async function rebindTabAffinityToActive(signal: AbortSignal, sessionId?: string): Promise<void> {
   await abortable(affinityReady, signal)
   const tab = await syncActiveTab(undefined, signal)
   throwIfRebindAborted(signal)
@@ -758,9 +759,8 @@ async function rebindTabAffinityToActive(signal: AbortSignal): Promise<void> {
 
   const previousControlledTabId = tabAffinity.snapshot().controlled?.tabId
   activeFollowRefresh?.abort()
-  cancelAllToolCalls()
   cancelPendingApprovals()
-  tabAffinity.rebindActive(summary)
+  tabAffinity.rebindActive(summary, sessionId)
   if (previousControlledTabId !== undefined && previousControlledTabId !== summary.tabId) {
     resetTabSnapshot(previousControlledTabId)
   }
@@ -802,7 +802,7 @@ function routeToolCall(call: ToolCall): void {
   const budget = caps === null
     ? undefined
     : { maxItems: caps.maxInteractiveItems, maxChars: caps.snapshotMaxChars }
-  void resolveToolTab().then((target) => 'ok' in target
+  void resolveToolTab(call.sessionId).then((target) => 'ok' in target
     ? target
     : dispatchToolCall(
         call,
@@ -811,10 +811,18 @@ function routeToolCall(call: ToolCall): void {
         (prompt) => authorizeToolCall(prompt, controller.signal, target.windowId, call.sessionId),
         controller.signal,
         target,
-        () => target.id !== undefined && tabAffinity.allowsTarget(target.id),
+        () => target.id !== undefined && tabAffinity.allowsTarget(target.id, call.sessionId),
       )).then(
     (answer) => {
-      if (controller.signal.aborted) return
+      if (controller.signal.aborted) {
+        bridge?.send({
+          t: 'tool.result',
+          id: call.id,
+          ok: false,
+          error: { code: 'cancelled', message: 'Tool call was cancelled' },
+        })
+        return
+      }
       const socket = bridge
       if (socket === null) return
       if (answer.ok) {
@@ -824,7 +832,15 @@ function routeToolCall(call: ToolCall): void {
       }
     },
     (error: unknown) => {
-      if (controller.signal.aborted) return
+      if (controller.signal.aborted) {
+        bridge?.send({
+          t: 'tool.result',
+          id: call.id,
+          ok: false,
+          error: { code: 'cancelled', message: 'Tool call was cancelled' },
+        })
+        return
+      }
       bridge?.send({
         t: 'tool.result',
         id: call.id,
@@ -968,8 +984,11 @@ chrome.runtime.onConnect.addListener((port) => {
       case 'rpc': {
         const rpcMsg = message as { id: string; method: string; payload?: unknown }
         const refresh = followedPageRefresh
+        const rpcSessionId = typeof rpcMsg.payload === 'object' && rpcMsg.payload !== null
+          ? (rpcMsg.payload as { sessionId?: string }).sessionId
+          : undefined
         const prepare = rpcMsg.method === 'session.prompt'
-          ? ensureInitialTabBinding().then(async (bound) => {
+          ? ensureInitialTabBinding(rpcSessionId).then(async (bound) => {
               await refresh
               return bound
             })
@@ -1069,11 +1088,17 @@ chrome.runtime.onConnect.addListener((port) => {
       case 'session.active': {
         const session = message as { sessionId?: unknown; isNew?: boolean }
         recentSession.remember(session.sessionId)
-        if (session.isNew === true && typeof session.sessionId === 'string' && session.sessionId.trim() !== '') {
+        if (typeof session.sessionId === 'string' && session.sessionId.trim() !== '') {
           const sid = session.sessionId
-          const refresh = refreshSessionSnapshot(sid).catch(() => {})
-          followedPageRefresh = refresh
-          void refresh
+          if (tabAffinity.focusSession(sid)) {
+            persistTabAffinity()
+            broadcastTabAffinity()
+          }
+          if (session.isNew === true) {
+            const refresh = refreshSessionSnapshot(sid).catch(() => {})
+            followedPageRefresh = refresh
+            void refresh
+          }
         }
         break
       }
@@ -1098,9 +1123,10 @@ chrome.runtime.onConnect.addListener((port) => {
         break
       }
       case 'tab-affinity.rebind': {
-        const request = message as { id?: unknown }
+        const request = message as { id?: unknown; sessionId?: unknown }
         if (typeof request.id !== 'string') break
         const requestId = request.id
+        const rebindSessionId = typeof request.sessionId === 'string' ? request.sessionId : undefined
         if (tabAffinityRebinds.has(requestId)) break
         const controller = new AbortController()
         const timer = setTimeout(() => {
@@ -1109,7 +1135,7 @@ chrome.runtime.onConnect.addListener((port) => {
             : 'Binding the current tab timed out. Try again.'))
         }, TAB_AFFINITY_REBIND_TIMEOUT_MS)
         tabAffinityRebinds.set(requestId, { controller, timer })
-        void rebindTabAffinityToActive(controller.signal).then(
+        void rebindTabAffinityToActive(controller.signal, rebindSessionId).then(
           () => {
             try { port.postMessage({ type: 'tab-affinity.rebind.result', id: requestId, ok: true }) } catch { /* port closed */ }
           },

@@ -151,4 +151,26 @@ describe('TabAffinityController', () => {
     expect(lost.resolveTarget()).toEqual({ kind: 'lost' })
     expect(lost.bindInitial(tab(5))).toBe(false)
   })
+
+  it('supports independent per-session tab affinity for concurrent sessions', () => {
+    const affinity = new TabAffinityController()
+    affinity.observeActive(tab(1))
+    expect(affinity.bindInitial(tab(1), 'session-1')).toBe(true)
+
+    affinity.observeActive(tab(2))
+    expect(affinity.rebindActive(tab(2), 'session-2')).toBe(true)
+
+    expect(affinity.resolveTarget('session-1')).toEqual({ kind: 'target', tab: tab(1) })
+    expect(affinity.resolveTarget('session-2')).toEqual({ kind: 'target', tab: tab(2) })
+
+    expect(affinity.allowsTarget(1, 'session-1')).toBe(true)
+    expect(affinity.allowsTarget(2, 'session-1')).toBe(false)
+    expect(affinity.allowsTarget(2, 'session-2')).toBe(true)
+    expect(affinity.allowsTarget(1, 'session-2')).toBe(false)
+
+    expect(affinity.focusSession('session-1')).toBe(true)
+    expect(affinity.snapshot()).toMatchObject({ controlled: { tabId: 1 } })
+    expect(affinity.focusSession('session-2')).toBe(true)
+    expect(affinity.snapshot()).toMatchObject({ controlled: { tabId: 2 } })
+  })
 })
