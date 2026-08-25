@@ -139,7 +139,8 @@ describe('panel session transitions', () => {
 
     await act(async () => { newSessionButton.click() })
     await vi.waitFor(() => {
-      expect(panelApi.rebindTabAffinity).toHaveBeenCalled()
+      expect(panelApi.setActiveSession).toHaveBeenCalledTimes(2)
     })
+    expect(panelApi.rebindTabAffinity).not.toHaveBeenCalled()
   })
 })

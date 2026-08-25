@@ -172,5 +172,16 @@ describe('TabAffinityController', () => {
     expect(affinity.snapshot()).toMatchObject({ controlled: { tabId: 1 } })
     expect(affinity.focusSession('session-2')).toBe(true)
     expect(affinity.snapshot()).toMatchObject({ controlled: { tabId: 2 } })
+
+    const sessionMap = affinity.sessionMap()
+    expect(sessionMap['session-1']).toEqual(tab(1))
+    expect(sessionMap['session-2']).toEqual(tab(2))
+
+    const restoredAffinity = new TabAffinityController()
+    restoredAffinity.restoreSessionTabs(sessionMap)
+    expect(restoredAffinity.resolveTarget('session-1')).toEqual({ kind: 'target', tab: tab(1) })
+    expect(restoredAffinity.resolveTarget('session-2')).toEqual({ kind: 'target', tab: tab(2) })
+    expect(restoredAffinity.resolveTarget('session-missing')).toEqual({ kind: 'lost' })
+    expect(restoredAffinity.allowsTarget(2, 'session-missing')).toBe(false)
   })
 })

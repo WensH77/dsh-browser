@@ -50,6 +50,7 @@ export class TabAffinityController {
   private lost = false
   private revision = 0
   private sessionTabs = new Map<string, AffinityTab>()
+  private focusedSessionId: string | null = null
 
   snapshot(): TabAffinityState {
     return {
@@ -65,23 +66,59 @@ export class TabAffinityController {
     this.sessionTabs.set(sessionId, { ...tab })
   }
 
+  sessionMap(): Record<string, AffinityTab> {
+    const result: Record<string, AffinityTab> = {}
+    for (const [sid, tab] of this.sessionTabs.entries()) {
+      result[sid] = { ...tab }
+    }
+    return result
+  }
+
+  restoreSessionTabs(sessions: Record<string, AffinityTab>): void {
+    for (const [sid, tab] of Object.entries(sessions)) {
+      this.sessionTabs.set(sid, { ...tab })
+    }
+  }
+
+  restoreFocusedSession(sessionId: string | null): void {
+    this.focusedSessionId = sessionId
+  }
+
   getSessionTab(sessionId: string): AffinityTab | undefined {
     return this.sessionTabs.get(sessionId)
   }
 
+  focusedSession(): string | null {
+    return this.focusedSessionId
+  }
+
   /** Focus or select a session to align the visible controlled tab in the panel. */
   focusSession(sessionId: string): boolean {
-    const tab = this.sessionTabs.get(sessionId)
-    if (tab === undefined) return false
+    const previousFocusedSessionId = this.focusedSessionId
     const previousControlled = this.controlled
-    this.controlled = { ...tab }
-    this.hasBound = true
-    this.lost = false
-    if (!sameTab(previousControlled, this.controlled)) {
-      this.revision += 1
-      return true
+    const previousKept = this.keptActiveTabId
+    const previousLost = this.lost
+    this.focusedSessionId = sessionId
+    const tab = this.sessionTabs.get(sessionId)
+    if (tab === undefined) {
+      this.controlled = null
+      this.keptActiveTabId = null
+      this.hasBound = true
+      this.lost = true
+    } else {
+      this.controlled = { ...tab }
+      this.hasBound = true
+      this.lost = false
+      this.keptActiveTabId = this.active !== null && this.active.tabId !== tab.tabId
+        ? this.active.tabId
+        : null
     }
-    return false
+    const changed = previousFocusedSessionId !== sessionId
+      || !sameTab(previousControlled, this.controlled)
+      || previousKept !== this.keptActiveTabId
+      || previousLost !== this.lost
+    if (changed) this.revision += 1
+    return changed
   }
 
   /** Observe the active tab after a user tab/window focus change. */
@@ -114,27 +151,57 @@ export class TabAffinityController {
 
   /** Bind the first prompt/direct browser call to the then-active tab. */
   bindInitial(tab: AffinityTab, sessionId?: string): boolean {
+    const sid = sessionId?.trim()
+    if (sid !== undefined && sid !== '') {
+      if (this.sessionTabs.has(sid)) return false
+      this.sessionTabs.set(sid, { ...tab })
+      if (this.focusedSessionId === null) this.focusedSessionId = sid
+      if (this.focusedSessionId === sid) {
+        this.active = { ...tab }
+        this.controlled = { ...tab }
+        this.hasBound = true
+        this.lost = false
+        this.keptActiveTabId = null
+      }
+      this.revision += 1
+      return true
+    }
     if (this.controlled !== null || this.hasBound || this.lost) return false
     this.active = { ...tab }
     this.controlled = { ...tab }
     this.hasBound = true
     this.keptActiveTabId = null
-    if (sessionId !== undefined && sessionId.trim() !== '') {
-      this.sessionTabs.set(sessionId, { ...tab })
-    }
     this.revision += 1
     return true
   }
 
-  /** Explicitly rebind to the active tab (e.g. when starting a new session). */
-  rebindActive(tab: AffinityTab, sessionId?: string): boolean {
+  /** Bind an unmapped session only after an explicit new-session activation. */
+  bindNewSession(sessionId: string, tab: AffinityTab): boolean {
+    const sid = sessionId.trim()
+    if (sid === '') return false
+    const previous = this.sessionTabs.get(sid)
+    this.sessionTabs.set(sid, { ...tab })
+    this.focusedSessionId = sid
     this.active = { ...tab }
     this.controlled = { ...tab }
     this.keptActiveTabId = null
     this.hasBound = true
     this.lost = false
-    if (sessionId !== undefined && sessionId.trim() !== '') {
-      this.sessionTabs.set(sessionId, { ...tab })
+    if (!sameTab(previous ?? null, tab)) this.revision += 1
+    return true
+  }
+
+  /** Explicitly rebind to the active tab for the named session. */
+  rebindActive(tab: AffinityTab, sessionId?: string): boolean {
+    const sid = sessionId?.trim()
+    this.active = { ...tab }
+    this.controlled = { ...tab }
+    this.keptActiveTabId = null
+    this.hasBound = true
+    this.lost = false
+    if (sid !== undefined && sid !== '') {
+      this.sessionTabs.set(sid, { ...tab })
+      this.focusedSessionId = sid
     }
     this.revision += 1
     return true
@@ -158,12 +225,21 @@ export class TabAffinityController {
     return true
   }
 
+  sessionIdsForTab(tabId: number): string[] {
+    const result: string[] = []
+    for (const [sid, tab] of this.sessionTabs.entries()) {
+      if (tab.tabId === tabId) result.push(sid)
+    }
+    return result
+  }
+
   /** Remove stale state when Chrome closes a tracked tab. */
   removeTab(tabId: number): boolean {
     let sessionRemoved = false
     for (const [sid, sTab] of this.sessionTabs.entries()) {
       if (sTab.tabId === tabId) {
         this.sessionTabs.delete(sid)
+        if (this.focusedSessionId === sid) this.focusedSessionId = null
         sessionRemoved = true
       }
     }
@@ -239,9 +315,9 @@ export class TabAffinityController {
 
   /** Resolve whether a tool may run and, if so, which tab owns it. */
   resolveTarget(sessionId?: string): TabTargetResolution {
-    if (sessionId !== undefined && this.sessionTabs.has(sessionId)) {
-      const tab = this.sessionTabs.get(sessionId)!
-      return { kind: 'target', tab: { ...tab } }
+    if (sessionId !== undefined) {
+      const tab = this.sessionTabs.get(sessionId)
+      return tab === undefined ? { kind: 'lost' } : { kind: 'target', tab: { ...tab } }
     }
     switch (this.status()) {
       case 'unbound': return { kind: 'initial' }
@@ -263,10 +339,10 @@ export class TabAffinityController {
 
   /** Final dispatch guard for async calls that began before a tab switch. */
   allowsTarget(tabId: number, sessionId?: string): boolean {
-    if (sessionId !== undefined && this.sessionTabs.has(sessionId)) {
-      return this.sessionTabs.get(sessionId)!.tabId === tabId
+    if (sessionId !== undefined) {
+      return this.sessionTabs.get(sessionId)?.tabId === tabId
     }
-    const resolution = this.resolveTarget(sessionId)
+    const resolution = this.resolveTarget()
     return resolution.kind === 'target' && resolution.tab.tabId === tabId
   }
 
