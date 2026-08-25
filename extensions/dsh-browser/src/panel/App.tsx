@@ -8,12 +8,12 @@
  */
 
 import { memo, useEffect, useMemo, useRef, useState } from 'react'
-import { DEFAULT_SNAPSHOT_MAX_CHARS } from '@yuxianglin/dsh-bridge-browser/src/protocol.ts'
+import { BRIDGE_SESSION_PURGE_METHOD, DEFAULT_SNAPSHOT_MAX_CHARS } from '@yuxianglin/dsh-bridge-browser/src/protocol.ts'
 import type { BridgeCaps } from '@yuxianglin/dsh-bridge-browser/src/protocol.ts'
 import type { ServerFrame } from '@yuxianglin/dsh-bridge-browser/src/protocol.ts'
 import type { BridgeState } from '../background/bridge.ts'
 import type { AffinityTab, TabAffinityDecision, TabAffinityState } from '../background/tab-affinity.ts'
-import { connectPanel, type PanelApi, type PanelSettings } from './api.ts'
+import { connectPanel, PanelRpcError, type PanelApi, type PanelSettings } from './api.ts'
 import { renderMarkdown } from './markdown.ts'
 import whaleUrl from '../../assets/icons/deepseek-256.png'
 import type { ApprovalDecision, ApprovalRequest } from '../security/approval.ts'
@@ -84,6 +84,138 @@ function normalizeWebOrigin(value: string): string | null {
   return normalizeTrustedOrigin(value) ?? null
 }
 
+/** One editable API-relay profile in the settings view. */
+interface RelayProfileDraft {
+  /** Stable llm-pi-ai provider-route key; empty until first save mints it. */
+  key: string
+  name: string
+  protocol: 'anthropic-messages' | 'openai-completions' | 'openai-codex-responses'
+  baseUrl: string
+  /** Typed token; empty means keep whatever is already stored. */
+  token: string
+  tokenConfigured: boolean
+  modelsText: string
+  setDefault: boolean
+}
+
+/** Route keys managed by the relay editor; core-owned routes are never touched. */
+const RELAY_ROUTE_PREFIX = 'relay-'
+
+/**
+ * Display names are free-form (CJK included); the route key needs the
+ * ASCII shape the wire and credential refs expect, so CJK-heavy names
+ * collapse to a stable name hash instead of being rejected.
+ */
+function relayRouteKey(name: string): string {
+  const slug = name.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '')
+  if (slug !== '') return `${RELAY_ROUTE_PREFIX}${slug}`
+  let hash = 5381
+  for (let index = 0; index < name.length; index += 1) {
+    hash = ((hash << 5) + hash + name.charCodeAt(index)) | 0
+  }
+  return `${RELAY_ROUTE_PREFIX}n${(hash >>> 0).toString(36)}`
+}
+
+function relayTokenRef(routeKey: string): string {
+  const suffix = routeKey.slice(RELAY_ROUTE_PREFIX.length).replace(/[^a-zA-Z0-9]/g, '_').toUpperCase()
+  return `DSH_RELAY_${suffix}_TOKEN`
+}
+
+function parseRelayModels(text: string): Array<{ id: string; contextWindow?: number }> {
+  return text.split('\n').map((line) => line.trim()).filter((line) => line !== '').map((line) => {
+    const [id, contextWindow] = line.split(',').map((part) => part.trim())
+    const parsed = contextWindow === undefined || contextWindow === '' ? undefined : Number(contextWindow)
+    return {
+      id,
+      ...(parsed !== undefined && Number.isFinite(parsed) && parsed > 0 ? { contextWindow: parsed } : {}),
+    }
+  }).filter((model) => model.id !== '')
+}
+
+/** Gateways report failures with the endpoint named; surface everything we got. */
+function relayErrorText(cause: unknown): string {
+  if (cause instanceof PanelRpcError) {
+    const detailKeys = Object.keys(cause.details ?? {})
+    const details = detailKeys.length > 0 ? ` ${JSON.stringify(cause.details).slice(0, 220)}` : ''
+    return `${cause.message}${details}`
+  }
+  return cause instanceof Error ? cause.message : String(cause)
+}
+
+type DiscoveredModel = { id: string; contextWindow?: number }
+
+/**
+ * Anthropic-protocol routes have no native listing; the gateway still fails
+ * them with a "no model listing" message whose wording varies, so match the
+ * known phrasings instead of one brittle code.
+ */
+function isManualOnlyDiscovery(cause: unknown): boolean {
+  if (!(cause instanceof PanelRpcError)) return false
+  return cause.code.includes('unsupported')
+    || /no model listing|models by hand/i.test(cause.message)
+}
+
+function isAuthFailure(cause: unknown): boolean {
+  return cause instanceof PanelRpcError
+    && (cause.code.includes('credential') || /\b401\b|\b403\b|invalid[ _-]?key/i.test(cause.message))
+}
+
+async function discoverOnce(
+  api: PanelApi,
+  profile: RelayProfileDraft,
+  attempt: { api: string; baseURL: string },
+): Promise<DiscoveredModel[]> {
+  const result = await api.rpc<{ models?: DiscoveredModel[] }>('llm.discoverModels', {
+    settingsNs: 'llm-pi-ai',
+    provider: profile.key !== '' ? profile.key : relayRouteKey(profile.name),
+    api: attempt.api,
+    baseURL: attempt.baseURL,
+    ...(profile.token.trim() === '' ? {} : { apiKey: profile.token.trim() }),
+  })
+  return result.models ?? []
+}
+
+/**
+ * Build the ordered discovery attempts for one draft. Anthropic-protocol
+ * profiles have no native listing, so fall back to the relay's own
+ * OpenAI-compatible listing endpoint (`<base>/v1/models`) — New API / One API
+ * style stations serve it with the same token, and the returned ids are the
+ * ones the Anthropic route accepts.
+ */
+async function discoverWithFallback(
+  api: PanelApi,
+  profile: RelayProfileDraft,
+): Promise<{ models: DiscoveredModel[]; viaOpenaiListing: boolean }> {
+  const base = profile.baseUrl.trim().replace(/\/+$/, '')
+  const attempts: Array<{ api: string; baseURL: string; viaOpenaiListing: boolean }> = []
+  if (profile.protocol === 'anthropic-messages') {
+    attempts.push({ api: 'openai-completions', baseURL: `${base}/v1`, viaOpenaiListing: true })
+    attempts.push({ api: 'openai-completions', baseURL: base, viaOpenaiListing: true })
+  } else {
+    attempts.push({ api: profile.protocol, baseURL: base, viaOpenaiListing: false })
+    if (!base.includes('/v1')) {
+      attempts.push({ api: profile.protocol, baseURL: `${base}/v1`, viaOpenaiListing: false })
+    }
+  }
+
+  let lastCause: unknown
+  for (const attempt of attempts) {
+    try {
+      const models = await discoverOnce(api, profile, attempt)
+      if (models.length > 0) {
+        return { models, viaOpenaiListing: attempt.viaOpenaiListing }
+      }
+      lastCause = new PanelRpcError('model-discovery-failed', 'the endpoint listed no models', {
+        baseURL: attempt.baseURL,
+      })
+    } catch (cause) {
+      lastCause = cause
+      if (isAuthFailure(cause)) break
+    }
+  }
+  throw lastCause ?? new PanelRpcError('model-discovery-failed', 'model discovery failed', {})
+}
+
 function SettingsIcon(): React.JSX.Element {
   return (
     <svg viewBox="0 0 20 20" aria-hidden="true">
@@ -97,6 +229,14 @@ function PlusIcon(): React.JSX.Element {
   return (
     <svg viewBox="0 0 20 20" aria-hidden="true">
       <path d="M10 4.5v11M4.5 10h11" />
+    </svg>
+  )
+}
+
+function TrashIcon(): React.JSX.Element {
+  return (
+    <svg viewBox="0 0 20 20" aria-hidden="true">
+      <path d="M4 6h12M8 6V4.5A1.5 1.5 0 0 1 9.5 3h1A1.5 1.5 0 0 1 12 4.5V6m-7 0 .7 9.1A2 2 0 0 0 7.7 17h4.6a2 2 0 0 0 2-1.9L15 6M8.25 9v4.5M11.75 9v4.5" />
     </svg>
   )
 }
@@ -416,6 +556,10 @@ export function App(): React.JSX.Element {
   const [loadingSessions, setLoadingSessions] = useState(false)
   const [sessionChanging, setSessionChanging] = useState(false)
   const [sessionList, setSessionList] = useState<SessionPickerEntry[]>([])
+  const [relayProfiles, setRelayProfiles] = useState<RelayProfileDraft[]>([])
+  const [relayLoaded, setRelayLoaded] = useState(false)
+  const [relayNotice, setRelayNotice] = useState<string | null>(null)
+  const [relayBusy, setRelayBusy] = useState(false)
   const [sessionTitle, setSessionTitle] = useState<string | null>(null)
   const [resumeHint, setResumeHint] = useState<{ ready: boolean; sessionId: string | null }>({ ready: false, sessionId: null })
   const [questions, setQuestions] = useState<PendingQuestion[]>([])
@@ -767,6 +911,19 @@ export function App(): React.JSX.Element {
     applyHistory(created.sessionId, await readHistory(created.sessionId))
   }
 
+  /** 拉取会话列表并排除已归档条目：上游 session.list 不做归档过滤，已删除会话会以冷/附着形态残留。 */
+  async function loadVisibleSessions(): Promise<SessionPickerEntry[]> {
+    const [listed, workspaces] = await Promise.all([
+      api.rpc<{ items: SessionPickerEntry[] }>('session.list', {}),
+      api.rpc<{ archivedSessionIds?: string[] }>('workspace.list', {}).catch(() => ({ archivedSessionIds: [] as string[] })),
+    ])
+    const archived = new Set(workspaces.archivedSessionIds ?? [])
+    for (const entry of listed.items ?? []) {
+      sessionRuntimeRef.current.seedRunning(entry.sessionId, entry.running)
+    }
+    return resumableSessions(listed.items ?? []).filter((entry) => !archived.has(entry.sessionId))
+  }
+
   /** Restore the last browser conversation, then the latest durable one, before creating a chat. */
   async function initializeSession(): Promise<void> {
     if (sessionInitializationRef.current || sessionChangingRef.current || sessionRef.current !== null) return
@@ -776,8 +933,7 @@ export function App(): React.JSX.Element {
       if (settings?.autoResumeSession === true) {
         let entries: SessionPickerEntry[] = []
         try {
-          const listed = await api.rpc<{ items: SessionPickerEntry[] }>('session.list', {})
-          entries = resumableSessions(listed.items ?? [])
+          entries = await loadVisibleSessions()
         } catch {
           // The direct resume hint may still identify a live provisional session.
         }
@@ -823,11 +979,7 @@ export function App(): React.JSX.Element {
     setShowSessionPicker(true)
     setLoadingSessions(true)
     try {
-      const result = await api.rpc<{ items: SessionPickerEntry[] }>('session.list', {})
-      for (const entry of result.items ?? []) {
-        sessionRuntimeRef.current.seedRunning(entry.sessionId, entry.running)
-      }
-      const items = resumableSessions(result.items ?? [])
+      const items = await loadVisibleSessions()
       const current = items.find((entry) => entry.sessionId === sessionRef.current)
       const currentTitle = current === undefined ? undefined : projectedSessionTitle(current)
       if (currentTitle !== undefined) setSessionTitle(currentTitle)
@@ -857,6 +1009,33 @@ export function App(): React.JSX.Element {
       }
     } finally {
       finishSessionTransition(transition)
+    }
+  }
+
+  /** 删除历史会话：先走官方归档更新索引，再经桥接清理磁盘文件。 */
+  async function deleteSession(entry: SessionPickerEntry): Promise<void> {
+    if (entry.running || sessionSwitchBlocked || sessionChangingRef.current) return
+    const title = projectedSessionTitle(entry) ?? sessionDisplayTitle(entry)
+    if (!window.confirm(copy.app.deleteSessionConfirm(title))) return
+    try {
+      await api.rpc('workspace.archiveSession', { sessionId: entry.sessionId })
+      let purgeFailure: string | null = null
+      try {
+        await api.rpc(BRIDGE_SESSION_PURGE_METHOD, { sessionId: entry.sessionId })
+      } catch (cause) {
+        purgeFailure = cause instanceof Error ? cause.message : String(cause)
+      }
+      setSessionList((prev) => prev.filter((item) => item.sessionId !== entry.sessionId))
+      if (purgeFailure !== null) {
+        // 归档已生效（列表不再显示），但磁盘清理失败需要用户知道。
+        setError(copy.app.deletePurgeFailed(purgeFailure))
+      }
+      if (sessionRef.current === entry.sessionId) {
+        setShowSessionPicker(false)
+        await startNewSession()
+      }
+    } catch (cause) {
+      setError(copy.app.deleteSessionFailed(cause instanceof Error ? cause.message : String(cause)))
     }
   }
 
@@ -1050,10 +1229,242 @@ export function App(): React.JSX.Element {
   async function saveSettings(): Promise<void> {
     if (settings === null) return
     try {
+      const relaySaved = await saveRelayProfiles()
+      if (!relaySaved) return
       await api.updateSettings(settings)
       setShowSettings(false)
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause))
+    }
+  }
+
+  /** Load relay profiles from the llm-pi-ai settings namespace once per settings visit. */
+  useEffect(() => {
+    if (!showSettings || relayLoaded) return
+    let cancelled = false
+    void (async () => {
+      try {
+        const described = await api.rpc<{
+          namespaces?: Array<{ ns: string; value?: Record<string, unknown> }>
+        }>('settings.describe', {})
+        const ns = described.namespaces?.find((candidate) => candidate.ns === 'llm-pi-ai')
+        const providers = (ns?.value?.providers ?? {}) as Record<string, {
+          displayName?: string
+          api?: string
+          baseURL?: string
+          apiKeyEnv?: string
+          models?: Array<{ id: string; contextWindow?: number }>
+        }>
+        const defaults = (described.namespaces?.find((candidate) => candidate.ns === 'agent-default-model')
+          ?.value ?? {}) as { provider?: unknown }
+        const refs = Object.entries(providers)
+          .filter(([key]) => key.startsWith(RELAY_ROUTE_PREFIX))
+          .map(([, route]) => typeof route.apiKeyEnv === 'string' ? route.apiKeyEnv : '')
+          .filter((ref) => ref !== '')
+        let configuredRefs = new Set<string>()
+        if (refs.length > 0) {
+          try {
+            const creds = await api.rpc<{ credentials?: Record<string, { configured?: boolean }> }>(
+              'credentials.describe',
+              { refs },
+            )
+            configuredRefs = new Set(
+              Object.entries(creds.credentials ?? {})
+                .filter(([, view]) => view.configured === true)
+                .map(([ref]) => ref),
+            )
+          } catch {
+            // Credential visibility is cosmetic here; treat every token as unconfigured.
+          }
+        }
+        const drafts = Object.entries(providers)
+          .filter(([key]) => key.startsWith(RELAY_ROUTE_PREFIX))
+          .map(([key, route]) => ({
+            key,
+            name: typeof route.displayName === 'string' && route.displayName !== '' ? route.displayName : key,
+            protocol: (route.api === 'anthropic-messages' || route.api === 'openai-codex-responses'
+              ? route.api
+              : 'openai-completions') as RelayProfileDraft['protocol'],
+            baseUrl: typeof route.baseURL === 'string' ? route.baseURL : '',
+            token: '',
+            tokenConfigured: route.apiKeyEnv !== undefined && configuredRefs.has(route.apiKeyEnv),
+            modelsText: (route.models ?? []).map((model) => [
+              model.id,
+              model.contextWindow === undefined ? '' : String(model.contextWindow),
+            ].filter((part) => part !== '').join(', ')).join('\n'),
+            setDefault: defaults.provider === key,
+          }))
+        if (!cancelled) setRelayProfiles(drafts)
+      } catch {
+        // The namespace may not exist yet; an empty list still allows creating profiles.
+      }
+      if (!cancelled) setRelayLoaded(true)
+    })()
+    return () => { cancelled = true }
+  }, [api, showSettings, relayLoaded])
+
+  function updateRelayProfile(index: number, patch: Partial<RelayProfileDraft>): void {
+    setRelayProfiles((current) => current.map((profile, at) => at === index ? { ...profile, ...patch } : profile))
+  }
+
+  function addRelayProfile(): void {
+    setRelayNotice(null)
+    setRelayProfiles((current) => [...current, {
+      key: '',
+      name: '',
+      protocol: 'openai-completions',
+      baseUrl: '',
+      token: '',
+      tokenConfigured: false,
+      modelsText: '',
+      setDefault: false,
+    }])
+  }
+
+  async function removeRelayProfile(index: number): Promise<void> {
+    const profile = relayProfiles[index]
+    setRelayProfiles((current) => current.filter((_, at) => at !== index))
+    setRelayNotice(null)
+    if (profile === undefined || profile.key === '') return
+    try {
+      await api.rpc('settings.mutate', {
+        ns: 'llm-pi-ai',
+        ops: [{ op: 'unset', path: ['providers', profile.key] }],
+      })
+      try {
+        await api.rpc('credentials.unset', { ref: relayTokenRef(profile.key) })
+      } catch {
+        // The route is gone either way; a stale credential reference harms nothing.
+      }
+    } catch (cause) {
+      setRelayNotice(copy.settings.relaySaveFailed(cause instanceof Error ? cause.message : String(cause)))
+    }
+  }
+
+  async function testRelayConnection(index: number): Promise<void> {
+    const profile = relayProfiles[index]
+    if (profile === undefined || relayBusy) return
+    setRelayBusy(true)
+    setRelayNotice(copy.settings.relayTesting)
+    try {
+      const { models, viaOpenaiListing } = await discoverWithFallback(api, profile)
+      const ids = models.map((model) => model.id)
+      if (ids.length === 0) {
+        setRelayNotice(copy.settings.relayTestManualOnly)
+        return
+      }
+      setRelayNotice(copy.settings.relayTestOk(ids.length, ids.slice(0, 4).join(', ')
+        + (ids.length > 4 ? ' …' : ''))
+        + (viaOpenaiListing ? copy.settings.relayOpenaiListingNote : ''))
+    } catch (cause) {
+      setRelayNotice(isManualOnlyDiscovery(cause)
+        ? copy.settings.relayTestManualOnly
+        : copy.settings.relayTestFailed(relayErrorText(cause)))
+    } finally {
+      setRelayBusy(false)
+    }
+  }
+
+  /** Discover models from the drafted endpoint and fill the textarea in place. */
+  async function fetchRelayModels(index: number): Promise<void> {
+    const profile = relayProfiles[index]
+    if (profile === undefined || relayBusy) return
+    if (profile.baseUrl.trim() === '') {
+      setRelayNotice(copy.settings.relayNeedBaseUrl)
+      return
+    }
+    setRelayBusy(true)
+    setRelayNotice(copy.settings.relayFetching)
+    try {
+      const { models, viaOpenaiListing } = await discoverWithFallback(api, profile)
+      if (models.length === 0) {
+        setRelayNotice(copy.settings.relayTestManualOnly)
+        return
+      }
+      updateRelayProfile(index, {
+        modelsText: models.map((model) => [
+          model.id,
+          model.contextWindow === undefined ? '' : String(model.contextWindow),
+        ].filter((part) => part !== '').join(', ')).join('\n'),
+      })
+      setRelayNotice(copy.settings.relayFetchOk(models.length)
+        + (viaOpenaiListing ? copy.settings.relayOpenaiListingNote : ''))
+    } catch (cause) {
+      setRelayNotice(isManualOnlyDiscovery(cause)
+        ? copy.settings.relayTestManualOnly
+        : copy.settings.relayTestFailed(relayErrorText(cause)))
+    } finally {
+      setRelayBusy(false)
+    }
+  }
+
+  /**
+   * Persist every relay draft: token to the credential store, route to the
+   * llm-pi-ai namespace, optional default to agent-default-model.
+   * @returns false when validation failed and the outer save must abort.
+   */
+  async function saveRelayProfiles(): Promise<boolean> {
+    for (const profile of relayProfiles) {
+      if (profile.name.trim() === '') {
+        setRelayNotice(copy.settings.relayInvalidName)
+        return false
+      }
+    }
+    try {
+      const usedKeys = new Set<string>()
+      let defaultApplied = false
+      for (const profile of relayProfiles) {
+        let key = profile.key !== '' ? profile.key : relayRouteKey(profile.name)
+        while (usedKeys.has(key)) key += '-x'
+        usedKeys.add(key)
+        const ref = relayTokenRef(key)
+        if (profile.token.trim() !== '') {
+          await api.rpc('credentials.set', { ref, value: profile.token.trim() })
+        }
+        const models = parseRelayModels(profile.modelsText)
+        const firstModel = models[0]
+        const routeValue: Record<string, unknown> = {
+          displayName: profile.name.trim(),
+          apiKeyEnv: ref,
+          baseURL: profile.baseUrl.trim(),
+          models,
+          api: profile.protocol,
+        }
+        await api.rpc('settings.mutate', {
+          ns: 'llm-pi-ai',
+          ops: [{ op: 'set', path: ['providers', key], value: routeValue }],
+        })
+        if (profile.setDefault && !defaultApplied && models.length > 0) {
+          await api.rpc('settings.mutate', {
+            ns: 'agent-default-model',
+            ops: [
+              { op: 'set', path: ['provider'], value: key },
+              { op: 'set', path: ['model'], value: firstModel?.id ?? '' },
+              { op: 'unset', path: ['reasoningEffort'] },
+            ],
+          })
+          defaultApplied = true
+          // Model selection is remembered per session; the active one would
+          // otherwise stay on its old provider until a new chat is started.
+          const activeSessionId = sessionRef.current
+          if (activeSessionId !== null && firstModel?.id !== undefined) {
+            try {
+              await api.rpc('session.selectModel', {
+                sessionId: activeSessionId,
+                provider: key,
+                model: firstModel.id,
+              })
+            } catch {
+              // Best effort: the default still applies to every new session.
+            }
+          }
+        }
+      }
+      if (relayProfiles.length > 0) setRelayNotice(copy.settings.relaySavedOk)
+      return true
+    } catch (cause) {
+      setRelayNotice(copy.settings.relaySaveFailed(cause instanceof Error ? cause.message : String(cause)))
+      return false
     }
   }
 
@@ -1178,6 +1589,102 @@ export function App(): React.JSX.Element {
             <span className="setting-toggle-control" aria-hidden="true"><span /></span>
           </label>
         </div>
+        <section className="relay-config" aria-labelledby="relay-title">
+          <div className="relay-heading">
+            <span id="relay-title">
+              <strong>{copy.settings.relaySection}</strong>
+              <small>{copy.settings.relayHelp}</small>
+            </span>
+            <button className="secondary" onClick={addRelayProfile}>{copy.settings.relayAdd}</button>
+          </div>
+          {relayProfiles.length === 0 && <p>{copy.settings.relayEmpty}</p>}
+          {relayProfiles.map((profile, index) => (
+            <div className="relay-profile" key={profile.key === '' ? `new-${index}` : profile.key}>
+              <label>
+                <span>{copy.settings.relayName}</span>
+                <input
+                  value={profile.name}
+                  onChange={(event) => updateRelayProfile(index, { name: event.target.value })}
+                  placeholder={copy.settings.relayNamePlaceholder}
+                />
+              </label>
+              <label>
+                <span>{copy.settings.relayProtocol}</span>
+                <select
+                  value={profile.protocol}
+                  onChange={(event) => updateRelayProfile(index, {
+                    protocol: event.target.value as RelayProfileDraft['protocol'],
+                  })}
+                >
+                  <option value="openai-completions">{copy.settings.relayProtocolOpenai}</option>
+                  <option value="openai-codex-responses">{copy.settings.relayProtocolCodex}</option>
+                  <option value="anthropic-messages">{copy.settings.relayProtocolClaude}</option>
+                </select>
+              </label>
+              <label>
+                <span>{copy.settings.relayBaseUrl}</span>
+                <input
+                  value={profile.baseUrl}
+                  onChange={(event) => updateRelayProfile(index, { baseUrl: event.target.value })}
+                  placeholder="https://api.example.com/v1"
+                />
+              </label>
+              <label>
+                <span>{copy.settings.relayToken}</span>
+                <input
+                  type="password"
+                  value={profile.token}
+                  onChange={(event) => updateRelayProfile(index, { token: event.target.value })}
+                  placeholder={copy.settings.relayTokenPlaceholder(profile.tokenConfigured)}
+                />
+              </label>
+              <div className="relay-models">
+                <div className="relay-label-row">
+                  <span>{copy.settings.relayModels}</span>
+                  <button className="relay-fetch" disabled={profile.baseUrl.trim() === '' || relayBusy}
+                    onClick={() => { void fetchRelayModels(index) }}>
+                    {copy.settings.relayFetchModels}
+                  </button>
+                </div>
+                <small>{copy.settings.relayModelsHelp}</small>
+                <textarea
+                  rows={3}
+                  aria-label={copy.settings.relayModels}
+                  value={profile.modelsText}
+                  onChange={(event) => updateRelayProfile(index, { modelsText: event.target.value })}
+                  placeholder={copy.settings.relayModelsPlaceholder}
+                />
+              </div>
+              <label className="setting-toggle">
+                <span className="setting-toggle-copy">
+                  <strong>{copy.settings.relaySetDefault}</strong>
+                  <small>{copy.settings.relaySetDefaultHelp}</small>
+                </span>
+                <input
+                  className="setting-toggle-input"
+                  type="checkbox"
+                  checked={profile.setDefault}
+                  onChange={(event) => setRelayProfiles((current) => current.map((candidate, at) => at === index
+                    ? { ...candidate, setDefault: event.target.checked }
+                    : candidate))}
+                />
+                <span className="setting-toggle-control" aria-hidden="true"><span /></span>
+              </label>
+              <div className="relay-profile-actions">
+                <button
+                  disabled={profile.name.trim() === '' || profile.baseUrl.trim() === ''}
+                  onClick={() => { void testRelayConnection(index) }}
+                >
+                  {copy.settings.relayTest}
+                </button>
+                <button className="secondary" onClick={() => { void removeRelayProfile(index) }}>
+                  {copy.settings.relayRemove}
+                </button>
+              </div>
+            </div>
+          ))}
+          {relayNotice !== null && <p className="hint">{relayNotice}</p>}
+        </section>
         <section className="trusted-origins" aria-labelledby="trusted-origins-title">
           <div>
             <span id="trusted-origins-title">{copy.settings.trustedOrigins}</span>
@@ -1265,6 +1772,13 @@ export function App(): React.JSX.Element {
                             {entry.cwd !== undefined && <span className="session-cwd" title={entry.cwd}>{entry.cwd}</span>}
                           </span>
                         </button>
+                        {!entry.running && (
+                          <button className="icon-button session-delete" disabled={sessionSwitchBlocked}
+                            aria-label={copy.app.deleteSession} title={copy.app.deleteSession}
+                            onClick={() => { void deleteSession(entry) }}>
+                            <TrashIcon />
+                          </button>
+                        )}
                       </li>
                     )
                   })}

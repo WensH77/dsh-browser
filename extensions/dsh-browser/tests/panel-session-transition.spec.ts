@@ -92,10 +92,10 @@ describe('panel session transitions', () => {
     const originalSessionTitle = sessionMenu.textContent
     await act(async () => { sessionMenu.click() })
     await vi.waitFor(() => {
-      expect(document.querySelectorAll('.session-list button')).toHaveLength(2)
+      expect(document.querySelectorAll('.session-list li > button:not(.session-delete)')).toHaveLength(2)
     })
 
-    const savedSession = document.querySelectorAll<HTMLButtonElement>('.session-list button')[1]
+    const savedSession = document.querySelectorAll<HTMLButtonElement>('.session-list li > button:not(.session-delete)')[1]
     await act(async () => { savedSession.click() })
     await vi.waitFor(() => {
       expect(document.querySelector('.error')?.textContent).toBe('runtime port unavailable')
