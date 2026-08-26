@@ -93,8 +93,14 @@ const SETTINGS_DEFAULTS: Settings = {
   autoResumeSession: true,
 }
 
-/** 自动探测的候选端口（dsh web 默认 3080；桌面应用常用 14389；--port 覆盖的常见值）。 */
-const DISCOVERY_PORTS = [3080, 3081, 3090, 14389]
+/**
+ * 自动探测的候选端口：
+ * - dsh web（CLI）默认 3080，端口被占时依次回退 3081 / 3090；
+ * - DSH Desktop 默认由系统随机分配本地 Web 端口（`dsh-desktop.port: 0`），
+ *   用户指南推荐固定为 43189（见 deepseek-harness-desktop docs/user-guide）；
+ * - 14389 为历史桌面应用端口，保留兼容旧版。
+ */
+const DISCOVERY_PORTS = [3080, 3081, 3090, 14389, 43189]
 const LEGACY_LOCAL_URL = 'ws://127.0.0.1:3080'
 
 /** 探测本机 dsh 的桥地址：fetch /ext/bridge-config 直到成功。 */
