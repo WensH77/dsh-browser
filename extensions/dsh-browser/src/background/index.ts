@@ -511,7 +511,13 @@ function observeActiveSummary(summary: AffinityTab): void {
   const previousStatus = tabAffinity.snapshot().status
   if (!tabAffinity.observeActive(summary)) return
   if (previousStatus !== 'handoff' && tabAffinity.snapshot().status === 'handoff') {
-    cancelPendingApprovals()
+    const focused = tabAffinity.focusedSession()
+    if (focused !== null) {
+      activeFollowRefreshes.get(focused)?.abort()
+      cancelPendingApprovals(focused)
+    } else {
+      cancelPendingApprovals()
+    }
   }
   persistTabAffinity()
   broadcastTabAffinity()
