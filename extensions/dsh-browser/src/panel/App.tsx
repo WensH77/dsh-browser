@@ -611,6 +611,7 @@ export function App(): React.JSX.Element {
   const [showSettings, setShowSettings] = useState(false)
   const [uiScale, setUiScale] = useState(DEFAULT_UI_SCALE)
   const uiScaleRef = useRef(DEFAULT_UI_SCALE)
+  const uiScaleChosenRef = useRef(false)
   const [showTextSize, setShowTextSize] = useState(false)
   const [approvalQueue, setApprovalQueue] = useState<ApprovalRequest[]>([])
   const [tabAffinity, setTabAffinity] = useState<TabAffinityState | null>(null)
@@ -697,8 +698,11 @@ export function App(): React.JSX.Element {
 
   // Text size: the stylesheet reads --ui-scale, so seed the document from
   // storage before the first paint the user notices, then keep the two in step.
+  // A choice made while the read is still in flight has already been persisted,
+  // so the late seed must not overwrite it and revert what the user sees.
   useEffect(() => {
     void loadUiScale().then((stored) => {
+      if (uiScaleChosenRef.current) return
       uiScaleRef.current = stored
       setUiScale(stored)
       applyUiScale(stored)
@@ -709,6 +713,7 @@ export function App(): React.JSX.Element {
   // the ref keeps a fast double-click from computing both steps off the same
   // stale render and silently collapsing them into one.
   function changeUiScale(next: number): void {
+    uiScaleChosenRef.current = true
     uiScaleRef.current = next
     setUiScale(next)
     applyUiScale(next)
