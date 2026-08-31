@@ -1,5 +1,10 @@
 :root {
   color-scheme: light;
+  /* Panel-wide text scale. The side panel has no browser zoom control, so the
+     topbar "Aa" button writes this token and every font-size is a multiple of
+     it. Only type scales: the px-based spacing and icon sizes stay put, which
+     keeps the narrow panel's layout intact at large sizes. */
+  --ui-scale: 1;
   --canvas: #f4f6fa;
   --canvas-deep: #edf0f6;
   --surface: #ffffff;
@@ -25,7 +30,7 @@
   --shadow: 0 10px 28px rgba(23, 32, 51, 0.08), 0 2px 6px rgba(23, 32, 51, 0.04);
   --focus-ring: 0 0 0 3px rgba(77, 107, 254, 0.18);
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI Variable Text", "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
-  font-size: 14px;
+  font-size: calc(14px * var(--ui-scale));
   font-synthesis: none;
   text-rendering: optimizeLegibility;
 }
@@ -106,7 +111,7 @@ textarea:focus-visible {
   display: grid;
   min-height: 58px;
   flex: 0 0 auto;
-  grid-template-columns: minmax(70px, 1fr) minmax(0, 1.75fr) minmax(70px, 1fr);
+  grid-template-columns: minmax(70px, 1fr) minmax(0, 1.75fr) minmax(106px, 1fr);
   align-items: center;
   gap: 8px;
   padding: 10px 14px;
@@ -162,7 +167,7 @@ textarea:focus-visible {
 
 .tab-affinity-heading .eyebrow {
   color: var(--security);
-  font-size: 8.5px;
+  font-size: calc(8.5px * var(--ui-scale));
   letter-spacing: 0.1em;
   white-space: nowrap;
 }
@@ -179,7 +184,7 @@ textarea:focus-visible {
   min-width: 0;
   color: var(--ink-strong);
   font-family: "Avenir Next", "Segoe UI Variable Display", "PingFang SC", sans-serif;
-  font-size: 13.5px;
+  font-size: calc(13.5px * var(--ui-scale));
   font-weight: 720;
   letter-spacing: -0.022em;
   line-height: 1.3;
@@ -199,7 +204,7 @@ textarea:focus-visible {
   z-index: 1;
   display: grid;
   min-width: 0;
-  grid-template-columns: 12px 48px minmax(0, 1fr);
+  grid-template-columns: 12px calc(48px * var(--ui-scale)) minmax(0, 1fr);
   align-items: baseline;
   gap: 5px;
   padding: 2px 0;
@@ -218,7 +223,7 @@ textarea:focus-visible {
 
 .tab-affinity-node small {
   color: var(--faint);
-  font-size: 9px;
+  font-size: calc(9px * var(--ui-scale));
   font-weight: 680;
   letter-spacing: 0.02em;
   line-height: 1.35;
@@ -227,7 +232,7 @@ textarea:focus-visible {
 .tab-affinity-node > span {
   overflow: hidden;
   color: var(--ink);
-  font-size: 11px;
+  font-size: calc(11px * var(--ui-scale));
   font-weight: 620;
   line-height: 1.35;
   text-overflow: ellipsis;
@@ -265,7 +270,7 @@ textarea:focus-visible {
 .tab-affinity > p {
   margin: 9px 0 0;
   color: var(--muted);
-  font-size: 10.5px;
+  font-size: calc(10.5px * var(--ui-scale));
   line-height: 1.45;
 }
 
@@ -281,7 +286,7 @@ textarea:focus-visible {
   padding: 6px 11px;
   border-radius: 8px;
   cursor: pointer;
-  font-size: 10.5px;
+  font-size: calc(10.5px * var(--ui-scale));
   font-weight: 680;
   transition: border-color 150ms ease, background-color 150ms ease, transform 150ms ease;
 }
@@ -341,6 +346,7 @@ textarea:focus-visible {
 
 .connection {
   display: inline-flex;
+  max-width: 100%;
   min-width: 0;
   min-height: 26px;
   align-items: center;
@@ -351,7 +357,7 @@ textarea:focus-visible {
   border-radius: 999px;
   background: var(--surface);
   color: var(--muted);
-  font-size: 10.5px;
+  font-size: calc(10.5px * var(--ui-scale));
   font-weight: 600;
   line-height: 1;
   white-space: nowrap;
@@ -378,7 +384,7 @@ textarea:focus-visible {
   background: transparent;
   color: var(--ink-strong);
   cursor: pointer;
-  font-size: 13.5px;
+  font-size: calc(13.5px * var(--ui-scale));
   font-weight: 680;
   letter-spacing: -0.015em;
   line-height: 1.2;
@@ -563,7 +569,7 @@ textarea:focus-visible {
   margin: 0 0 7px;
   color: var(--ink-strong);
   font-family: "Avenir Next", "Segoe UI Variable Display", "PingFang SC", sans-serif;
-  font-size: 20px;
+  font-size: calc(20px * var(--ui-scale));
   font-weight: 720;
   letter-spacing: -0.035em;
   line-height: 1.25;
@@ -572,7 +578,7 @@ textarea:focus-visible {
 .empty p {
   margin: 0;
   color: var(--muted);
-  font-size: 12px;
+  font-size: calc(12px * var(--ui-scale));
   line-height: 1.65;
 }
 
@@ -584,7 +590,7 @@ textarea:focus-visible {
   background: var(--surface);
   color: var(--blue-ink);
   cursor: pointer;
-  font-size: 11.5px;
+  font-size: calc(11.5px * var(--ui-scale));
   font-weight: 680;
   box-shadow: 0 4px 12px rgba(23, 32, 51, 0.05);
   transition: border-color 150ms ease, background-color 150ms ease, transform 150ms ease;
@@ -616,7 +622,7 @@ textarea:focus-visible {
   max-width: calc(100% - 38px);
   margin: 0;
   font-family: inherit;
-  font-size: 13px;
+  font-size: calc(13px * var(--ui-scale));
   line-height: 1.65;
   overflow-wrap: anywhere;
   word-break: break-word;
@@ -698,7 +704,7 @@ textarea:focus-visible {
   color: var(--faint);
   cursor: zoom-in;
   font: inherit;
-  font-size: 10px;
+  font-size: calc(10px * var(--ui-scale));
 }
 
 .message-image.single {
@@ -730,7 +736,7 @@ textarea:focus-visible {
   color: var(--muted);
   cursor: pointer;
   font: inherit;
-  font-size: 10px;
+  font-size: calc(10px * var(--ui-scale));
 }
 
 .image-lightbox {
@@ -763,7 +769,7 @@ textarea:focus-visible {
   background: rgba(15, 23, 40, 0.8);
   color: #ffffff;
   cursor: pointer;
-  font-size: 22px;
+  font-size: calc(22px * var(--ui-scale));
   line-height: 1;
 }
 
@@ -830,7 +836,7 @@ textarea:focus-visible {
 
 .tool-label {
   color: var(--faint);
-  font-size: 9.5px;
+  font-size: calc(9.5px * var(--ui-scale));
   font-weight: 700;
   letter-spacing: 0.08em;
   line-height: 1.25;
@@ -841,7 +847,7 @@ textarea:focus-visible {
   overflow: hidden;
   color: #45506a;
   font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
-  font-size: 10.5px;
+  font-size: calc(10.5px * var(--ui-scale));
   line-height: 1.45;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -851,7 +857,7 @@ textarea:focus-visible {
   min-width: 26px;
   flex: 0 0 auto;
   color: var(--faint);
-  font-size: 9.5px;
+  font-size: calc(9.5px * var(--ui-scale));
   font-weight: 650;
   text-align: right;
 }
@@ -874,7 +880,7 @@ textarea:focus-visible {
   max-width: 92%;
   padding: 3px 8px;
   color: var(--faint);
-  font-size: 11px;
+  font-size: calc(11px * var(--ui-scale));
   line-height: 1.5;
   text-align: center;
 }
@@ -906,19 +912,19 @@ textarea:focus-visible {
 }
 
 .row .body.md h1 {
-  font-size: 17px;
+  font-size: calc(17px * var(--ui-scale));
 }
 
 .row .body.md h2 {
-  font-size: 15.5px;
+  font-size: calc(15.5px * var(--ui-scale));
 }
 
 .row .body.md h3 {
-  font-size: 14px;
+  font-size: calc(14px * var(--ui-scale));
 }
 
 .row .body.md h4 {
-  font-size: 13px;
+  font-size: calc(13px * var(--ui-scale));
 }
 
 .row .body.md ul,
@@ -938,7 +944,7 @@ textarea:focus-visible {
   border-radius: 5px;
   background: #eef1f6;
   font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
-  font-size: 11.5px;
+  font-size: calc(11.5px * var(--ui-scale));
 }
 
 .row .body.md pre {
@@ -958,7 +964,7 @@ textarea:focus-visible {
   border: 0;
   background: transparent;
   color: inherit;
-  font-size: 11px;
+  font-size: calc(11px * var(--ui-scale));
   line-height: 1.6;
 }
 
@@ -982,7 +988,7 @@ textarea:focus-visible {
   margin: 9px 0;
   border-collapse: collapse;
   overflow-x: auto;
-  font-size: 11.5px;
+  font-size: calc(11.5px * var(--ui-scale));
   white-space: nowrap;
 }
 
@@ -1010,7 +1016,7 @@ textarea:focus-visible {
   align-items: center;
   gap: 9px;
   color: var(--faint);
-  font-size: 10.5px;
+  font-size: calc(10.5px * var(--ui-scale));
   line-height: 1;
 }
 
@@ -1044,7 +1050,7 @@ textarea:focus-visible {
   background: var(--blue-soft);
   color: var(--blue-ink);
   font-family: "Avenir Next", "Segoe UI Variable Display", sans-serif;
-  font-size: 16px;
+  font-size: calc(16px * var(--ui-scale));
   font-weight: 760;
 }
 
@@ -1056,7 +1062,7 @@ textarea:focus-visible {
   margin: 2px 0 0;
   color: var(--ink-strong);
   font-family: "Avenir Next", "Segoe UI Variable Display", "PingFang SC", sans-serif;
-  font-size: 14.5px;
+  font-size: calc(14.5px * var(--ui-scale));
   font-weight: 700;
   letter-spacing: -0.02em;
   line-height: 1.3;
@@ -1094,7 +1100,7 @@ textarea:focus-visible {
   border-radius: 7px;
   background: #e4e9f4;
   color: var(--muted);
-  font-size: 9.5px;
+  font-size: calc(9.5px * var(--ui-scale));
   font-weight: 750;
 }
 
@@ -1107,7 +1113,7 @@ textarea:focus-visible {
 
 .question-header {
   color: var(--blue-ink);
-  font-size: 9.5px;
+  font-size: calc(9.5px * var(--ui-scale));
   font-weight: 750;
   letter-spacing: 0.07em;
   line-height: 1.25;
@@ -1116,7 +1122,7 @@ textarea:focus-visible {
 
 .question-copy > strong {
   color: var(--ink-strong);
-  font-size: 12.5px;
+  font-size: calc(12.5px * var(--ui-scale));
   font-weight: 680;
   line-height: 1.5;
   overflow-wrap: anywhere;
@@ -1124,7 +1130,7 @@ textarea:focus-visible {
 
 .question-copy > small {
   color: var(--muted);
-  font-size: 10.5px;
+  font-size: calc(10.5px * var(--ui-scale));
   line-height: 1.45;
   overflow-wrap: anywhere;
 }
@@ -1173,7 +1179,7 @@ textarea:focus-visible {
 
 .question-option strong {
   color: var(--ink);
-  font-size: 11.5px;
+  font-size: calc(11.5px * var(--ui-scale));
   font-weight: 620;
   line-height: 1.4;
   overflow-wrap: anywhere;
@@ -1181,7 +1187,7 @@ textarea:focus-visible {
 
 .question-option small {
   color: var(--muted);
-  font-size: 10px;
+  font-size: calc(10px * var(--ui-scale));
   line-height: 1.4;
   overflow-wrap: anywhere;
 }
@@ -1196,7 +1202,7 @@ textarea:focus-visible {
   outline: none;
   background: var(--surface);
   color: var(--ink);
-  font-size: 11.5px;
+  font-size: calc(11.5px * var(--ui-scale));
   line-height: 1.4;
 }
 
@@ -1227,7 +1233,7 @@ textarea:focus-visible {
   padding: 8px 12px;
   border-radius: 10px;
   cursor: pointer;
-  font-size: 11.5px;
+  font-size: calc(11.5px * var(--ui-scale));
   font-weight: 680;
   transition: border-color 150ms ease, background-color 150ms ease, transform 150ms ease;
 }
@@ -1296,7 +1302,7 @@ textarea:focus-visible {
   border-radius: 11px;
   background: var(--danger-soft);
   color: var(--danger);
-  font-size: 11.5px;
+  font-size: calc(11.5px * var(--ui-scale));
   line-height: 1.45;
   overflow-wrap: anywhere;
 }
@@ -1344,7 +1350,7 @@ textarea:focus-visible {
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 3;
   color: var(--muted);
-  font-size: 11.5px;
+  font-size: calc(11.5px * var(--ui-scale));
   line-height: 1.5;
   overflow-wrap: anywhere;
   white-space: pre-wrap;
@@ -1371,7 +1377,7 @@ textarea:focus-visible {
   border-radius: 999px;
   background: var(--blue-wash);
   color: var(--blue-ink);
-  font-size: 10px;
+  font-size: calc(10px * var(--ui-scale));
   line-height: 1.6;
 }
 
@@ -1393,7 +1399,7 @@ textarea:focus-visible {
   color: var(--blue-ink);
   cursor: pointer;
   font: inherit;
-  font-size: 12px;
+  font-size: calc(12px * var(--ui-scale));
   line-height: 1;
 }
 
@@ -1404,7 +1410,7 @@ textarea:focus-visible {
 .page-selection-source {
   overflow: hidden;
   color: var(--faint);
-  font-size: 10px;
+  font-size: calc(10px * var(--ui-scale));
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -1446,7 +1452,7 @@ textarea:focus-visible {
   color: #ffffff;
   cursor: pointer;
   font: inherit;
-  font-size: 14px;
+  font-size: calc(14px * var(--ui-scale));
   line-height: 1;
 }
 
@@ -1461,7 +1467,7 @@ textarea:focus-visible {
   outline: none;
   background: transparent;
   color: var(--ink);
-  font-size: 12.5px;
+  font-size: calc(12.5px * var(--ui-scale));
   line-height: 1.5;
 }
 
@@ -1495,7 +1501,7 @@ textarea:focus-visible {
 .composer-actions-start > span {
   overflow: hidden;
   color: var(--faint);
-  font-size: 9.5px;
+  font-size: calc(9.5px * var(--ui-scale));
   line-height: 1;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1625,7 +1631,7 @@ textarea:focus-visible {
 
 .eyebrow {
   color: var(--blue);
-  font-size: 9.5px;
+  font-size: calc(9.5px * var(--ui-scale));
   font-weight: 750;
   letter-spacing: 0.12em;
   line-height: 1.2;
@@ -1635,7 +1641,7 @@ textarea:focus-visible {
 .settings h1 {
   margin: 0;
   color: var(--ink-strong);
-  font-size: 19px;
+  font-size: calc(19px * var(--ui-scale));
   font-weight: 720;
   letter-spacing: -0.035em;
   line-height: 1.25;
@@ -1695,7 +1701,7 @@ textarea:focus-visible {
 .update-heading h2 {
   margin: 0;
   color: var(--ink-strong);
-  font-size: 14px;
+  font-size: calc(14px * var(--ui-scale));
   font-weight: 720;
   letter-spacing: -0.02em;
   line-height: 1.3;
@@ -1717,7 +1723,7 @@ textarea:focus-visible {
   border-radius: 999px;
   background: rgba(255, 255, 255, 0.82);
   color: var(--muted);
-  font-size: 8.5px;
+  font-size: calc(8.5px * var(--ui-scale));
   font-weight: 650;
   line-height: 1;
   text-overflow: ellipsis;
@@ -1747,7 +1753,7 @@ textarea:focus-visible {
   background: rgba(255, 255, 255, 0.85);
   color: var(--blue-ink);
   font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
-  font-size: 9px;
+  font-size: calc(9px * var(--ui-scale));
   font-weight: 700;
   line-height: 1;
 }
@@ -1768,14 +1774,14 @@ textarea:focus-visible {
 
 .update-status strong {
   color: var(--ink);
-  font-size: 11px;
+  font-size: calc(11px * var(--ui-scale));
   font-weight: 700;
   line-height: 1.35;
 }
 
 .update-status small {
   color: var(--muted);
-  font-size: 9.5px;
+  font-size: calc(9.5px * var(--ui-scale));
   line-height: 1.48;
 }
 
@@ -1822,7 +1828,7 @@ textarea:focus-visible {
 }
 
 .update-reload-reminder strong {
-  font-size: 9.5px;
+  font-size: calc(9.5px * var(--ui-scale));
   font-weight: 650;
   line-height: 1.5;
 }
@@ -1834,7 +1840,7 @@ textarea:focus-visible {
   border: 1px solid #e0c989;
   border-radius: 50%;
   background: #ffffff;
-  font-size: 15px;
+  font-size: calc(15px * var(--ui-scale));
   font-weight: 700;
   line-height: 1;
   place-items: center;
@@ -1845,7 +1851,7 @@ textarea:focus-visible {
   padding: 7px 10px;
   border-radius: 9px;
   cursor: pointer;
-  font-size: 10px;
+  font-size: calc(10px * var(--ui-scale));
   font-weight: 700;
   transition: border-color 150ms ease, background-color 150ms ease, transform 150ms ease;
 }
@@ -1882,7 +1888,7 @@ textarea:focus-visible {
 
 .update-copy-error {
   color: var(--danger);
-  font-size: 9.5px;
+  font-size: calc(9.5px * var(--ui-scale));
   line-height: 1.45;
 }
 
@@ -1912,14 +1918,14 @@ textarea:focus-visible {
 
 .settings label > span {
   color: var(--ink);
-  font-size: 12px;
+  font-size: calc(12px * var(--ui-scale));
   font-weight: 680;
   line-height: 1.35;
 }
 
 .settings label > small {
   color: var(--faint);
-  font-size: 9.5px;
+  font-size: calc(9.5px * var(--ui-scale));
   line-height: 1.4;
   text-align: right;
 }
@@ -1941,14 +1947,14 @@ textarea:focus-visible {
 
 .setting-toggle-copy strong {
   color: var(--ink);
-  font-size: 12px;
+  font-size: calc(12px * var(--ui-scale));
   font-weight: 680;
   line-height: 1.35;
 }
 
 .settings label.setting-toggle > .setting-toggle-copy > small {
   color: var(--faint);
-  font-size: 9.5px;
+  font-size: calc(9.5px * var(--ui-scale));
   line-height: 1.45;
 }
 
@@ -2013,7 +2019,7 @@ textarea:focus-visible {
   outline: none;
   background: var(--canvas);
   color: var(--ink);
-  font-size: 12px;
+  font-size: calc(12px * var(--ui-scale));
   font-weight: 400;
   line-height: 1.3;
   transition: border-color 150ms ease, box-shadow 150ms ease, background-color 150ms ease;
@@ -2042,7 +2048,7 @@ textarea:focus-visible {
   padding: 9px 13px;
   border-radius: 11px;
   cursor: pointer;
-  font-size: 12px;
+  font-size: calc(12px * var(--ui-scale));
   font-weight: 680;
   transition: background-color 150ms ease, border-color 150ms ease, transform 150ms ease;
 }
@@ -2077,7 +2083,7 @@ textarea:focus-visible {
 .hint {
   margin: -3px 2px 0;
   color: var(--faint);
-  font-size: 10px;
+  font-size: calc(10px * var(--ui-scale));
   line-height: 1.55;
 }
 
@@ -2100,7 +2106,7 @@ textarea:focus-visible {
 
 .trusted-origins > div:first-child > span {
   color: var(--ink);
-  font-size: 12px;
+  font-size: calc(12px * var(--ui-scale));
   font-weight: 680;
 }
 
@@ -2108,7 +2114,7 @@ textarea:focus-visible {
 .trusted-origins p {
   margin: 0;
   color: var(--faint);
-  font-size: 9.5px;
+  font-size: calc(9.5px * var(--ui-scale));
   line-height: 1.45;
 }
 
@@ -2129,7 +2135,7 @@ textarea:focus-visible {
   overflow: hidden;
   color: var(--ink);
   font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
-  font-size: 10px;
+  font-size: calc(10px * var(--ui-scale));
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -2141,7 +2147,7 @@ textarea:focus-visible {
   background: transparent;
   color: var(--danger);
   cursor: pointer;
-  font-size: 9.5px;
+  font-size: calc(9.5px * var(--ui-scale));
   font-weight: 650;
 }
 
@@ -2168,7 +2174,7 @@ textarea:focus-visible {
   background: var(--blue);
   color: #fff;
   cursor: pointer;
-  font-size: 10px;
+  font-size: calc(10px * var(--ui-scale));
   font-weight: 700;
 }
 
@@ -2231,7 +2237,7 @@ textarea:focus-visible {
   margin: 0;
   color: var(--ink-strong);
   font-family: "Avenir Next", "Segoe UI Variable Display", "PingFang SC", sans-serif;
-  font-size: 17px;
+  font-size: calc(17px * var(--ui-scale));
   font-weight: 720;
   letter-spacing: -0.025em;
 }
@@ -2280,7 +2286,7 @@ textarea:focus-visible {
 .approval-detail > span,
 .approval-origins > span {
   color: var(--faint);
-  font-size: 9px;
+  font-size: calc(9px * var(--ui-scale));
   font-weight: 700;
   letter-spacing: 0.08em;
   text-transform: uppercase;
@@ -2288,7 +2294,7 @@ textarea:focus-visible {
 
 .approval-detail strong {
   color: var(--ink);
-  font-size: 11.5px;
+  font-size: calc(11.5px * var(--ui-scale));
   font-weight: 650;
   line-height: 1.45;
 }
@@ -2297,7 +2303,7 @@ textarea:focus-visible {
   overflow: hidden;
   color: #344054;
   font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
-  font-size: 10px;
+  font-size: calc(10px * var(--ui-scale));
   line-height: 1.45;
   overflow-wrap: anywhere;
 }
@@ -2318,7 +2324,7 @@ textarea:focus-visible {
   padding: 8px 10px;
   border-radius: 10px;
   cursor: pointer;
-  font-size: 11px;
+  font-size: calc(11px * var(--ui-scale));
   font-weight: 700;
 }
 
@@ -2363,7 +2369,7 @@ textarea:focus-visible {
   display: block;
   margin-top: 10px;
   color: var(--faint);
-  font-size: 9px;
+  font-size: calc(9px * var(--ui-scale));
   line-height: 1.4;
   text-align: center;
 }
@@ -2412,7 +2418,7 @@ textarea:focus-visible {
 
   .session-menu-trigger {
     padding-inline: 7px;
-    font-size: 12.5px;
+    font-size: calc(12.5px * var(--ui-scale));
   }
 
   .messages {
@@ -2466,12 +2472,12 @@ textarea:focus-visible {
 
 .session-picker-head strong {
   color: var(--ink-strong);
-  font-size: 12.5px;
+  font-size: calc(12.5px * var(--ui-scale));
 }
 
 .session-new {
   padding: 3px 10px;
-  font-size: 11.5px;
+  font-size: calc(11.5px * var(--ui-scale));
   color: var(--blue-ink);
   background: var(--blue-soft);
   border: 1px solid transparent;
@@ -2492,7 +2498,7 @@ textarea:focus-visible {
 .session-empty {
   margin: 6px 0 2px;
   color: var(--faint);
-  font-size: 12px;
+  font-size: calc(12px * var(--ui-scale));
 }
 
 .session-list {
@@ -2534,7 +2540,7 @@ textarea:focus-visible {
 .session-title {
   overflow: hidden;
   color: var(--ink);
-  font-size: 12px;
+  font-size: calc(12px * var(--ui-scale));
   font-weight: 680;
   line-height: 1.35;
   text-overflow: ellipsis;
@@ -2547,7 +2553,7 @@ textarea:focus-visible {
   align-items: center;
   gap: 7px;
   color: var(--faint);
-  font-size: 10.5px;
+  font-size: calc(10.5px * var(--ui-scale));
   line-height: 1.35;
 }
 
@@ -2613,20 +2619,20 @@ textarea:focus-visible {
 
 .relay-heading strong {
   color: var(--ink);
-  font-size: 12px;
+  font-size: calc(12px * var(--ui-scale));
   font-weight: 680;
 }
 
 .relay-heading small {
   color: var(--faint);
-  font-size: 9.5px;
+  font-size: calc(9.5px * var(--ui-scale));
   line-height: 1.45;
 }
 
 .relay-config > p {
   margin: 0;
   color: var(--faint);
-  font-size: 9.5px;
+  font-size: calc(9.5px * var(--ui-scale));
 }
 
 .relay-profile {
@@ -2646,13 +2652,13 @@ textarea:focus-visible {
 
 .relay-profile label > span {
   color: var(--ink);
-  font-size: 10.5px;
+  font-size: calc(10.5px * var(--ui-scale));
   font-weight: 640;
 }
 
 .relay-profile label > small {
   color: var(--faint);
-  font-size: 9px;
+  font-size: calc(9px * var(--ui-scale));
   line-height: 1.45;
 }
 
@@ -2665,13 +2671,13 @@ textarea:focus-visible {
   background: var(--surface);
   color: var(--ink);
   font: inherit;
-  font-size: 11px;
+  font-size: calc(11px * var(--ui-scale));
 }
 
 .relay-profile textarea {
   resize: vertical;
   font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
-  font-size: 10px;
+  font-size: calc(10px * var(--ui-scale));
 }
 
 .relay-profile-actions {
@@ -2686,7 +2692,7 @@ textarea:focus-visible {
   background: var(--surface);
   color: var(--ink);
   cursor: pointer;
-  font-size: 10.5px;
+  font-size: calc(10.5px * var(--ui-scale));
 }
 
 .relay-profile-actions button:hover:not(:disabled) {
@@ -2714,7 +2720,7 @@ textarea:focus-visible {
 
 .relay-label-row > span {
   color: var(--ink);
-  font-size: 10.5px;
+  font-size: calc(10.5px * var(--ui-scale));
   font-weight: 640;
 }
 
@@ -2725,7 +2731,7 @@ textarea:focus-visible {
   background: var(--surface);
   color: var(--blue);
   cursor: pointer;
-  font-size: 9.5px;
+  font-size: calc(9.5px * var(--ui-scale));
 }
 
 .relay-fetch:hover:not(:disabled) {
@@ -2735,4 +2741,109 @@ textarea:focus-visible {
 .relay-fetch:disabled {
   cursor: default;
   opacity: .55;
+}
+.text-size-panel {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 10px;
+  margin: 8px 12px 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface);
+  box-shadow: var(--shadow);
+}
+
+.text-size-panel > strong {
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+  color: var(--ink-strong);
+  font-size: calc(11.5px * var(--ui-scale));
+  font-weight: 680;
+  letter-spacing: -0.01em;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.text-size-stepper {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--canvas);
+}
+
+.text-size-stepper button {
+  display: grid;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  place-items: center;
+  border: none;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--ink);
+  cursor: pointer;
+  transition: background-color 150ms ease, color 150ms ease;
+}
+
+.text-size-stepper button svg {
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-width: 1.8;
+}
+
+.text-size-stepper button:hover:not(:disabled) {
+  background: var(--surface);
+  color: var(--blue-ink);
+}
+
+.text-size-stepper button:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+.text-size-value {
+  min-width: 42px;
+  color: var(--muted);
+  font-size: calc(10.5px * var(--ui-scale));
+  font-weight: 680;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+}
+
+.text-size-reset {
+  flex: 0 0 auto;
+  padding: 5px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--muted);
+  cursor: pointer;
+  font-size: calc(10.5px * var(--ui-scale));
+  font-weight: 680;
+}
+
+.text-size-reset:hover:not(:disabled) {
+  border-color: var(--line-strong);
+  color: var(--ink);
+}
+
+.text-size-reset:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.text-size-trigger[aria-expanded="true"] {
+  border-color: var(--line);
+  background: var(--canvas);
+  color: var(--ink-strong);
 }
