@@ -53,6 +53,92 @@ describe('TabAffinityController', () => {
     expect(affinity.snapshot().status).toBe('handoff')
   })
 
+  it('stops prompting on later tab switches after keep-always', () => {
+    const affinity = new TabAffinityController()
+    affinity.observeActive(tab(1))
+    affinity.bindInitial(tab(1))
+    affinity.observeActive(tab(2))
+
+    expect(affinity.decide('keep-always', affinity.snapshot().revision)).toBe(true)
+    expect(affinity.snapshot()).toMatchObject({ status: 'background', pinned: true, controlled: { tabId: 1 } })
+
+    affinity.observeActive(tab(3))
+    expect(affinity.snapshot()).toMatchObject({ status: 'background', pinned: true, controlled: { tabId: 1 } })
+    expect(affinity.resolveTarget()).toMatchObject({ kind: 'target', tab: { tabId: 1 } })
+
+    // Returning to the controlled tab and leaving again must still not prompt.
+    affinity.observeActive(tab(1))
+    expect(affinity.snapshot()).toMatchObject({ status: 'following', pinned: true })
+    affinity.observeActive(tab(4))
+    expect(affinity.snapshot().status).toBe('background')
+  })
+
+  it('drops the keep-always pin whenever the binding changes', () => {
+    const followed = new TabAffinityController()
+    followed.observeActive(tab(1))
+    followed.bindInitial(tab(1))
+    followed.observeActive(tab(2))
+    followed.decide('keep-always', followed.snapshot().revision)
+    followed.observeActive(tab(3))
+    expect(followed.decide('follow', followed.snapshot().revision)).toBe(true)
+    expect(followed.snapshot()).toMatchObject({ status: 'following', pinned: false, controlled: { tabId: 3 } })
+    followed.observeActive(tab(5))
+    expect(followed.snapshot().status).toBe('handoff')
+
+    const rebound = new TabAffinityController()
+    rebound.observeActive(tab(1))
+    rebound.bindInitial(tab(1))
+    rebound.observeActive(tab(2))
+    rebound.decide('keep-always', rebound.snapshot().revision)
+    rebound.rebindActive(tab(2))
+    expect(rebound.snapshot().pinned).toBe(false)
+
+    const closed = new TabAffinityController()
+    closed.observeActive(tab(1))
+    closed.bindInitial(tab(1))
+    closed.observeActive(tab(2))
+    closed.decide('keep-always', closed.snapshot().revision)
+    closed.removeTab(1)
+    expect(closed.snapshot()).toMatchObject({ status: 'lost', pinned: false })
+  })
+
+  it('re-raises the prompt when the pin is undone, without rebinding', () => {
+    const affinity = new TabAffinityController()
+    affinity.observeActive(tab(1))
+    affinity.bindInitial(tab(1))
+    affinity.observeActive(tab(2))
+    affinity.decide('keep-always', affinity.snapshot().revision)
+    affinity.observeActive(tab(3))
+
+    const pinned = affinity.snapshot()
+    expect(affinity.decide('ask-again', pinned.revision - 1)).toBe(false)
+    expect(affinity.decide('ask-again', pinned.revision)).toBe(true)
+    expect(affinity.snapshot()).toMatchObject({
+      status: 'handoff',
+      pinned: false,
+      controlled: { tabId: 1 },
+      active: { tabId: 3 },
+    })
+    expect(affinity.resolveTarget()).toEqual({ kind: 'handoff' })
+
+    // Undoing a pin that is not set is a no-op rather than a state change.
+    expect(affinity.decide('ask-again', affinity.snapshot().revision)).toBe(false)
+  })
+
+  it('rejects a keep-always pin that has no controlled tab behind it', () => {
+    const unbound = new TabAffinityController()
+    unbound.observeActive(tab(1))
+    expect(unbound.restorePinned()).toBe(false)
+    expect(unbound.snapshot().pinned).toBe(false)
+
+    const restored = new TabAffinityController()
+    restored.restoreControlled(tab(1))
+    expect(restored.restorePinned()).toBe(true)
+    restored.observeActive(tab(2))
+    expect(restored.snapshot()).toMatchObject({ status: 'background', pinned: true })
+    expect(restored.restorePinned()).toBe(false)
+  })
+
   it('supports explicit rebindActive when starting new chat', () => {
     const affinity = new TabAffinityController()
     affinity.observeActive(tab(1))
