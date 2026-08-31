@@ -148,6 +148,23 @@ describe('TabAffinityController', () => {
     expect(affinity.snapshot().revision).toBeGreaterThan(before.revision)
   })
 
+  it('keeps a restored pin when the tab navigated while the worker was down', () => {
+    // Restart shape: the stored session snapshot carries the metadata from when
+    // the session was bound, while the live tab has since navigated.
+    const affinity = new TabAffinityController()
+    affinity.restoreSessionTabs({ s1: tab(1, 'Title at bind time') })
+    affinity.restoreControlled(tab(1, 'Title after navigating'))
+    affinity.restoreFocusedSession('s1')
+    expect(affinity.restorePinned()).toBe(true)
+    affinity.observeActive(tab(2))
+    expect(affinity.snapshot()).toMatchObject({ status: 'background', pinned: true })
+
+    // Same tab id, different title/url: still the binding the user pinned.
+    affinity.focusSession('s1')
+    expect(affinity.snapshot()).toMatchObject({ pinned: true, controlled: { tabId: 1 } })
+    expect(affinity.resolveTarget()).toMatchObject({ kind: 'target', tab: { tabId: 1 } })
+  })
+
   it('rejects a keep-always pin that has no controlled tab behind it', () => {
     const unbound = new TabAffinityController()
     unbound.observeActive(tab(1))

@@ -131,8 +131,11 @@ export class TabAffinityController {
         : null
       // A pin belongs to the tab it was made for, so it survives re-focusing the
       // same binding (session resume replays the focused session) and is dropped
-      // only when focus actually moves the controlled tab.
-      if (!sameTab(previousControlled, this.controlled)) this.pinned = false
+      // only when focus actually moves the controlled tab. Identity here is the
+      // tab id alone, not sameTab(): that compares title and url for change
+      // detection, and a restored session snapshot routinely disagrees with the
+      // live tab on both after the page has navigated.
+      if (previousControlled?.tabId !== this.controlled.tabId) this.pinned = false
     }
     const changed = previousFocusedSessionId !== sessionId
       || !sameTab(previousControlled, this.controlled)
