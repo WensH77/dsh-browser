@@ -125,6 +125,29 @@ describe('TabAffinityController', () => {
     expect(affinity.decide('ask-again', affinity.snapshot().revision)).toBe(false)
   })
 
+  it('keeps a pin when focus replays the same session, drops it when the tab moves', () => {
+    const affinity = new TabAffinityController()
+    affinity.observeActive(tab(1))
+    affinity.bindNewSession('s1', tab(1))
+    affinity.bindNewSession('s2', tab(2))
+    affinity.focusSession('s1')
+    affinity.observeActive(tab(3))
+    affinity.decide('keep-always', affinity.snapshot().revision)
+    expect(affinity.snapshot()).toMatchObject({ status: 'background', pinned: true, controlled: { tabId: 1 } })
+
+    // Session resume replays the focused session: the binding is unchanged, so
+    // the pin must survive and no revision is burned.
+    const before = affinity.snapshot()
+    expect(affinity.focusSession('s1')).toBe(false)
+    expect(affinity.snapshot()).toMatchObject({ revision: before.revision, pinned: true, status: 'background' })
+
+    // Moving focus to a session on a different tab drops the pin, and the
+    // change is reported so the panel and the persisted record follow.
+    expect(affinity.focusSession('s2')).toBe(true)
+    expect(affinity.snapshot()).toMatchObject({ pinned: false, controlled: { tabId: 2 } })
+    expect(affinity.snapshot().revision).toBeGreaterThan(before.revision)
+  })
+
   it('rejects a keep-always pin that has no controlled tab behind it', () => {
     const unbound = new TabAffinityController()
     unbound.observeActive(tab(1))

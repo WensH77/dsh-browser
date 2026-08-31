@@ -113,12 +113,13 @@ export class TabAffinityController {
     const previousControlled = this.controlled
     const previousKept = this.keptActiveTabId
     const previousLost = this.lost
+    const previousPinned = this.pinned
     this.focusedSessionId = sessionId
-    this.pinned = false
     const tab = this.sessionTabs.get(sessionId)
     if (tab === undefined) {
       this.controlled = null
       this.keptActiveTabId = null
+      this.pinned = false
       this.hasBound = true
       this.lost = true
     } else {
@@ -128,11 +129,16 @@ export class TabAffinityController {
       this.keptActiveTabId = this.active !== null && this.active.tabId !== tab.tabId
         ? this.active.tabId
         : null
+      // A pin belongs to the tab it was made for, so it survives re-focusing the
+      // same binding (session resume replays the focused session) and is dropped
+      // only when focus actually moves the controlled tab.
+      if (!sameTab(previousControlled, this.controlled)) this.pinned = false
     }
     const changed = previousFocusedSessionId !== sessionId
       || !sameTab(previousControlled, this.controlled)
       || previousKept !== this.keptActiveTabId
       || previousLost !== this.lost
+      || previousPinned !== this.pinned
     if (changed) this.revision += 1
     return changed
   }
