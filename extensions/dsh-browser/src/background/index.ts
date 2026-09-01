@@ -57,6 +57,7 @@ import {
 import { TransientEventCache } from './transient-events.ts'
 import {
   TabAffinityController,
+  isTabAffinityDecision,
   type AffinityTab,
   type TabAffinityDecision,
 } from './tab-affinity.ts'
@@ -144,7 +145,7 @@ const STORAGE_KEY = 'dshSettings'
 const TAB_AFFINITY_STORAGE_KEY = 'dshTabAffinity'
 
 type StoredTabAffinity =
-  | { controlledTabId: number; keptActiveTabId?: number; sessionTabs?: Record<string, AffinityTab>; focusedSessionId?: string }
+  | { controlledTabId: number; keptActiveTabId?: number; pinned?: true; sessionTabs?: Record<string, AffinityTab>; focusedSessionId?: string }
   | { lost: true; sessionTabs?: Record<string, AffinityTab>; focusedSessionId?: string }
 
 let settings: Settings = { ...SETTINGS_DEFAULTS }
@@ -491,6 +492,7 @@ function storedAffinity(): StoredTabAffinity | null {
       ...(state.status === 'background' && state.active !== null
         ? { keptActiveTabId: state.active.tabId }
         : {}),
+      ...(state.pinned ? { pinned: true as const } : {}),
       ...(hasSessionTabs ? { sessionTabs } : {}),
       ...focus,
     }
@@ -570,6 +572,7 @@ async function restoreTabAffinity(): Promise<void> {
         ...(typeof keptActiveTabId === 'number' && Number.isInteger(keptActiveTabId) && keptActiveTabId >= 0
           ? { keptActiveTabId }
           : {}),
+        ...((candidate as { pinned?: unknown }).pinned === true ? { pinned: true as const } : {}),
         ...(typeof sessionTabs === 'object' && sessionTabs !== null ? { sessionTabs } : {}),
         ...focus,
       }
@@ -615,6 +618,9 @@ async function restoreTabAffinity(): Promise<void> {
     tabAffinity.restoreLost()
   }
 
+  // Restore the pin before syncing the active tab: otherwise the sync would
+  // surface a handoff prompt for a switch the user already said not to ask about.
+  if (record !== null && 'pinned' in record && record.pinned === true) tabAffinity.restorePinned()
   await syncActiveTab()
   if (record !== null && 'keptActiveTabId' in record) {
     const state = tabAffinity.snapshot()
@@ -1181,8 +1187,7 @@ chrome.runtime.onConnect.addListener((port) => {
       }
       case 'tab-affinity.response': {
         const response = message as { revision?: unknown; decision?: unknown; sessionId?: unknown }
-        if (typeof response.revision !== 'number'
-          || (response.decision !== 'keep' && response.decision !== 'follow')) break
+        if (typeof response.revision !== 'number' || !isTabAffinityDecision(response.decision)) break
         const sid = typeof response.sessionId === 'string' ? response.sessionId : undefined
         const decision = resolveTabAffinityResponse({
           revision: response.revision,

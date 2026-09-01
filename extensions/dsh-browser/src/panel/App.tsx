@@ -332,7 +332,9 @@ function TabAffinityBanner({
     ? copy.tabHandoff.lostBody
     : handoff
       ? copy.tabHandoff.questionBody(controlled, active)
-      : copy.tabHandoff.backgroundBody(active)
+      : state.pinned
+        ? copy.tabHandoff.pinnedBody(active)
+        : copy.tabHandoff.backgroundBody(active)
 
   return (
     <section className={`tab-affinity ${state.status}`} role={handoff || lost ? 'alert' : 'status'}>
@@ -357,6 +359,16 @@ function TabAffinityBanner({
         {state.active !== null && (
           <button className="follow" onClick={() => onDecision('follow')}>
             {lost ? copy.tabHandoff.useCurrent : handoff ? copy.tabHandoff.follow : copy.tabHandoff.followCurrent}
+          </button>
+        )}
+        {handoff && (
+          <button className="keep-always" onClick={() => onDecision('keep-always')}>
+            {copy.tabHandoff.keepAlways}
+          </button>
+        )}
+        {!handoff && !lost && state.pinned && (
+          <button className="keep-always" onClick={() => onDecision('ask-again')}>
+            {copy.tabHandoff.askAgain}
           </button>
         )}
       </div>
