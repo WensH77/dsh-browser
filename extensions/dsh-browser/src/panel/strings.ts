@@ -147,6 +147,14 @@ export interface PanelCopy {
     copied: string
     copyError: string
   }
+  textSize: {
+    open: string
+    title: string
+    smaller: string
+    larger: string
+    reset: string
+    value: (percent: string) => string
+  }
   app: {
     openSettings: string
     settings: string
@@ -363,6 +371,14 @@ const EN: PanelCopy = {
     copied: 'Command copied',
     copyError: 'Could not copy the command. Run the installer from the original installation source instead.',
   },
+  textSize: {
+    open: 'Text size',
+    title: 'Text size',
+    smaller: 'Smaller text',
+    larger: 'Larger text',
+    reset: 'Reset',
+    value: (percent) => `Text size ${percent}`,
+  },
   app: {
     openSettings: 'Open settings',
     settings: 'Settings',
@@ -578,6 +594,14 @@ const ZH: PanelCopy = {
     copyCheckoutCommand: '复制 checkout 命令',
     copied: '命令已复制',
     copyError: '无法复制命令，请回到原安装来源重新运行安装脚本。',
+  },
+  textSize: {
+    open: '字号',
+    title: '字号',
+    smaller: '缩小字号',
+    larger: '放大字号',
+    reset: '恢复默认',
+    value: (percent) => `字号 ${percent}`,
   },
   app: {
     openSettings: '打开设置',

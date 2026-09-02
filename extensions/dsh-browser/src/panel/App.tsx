@@ -19,6 +19,15 @@ import whaleUrl from '../../assets/icons/deepseek-256.png'
 import type { ApprovalDecision, ApprovalRequest } from '../security/approval.ts'
 import { getUiLocale } from '../i18n.ts'
 import { PANEL_COPY, type PanelCopy } from './strings.ts'
+import {
+  applyUiScale,
+  DEFAULT_UI_SCALE,
+  formatUiScale,
+  loadUiScale,
+  saveUiScale,
+  stepUiScale,
+  uiScaleAtLimit,
+} from './ui-scale.ts'
 import { QuestionCard } from './QuestionCard.tsx'
 import { UpdateCard } from './UpdateCard.tsx'
 import { MessageImages } from './MessageImages.tsx'
@@ -289,12 +298,64 @@ function BackIcon(): React.JSX.Element {
   )
 }
 
+function TextSizeIcon(): React.JSX.Element {
+  return (
+    <svg viewBox="0 0 20 20" aria-hidden="true">
+      <path d="M2.5 14.5 6.25 5h1.5l3.75 9.5M4.1 11.4h5.8" />
+      <path d="M12.4 14.5 15 7.6h1.1l2.6 6.9M13.5 12.4h4.1" />
+    </svg>
+  )
+}
+
+function MinusIcon(): React.JSX.Element {
+  return (
+    <svg viewBox="0 0 20 20" aria-hidden="true">
+      <path d="M5 10h10" />
+    </svg>
+  )
+}
+
 function ShieldIcon(): React.JSX.Element {
   return (
     <svg viewBox="0 0 20 20" aria-hidden="true">
       <path d="M10 2.5 16 5v4.2c0 3.8-2.45 6.45-6 8.3-3.55-1.85-6-4.5-6-8.3V5l6-2.5Z" />
       <path d="M10 6.5v4M10 13.5h.01" />
     </svg>
+  )
+}
+
+/** Stepper for the panel-wide text scale; see `ui-scale.ts` for the model. */
+function TextSizePanel({
+  scale,
+  copy,
+  onStep,
+  onReset,
+}: {
+  scale: number
+  copy: PanelCopy
+  onStep: (direction: 1 | -1) => void
+  onReset: () => void
+}): React.JSX.Element {
+  return (
+    <section className="text-size-panel" aria-label={copy.textSize.title}>
+      <strong>{copy.textSize.title}</strong>
+      <div className="text-size-stepper">
+        <button type="button" disabled={uiScaleAtLimit(scale, -1)}
+          onClick={() => onStep(-1)}
+          aria-label={copy.textSize.smaller} title={copy.textSize.smaller}>
+          <MinusIcon />
+        </button>
+        <span className="text-size-value" role="status"
+          aria-label={copy.textSize.value(formatUiScale(scale))}>{formatUiScale(scale)}</span>
+        <button type="button" disabled={uiScaleAtLimit(scale, 1)}
+          onClick={() => onStep(1)}
+          aria-label={copy.textSize.larger} title={copy.textSize.larger}>
+          <PlusIcon />
+        </button>
+      </div>
+      <button type="button" className="text-size-reset" disabled={scale === DEFAULT_UI_SCALE}
+        onClick={onReset}>{copy.textSize.reset}</button>
+    </section>
   )
 }
 
@@ -560,6 +621,10 @@ export function App(): React.JSX.Element {
   const [working, setWorking] = useState(false)
   const [stopping, setStopping] = useState(false)
   const [showSettings, setShowSettings] = useState(false)
+  const [uiScale, setUiScale] = useState(DEFAULT_UI_SCALE)
+  const uiScaleRef = useRef(DEFAULT_UI_SCALE)
+  const uiScaleChosenRef = useRef(false)
+  const [showTextSize, setShowTextSize] = useState(false)
   const [approvalQueue, setApprovalQueue] = useState<ApprovalRequest[]>([])
   const [tabAffinity, setTabAffinity] = useState<TabAffinityState | null>(null)
   const [trustedOriginInput, setTrustedOriginInput] = useState('')
@@ -641,6 +706,30 @@ export function App(): React.JSX.Element {
       : removePendingQuestion(current, target)
     questionSubmissionsRef.current = updated
     setQuestionSubmissions(updated)
+  }
+
+  // Text size: the stylesheet reads --ui-scale, so seed the document from
+  // storage before the first paint the user notices, then keep the two in step.
+  // A choice made while the read is still in flight has already been persisted,
+  // so the late seed must not overwrite it and revert what the user sees.
+  useEffect(() => {
+    void loadUiScale().then((stored) => {
+      if (uiScaleChosenRef.current) return
+      uiScaleRef.current = stored
+      setUiScale(stored)
+      applyUiScale(stored)
+    })
+  }, [])
+
+  // The stepper emits a direction, not a value: resolving the next step against
+  // the ref keeps a fast double-click from computing both steps off the same
+  // stale render and silently collapsing them into one.
+  function changeUiScale(next: number): void {
+    uiScaleChosenRef.current = true
+    uiScaleRef.current = next
+    setUiScale(next)
+    applyUiScale(next)
+    saveUiScale(next)
   }
 
   // Settings: seed from storage, then let the panel own the form.
@@ -1749,10 +1838,19 @@ export function App(): React.JSX.Element {
             aria-label={copy.app.newSession} title={copy.app.newSession}>
             <PlusIcon />
           </button>
+          <button className="icon-button text-size-trigger" onClick={() => setShowTextSize((open) => !open)}
+            aria-expanded={showTextSize} aria-label={copy.textSize.open} title={copy.textSize.open}>
+            <TextSizeIcon />
+          </button>
           <button className="icon-button settings-trigger" onClick={() => setShowSettings(true)}
             aria-label={copy.app.openSettings} title={copy.app.settings}><SettingsIcon /></button>
         </div>
       </header>
+      {showTextSize && (
+        <TextSizePanel scale={uiScale} copy={copy}
+          onStep={(direction) => changeUiScale(stepUiScale(uiScaleRef.current, direction))}
+          onReset={() => changeUiScale(DEFAULT_UI_SCALE)} />
+      )}
       <TabAffinityBanner state={tabAffinity} copy={copy} onDecision={decideTabAffinity} />
       {showSessionPicker && (
         <section className="session-picker" aria-label={copy.app.sessions}>
