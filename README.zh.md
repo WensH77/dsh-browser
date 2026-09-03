@@ -8,7 +8,10 @@
 
 `dsh` 是由 DeepSeek AI 开发的开源、插件化 agent harness（智能体框架）。本仓库将配套的浏览器桥插件与 Chrome/Firefox MV3 扩展组成一个独立的 pnpm workspace。
 
-浏览器操作仍采用纯文本设计：页面会转换为结构化文本和带编号的交互元素清单，模型通过编号定位元素。dsh 0.1.1 的多模态对话走独立通道——宿主声明图片能力时，侧栏可发送 PNG、JPEG、WebP 和 GIF；浏览器工具本身仍不会截取页面截图。
+浏览器操作仍采用纯文本设计：页面会转换为结构化文本和带编号的交互元素清单，模型通过编号定位元素。dsh 0.1.2 的多模态对话走独立通道——宿主声明图片能力时，侧栏可发送 PNG、JPEG、WebP 和 GIF；浏览器工具本身仍不会截取页面截图。
+
+> [!IMPORTANT]
+> 当前迁移分支只面向 dsh 0.1.2，不包含 0.1.1 兼容路径。待 0.1.2 包发布到 npm 后，仓库会原子更新运行时 pin。
 
 ## 快速安装
 
@@ -128,10 +131,10 @@ pnpm --filter dsh-browser-extension run build:firefox
 cd ~/.dsh/dsh-browser && pnpm start
 ```
 
-使用源码 checkout 时，请在仓库根目录运行 `pnpm start`。如需启动最新公开版本的 dsh：
+使用源码 checkout 时，请在仓库根目录运行 `pnpm start`。待正式发布后，受支持的精确公开版本为：
 
 ```sh
-npx @deepseek-ai/dsh web
+npx @deepseek-ai/dsh@0.1.2 web
 ```
 
 Chrome 本机使用无需配置；Firefox 需要填写上述本地桥 token。打开任意 `http://` 或 `https://` 页面，点击 DeepSeek 鲸鱼图标，等待侧边栏显示**已连接**。已有标签页会在第一次操作时自动加载；浏览器受保护页面和扩展商店不受支持。

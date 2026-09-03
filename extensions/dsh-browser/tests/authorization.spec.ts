@@ -40,14 +40,14 @@ describe('approvalPromptForCall', () => {
     expect(prompt?.summary).not.toContain('my-password')
   })
 
-  it('never offers persistent trust for cross-origin navigation', () => {
+  it('offers persistent trust for the destination of any navigation', () => {
     const prompt = approvalPromptForCall(call('browser_navigate', {
       url: 'https://bank.example/transfer?token=secret#confirm',
     }), 'auto', FRAMES, 'zh')
 
     expect(prompt).toMatchObject({
-      origins: ['https://app.example', 'https://bank.example'],
-      canTrust: false,
+      origins: ['https://bank.example'],
+      canTrust: true,
       summary: '导航到 https://bank.example/transfer',
     })
     expect(prompt?.summary).not.toContain('secret')

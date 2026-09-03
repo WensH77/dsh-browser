@@ -2,9 +2,9 @@
 
 English | [中文](README.zh.md)
 
-The **browser-operation bridge** for dsh: mounts a token-authenticated WebSocket carrier (`/ext/bridge`) that the Chrome extension connects to, proxies gateway RPCs through the same fetch handler the `/api` surface uses, pumps session events per connection, and registers the text-only `browser_*` tool set that reads and operates the user's active tab through the extension — click elements, fill forms, scroll, and navigate in the real browser, login state preserved. The side panel is the conversation entry; the tools are the product.
+The **pure browser-tool bridge** for dsh: mounts a token-authenticated WebSocket carrier (`/ext/bridge`) that the Chrome extension connects to, and registers the text-only `browser_*` tool set that reads and operates the user's active tab through the extension — click elements, fill forms, scroll, and navigate in the real browser, login state preserved. The bridge carries **only tool frames**: no chat, settings, credentials, or event streams pass through it, so dsh's gateway can keep evolving without touching this contract. Chat and sessions belong to standard dsh clients (web GUI / CLI); the extension side is a status view plus options/approval popups.
 
-**Text-only browser tools, multimodal chat passthrough**: page snapshots stay structured text (title, main content, numbered interactive inventory, and masked form fields), and every browser action uses stable inventory numbers. The generic RPC carrier also passes dsh 0.1.1 image prompts and durable attachment reads; deferred new sessions expose image limits only when the host actually mounts the attachment service.
+**Text-only by design**: page snapshots stay structured text (title, main content, numbered interactive inventory, and masked form fields), and every browser action uses stable inventory numbers. DeepSeek models have no vision, so nothing here is an image.
 
 ## Config
 
@@ -14,10 +14,6 @@ The **browser-operation bridge** for dsh: mounts a token-authenticated WebSocket
 | `toolTimeoutMs` | `number` | 90000 | Per-tool-call budget, leaving time for the extension's 60-second approval window. |
 | `snapshotMaxChars` | `number` | 32000 | Upper bound on one rendered snapshot's characters, minimum 500 (also negotiated to the extension via `hello.ok` caps). |
 | `maxInteractiveItems` | `number` | 60 | Upper bound on interactive inventory items per snapshot. |
-| `sessionWorkspacePath` | `string` | `~/.dsh/browser-sessions` | Dedicated Host Workspace for extension-created sessions. The plugin creates and idempotently registers the directory on the first implicit `session.create`; the session cwd becomes this path, so the GUI shows a `browser-sessions` workspace group. Set `""` to keep sessions Ungrouped. |
-| `deferSessionCreate` | `boolean` | `true` | Sessions materialize only on the first message: `session.create` answers with a provisional id (nothing persisted), history reads empty, and the first `session.prompt` creates the real session (same id, original payload). Opening the panel without chatting leaves zero trace in the session store/GUI. |
-
-Workspace grouping is best-effort. If the composition has no workspace domain, directory creation fails, or `workspace.create` rejects the path, the plugin logs one warning and sends every session creation without an injected workspace so browser chat remains usable.
 
 ## Usage
 
@@ -37,10 +33,10 @@ cd $HOME\.dsh\dsh-browser; pnpm start
 
 Developers can instead clone the repository and run `./scripts/install.sh` followed by `pnpm start` from that checkout. The local mode uses the current branch without downloading or overwriting source files. Both installation modes register the same profile bundle; build tools resolve only from the selected workspace and never from a parent checkout or parent `node_modules` directory.
 
-The latest public runtime also loads the registered bundle:
+Once dsh 0.1.2 is published to npm, that exact runtime can also load the registered bundle. Pre-0.1.2 runtimes are not supported:
 
 ```sh
-npx @deepseek-ai/dsh web
+npx @deepseek-ai/dsh@0.1.2 web
 ```
 
 The installer copies the unpacked extension to `~/.dsh/browser-extension` and opens `chrome://extensions`. Load that stable directory in Chrome and use the side panel. Loopback connections are discovered automatically and require no token entry; non-loopback deployments still require the configured bearer token.
@@ -58,7 +54,7 @@ The installer copies the unpacked extension to `~/.dsh/browser-extension` and op
 Frames are JSON objects discriminated by `t`, defined in [`protocol.ts`](src/protocol.ts) — the single source of truth shared with the extension through the workspace package's `./src/*` export. The built package also publishes `@yuxianglin/dsh-bridge-browser/protocol` for external consumers.
 
 - Client → server: `hello` (auth + caps), `rpc` (gateway method passthrough), `respond` (resolve a host interaction by its RPC id), `tool.result`, `pong`.
-- Server → client: `hello.ok` (echoes negotiated caps), `rpc.result`, `respond.result` (correlated acceptance or error), `event` (gateway event envelope, same shape as `/api/events.mux`), `tool.call`, `ping`, `error`.
+- Server → client: `hello.ok` (echoes negotiated caps), `rpc.result`, `respond.result` (correlated acceptance or error), `event` (bridge-owned projection of dsh Remote streams and waterfalls), `tool.call`, `ping`, `error`.
 
 Each `respond` carries a globally unique transport id as well as the host interaction's `rpcId`. The extension routes its receipt only to the panel that initiated it and rejects pending responses on timeout, panel closure, or bridge disconnection.
 

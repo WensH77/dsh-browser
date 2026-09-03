@@ -2,9 +2,7 @@
 
 English | [中文](README.zh.md)
 
-The **browser-operation end** of dsh: the model reads and operates the browser page you have open — extract content, click elements, fill forms, scroll, and navigate, all in the real page with your login state preserved. The side panel is the conversation entry.
-
-**Two explicit channels**: browser pages are still rendered as structured text (a numbered interactive-element inventory), so browser tools never take screenshots. Separately, a dsh 0.1.1 host can advertise multimodal image limits; the side panel then accepts PNG, JPEG, WebP, and GIF attachments and renders their durable history references.
+The **pure browser-operation end** of dsh: the model reads and operates the browser page you have open — extract content, click elements, fill forms, scroll, and navigate, all in the real page with your login state preserved. This is a pure-tool extension: there is no in-panel chat. Conversation and sessions happen in the official dsh UI; the extension connects to the dsh bridge on load (auto-discovery), binds a session to the tab you are viewing on its first browser call, and surfaces a minimal status view (which page is being operated), an options page (connection, sharing, trusted origins, notifications), and an action popup (pending approvals).
 
 ## What the model can do
 
@@ -18,13 +16,11 @@ The **browser-operation end** of dsh: the model reads and operates the browser p
 | Navigate | `browser_navigate` / `browser_back` / `browser_forward` / `browser_reload` | Navigation inside the controlled tab, login state preserved |
 | Read region | `browser_get_text` | Lazy-loaded content / partial text |
 | Wait | `browser_wait` | Page load and render-settle detection |
-| Chat with images | `session.prompt` / `session.attachment` | Host-gated image selection, image-only sends, and durable history previews |
-| Quote what you highlight | side panel composer | The text you select in the page becomes a quote in the composer and rides along with your next message |
 
 ## Architecture
 
 ```
-side panel (React) ◄─port─► background SW/event page ◄─WS─► dsh bridge plugin
+status panel / options / popup ◄─runtime messages─► background SW/event page ◄─WS─► dsh bridge plugin
                                  │
                   tabs.sendMessage (DSH_ACTION, DSH_SELECTION_WATCH)
                                  ▲ DSH_SELECTION
@@ -84,10 +80,10 @@ The recommended zero-configuration command does not require Git or a local clone
 
    From a clone, run `pnpm start` in the repository root instead.
 
-   Or the latest public runtime:
+   Or, once published, the exact supported public runtime:
 
    ```sh
-   npx @deepseek-ai/dsh web
+   npx @deepseek-ai/dsh@0.1.2 web
    ```
 
    Both commands load the same bundle from the local `web` profile. Port 3080 is used by default; append `--port <port>` when it is occupied.

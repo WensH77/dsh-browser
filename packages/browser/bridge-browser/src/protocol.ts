@@ -24,6 +24,12 @@ export const BRIDGE_INJECT_BROWSER_SNAPSHOT_METHOD = 'bridge.injectBrowserSnapsh
 /** Internal RPC used by the panel to permanently delete one session's durable storage. */
 export const BRIDGE_SESSION_PURGE_METHOD = 'bridge.session.purge'
 
+/** Internal RPC used by the options page to reveal the GDrive export root. */
+export const BRIDGE_OPEN_GDRIVE_FOLDER_METHOD = 'bridge.openGDriveFolder'
+
+/** Internal RPC used by the extension to move a finished download into the session folder. */
+export const BRIDGE_GDRIVE_MOVE_METHOD = 'bridge.gdrive.moveIntoSession'
+
 /** Seconds a fresh socket may take to present `hello` before it is closed. */
 export const HELLO_TIMEOUT_MS = 5_000
 
@@ -55,11 +61,6 @@ export interface ToolError {
   message: string
 }
 
-/** Result sent for a pending host interaction such as ask_user_question. */
-export type RespondResult =
-  | { ok: true; value?: unknown }
-  | { ok: false; error: { code: string; message: string; details: Record<string, unknown> } }
-
 /** Capabilities negotiated in `hello`/`hello.ok`. The extension performs its own actions; these bounds shape page snapshots. */
 export interface BridgeCaps {
   /** The extension renders page state as text only (no screenshots). */
@@ -74,10 +75,8 @@ export interface BridgeCaps {
 export type ClientFrame =
   /** First frame, within HELLO_TIMEOUT_MS of socket open. */
   | { t: 'hello'; token: string; caps: BridgeCaps }
-  /** Unary gateway RPC passthrough (method names from the apiproxy RpcMethodMap). */
+  /** Unary bridge Host call (the Host adapter projects these onto dsh 0.1.2 Remotes). */
   | { t: 'rpc'; id: string; method: string; payload: unknown }
-  /** Answer or cancel a pending host interaction through /api/respond. */
-  | { t: 'respond'; id: string; rpcId: string; result: RespondResult }
   /** Result of a previously dispatched tool call. */
   | { t: 'tool.result'; id: string; ok: true; result: unknown }
   | { t: 'tool.result'; id: string; ok: false; error: ToolError }
@@ -88,14 +87,9 @@ export type ClientFrame =
 export type ServerFrame =
   /** Accepted after a valid `hello`. */
   | { t: 'hello.ok'; caps: BridgeCaps }
-  /** Reply to an `rpc` frame; `result` is the apiproxy ServerResponse envelope. */
+  /** Reply to an `rpc` frame; `result` is the bridge's stable ServerResponse envelope. */
   | { t: 'rpc.result'; id: string; ok: true; result: unknown }
   | { t: 'rpc.result'; id: string; ok: false; error: { code: string; message: string } }
-  /** Receipt for a `respond` frame (normally `{ accepted: boolean }`). */
-  | { t: 'respond.result'; id: string; ok: true; result: unknown }
-  | { t: 'respond.result'; id: string; ok: false; error: { code: string; message: string } }
-  /** One gateway event envelope (the same server-request shape the GUI's /api/events.mux carries). */
-  | { t: 'event'; frame: { rpcId: string; method: string; payload: unknown } }
   /** A model-requested browser action to execute in the user-controlled tab. */
   | { t: 'tool.call'; id: string; name: string; args: Record<string, unknown>; expiresAt: number; sessionId?: string }
   /** Withdraw a tool call that timed out or whose caller was cancelled. */
@@ -118,8 +112,6 @@ export type BridgeFrame = ClientFrame | ServerFrame
 export function isServerFrame(frame: BridgeFrame): frame is ServerFrame {
   return frame.t === 'hello.ok'
     || frame.t === 'rpc.result'
-    || frame.t === 'respond.result'
-    || frame.t === 'event'
     || frame.t === 'tool.call'
     || frame.t === 'tool.cancel'
     || frame.t === 'ping'
@@ -133,7 +125,7 @@ export function isServerFrame(frame: BridgeFrame): frame is ServerFrame {
  * @returns true for client-sendable frames.
  */
 export function isClientFrame(frame: BridgeFrame): frame is ClientFrame {
-  return frame.t === 'hello' || frame.t === 'rpc' || frame.t === 'respond' || frame.t === 'tool.result' || frame.t === 'pong'
+  return frame.t === 'hello' || frame.t === 'rpc' || frame.t === 'tool.result' || frame.t === 'pong'
 }
 
 /**
@@ -161,10 +153,6 @@ export function parseBridgeFrame(text: string): BridgeFrame | undefined {
       return typeof frame.id === 'string' && typeof frame.method === 'string'
         ? { t: 'rpc', id: frame.id, method: frame.method, payload: frame.payload }
         : undefined
-    case 'respond':
-      return typeof frame.id === 'string' && typeof frame.rpcId === 'string' && isRespondResult(frame.result)
-        ? { t: 'respond', id: frame.id, rpcId: frame.rpcId, result: frame.result }
-        : undefined
     case 'tool.result':
       if (typeof frame.id !== 'string') return undefined
       if (frame.ok === true && 'result' in frame) {
@@ -186,18 +174,6 @@ export function parseBridgeFrame(text: string): BridgeFrame | undefined {
       }
       return typeof frame.error === 'object' && frame.error !== null
         ? { t: 'rpc.result', id: frame.id, ok: false, error: frame.error as { code: string; message: string } }
-        : undefined
-    case 'respond.result':
-      if (typeof frame.id !== 'string') return undefined
-      if (frame.ok === true && 'result' in frame) {
-        return { t: 'respond.result', id: frame.id, ok: true, result: frame.result }
-      }
-      return isWireError(frame.error)
-        ? { t: 'respond.result', id: frame.id, ok: false, error: frame.error }
-        : undefined
-    case 'event':
-      return typeof frame.frame === 'object' && frame.frame !== null
-        ? { t: 'event', frame: frame.frame as ServerFrame extends { t: 'event' } ? ServerFrame['frame'] : never }
         : undefined
     case 'tool.call':
       if (frame.sessionId !== undefined
@@ -243,22 +219,3 @@ function isToolError(value: unknown): value is ToolError {
     && typeof (value as Record<string, unknown>).message === 'string'
 }
 
-function isWireError(value: unknown): value is { code: string; message: string } {
-  return typeof value === 'object' && value !== null
-    && typeof (value as Record<string, unknown>).code === 'string'
-    && typeof (value as Record<string, unknown>).message === 'string'
-}
-
-export function isRespondResult(value: unknown): value is RespondResult {
-  if (typeof value !== 'object' || value === null) return false
-  const result = value as Record<string, unknown>
-  if (result.ok === true) return result.error === undefined
-  return result.ok === false && isRespondError(result.error)
-}
-
-function isRespondError(value: unknown): value is Extract<RespondResult, { ok: false }>['error'] {
-  return isWireError(value)
-    && typeof (value as Record<string, unknown>).details === 'object'
-    && (value as Record<string, unknown>).details !== null
-    && !Array.isArray((value as Record<string, unknown>).details)
-}

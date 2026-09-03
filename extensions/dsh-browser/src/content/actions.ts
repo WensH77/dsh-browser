@@ -373,6 +373,14 @@ async function navigateAction(args: Record<string, unknown>): Promise<ActionResu
 
 async function historyAction(delta: 1 | -1): Promise<ActionResult> {
   resetDeltaState()
+  if (delta === -1 && history.length <= 1) {
+    // A tab opened directly at its first URL (our new-tab binding) has no
+    // previous entry; history.back() would be a silent no-op.
+    return {
+      text: 'There is no previous page in this tab history (the tab was opened directly at this URL). '
+        + 'Go back by navigating to the previous URL with browser_navigate instead.',
+    }
+  }
   // 同 navigate：先响应再导航（文档卸载会销毁响应端口）。
   setTimeout(() => { if (delta === -1) history.back(); else history.forward() }, 0)
   return {

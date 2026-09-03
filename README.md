@@ -8,7 +8,10 @@ Connect [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) to t
 
 `dsh` is DeepSeek AI's open-source, plugin-based agent harness. This repository provides a companion browser bridge plugin and Chrome/Firefox MV3 extension as one standalone pnpm workspace.
 
-Browser operation remains text-only: pages become structured text with a numbered inventory of interactive elements, and the model addresses those elements by number. dsh 0.1.1 multimodal chat is separate from that page channel—the side panel accepts PNG, JPEG, WebP, and GIF attachments when the host advertises image support, while browser tools still never capture screenshots.
+Browser operation remains text-only: pages become structured text with a numbered inventory of interactive elements, and the model addresses those elements by number. dsh 0.1.2 multimodal chat is separate from that page channel—the side panel accepts PNG, JPEG, WebP, and GIF attachments when the host advertises image support, while browser tools still never capture screenshots.
+
+> [!IMPORTANT]
+> The migration branch targets dsh 0.1.2 only; it does not carry a 0.1.1 compatibility path. The repository runtime pin will move atomically when the 0.1.2 packages are available on npm.
 
 ## Quick install
 
@@ -128,10 +131,10 @@ Start the managed installation with:
 cd ~/.dsh/dsh-browser && pnpm start
 ```
 
-From a source checkout, run `pnpm start` in the repository root. To use the latest public dsh release instead:
+From a source checkout, run `pnpm start` in the repository root. Once it is published, the exact supported public runtime is:
 
 ```sh
-npx @deepseek-ai/dsh web
+npx @deepseek-ai/dsh@0.1.2 web
 ```
 
 Local Chrome use requires no configuration; Firefox requires the local bridge token described above. Open an `http://` or `https://` page, click the DeepSeek whale icon, and wait for **Connected**. Existing tabs are instrumented on the first action; protected browser pages and extension stores are not supported.

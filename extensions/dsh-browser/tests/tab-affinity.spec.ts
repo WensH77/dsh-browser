@@ -299,6 +299,11 @@ describe('TabAffinityController', () => {
     expect(affinity.focusSession('session-2')).toBe(true)
     expect(affinity.snapshot()).toMatchObject({ controlled: { tabId: 2 } })
 
+    expect(affinity.hasBinding('session-1')).toBe(true)
+    expect(affinity.hasBinding('session-2')).toBe(true)
+    expect(affinity.hasBinding('session-nobody')).toBe(false)
+    expect(affinity.hasBinding('')).toBe(false)
+
     const sessionMap = affinity.sessionMap()
     expect(sessionMap['session-1']).toEqual(tab(1))
     expect(sessionMap['session-2']).toEqual(tab(2))

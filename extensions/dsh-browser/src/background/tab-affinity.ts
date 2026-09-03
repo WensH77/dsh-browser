@@ -103,6 +103,20 @@ export class TabAffinityController {
     return this.sessionTabs.get(sessionId)
   }
 
+  /** Whether a session already owns a controlled tab binding. */
+  hasBinding(sessionId: string): boolean {
+    return sessionId.trim() !== '' && this.sessionTabs.has(sessionId)
+  }
+
+  /** Release a session's tab binding and drop it as the focused session. */
+  unbindSession(sessionId: string): boolean {
+    const removed = this.sessionTabs.delete(sessionId)
+    const wasFocused = this.focusedSessionId === sessionId
+    if (wasFocused) this.focusedSessionId = null
+    if (removed || wasFocused) this.revision += 1
+    return removed || wasFocused
+  }
+
   focusedSession(): string | null {
     return this.focusedSessionId
   }

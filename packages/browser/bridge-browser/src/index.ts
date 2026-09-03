@@ -4,11 +4,12 @@
  *
  * The bridge mounts its own upgrade route (`/ext/bridge`) on the host
  * webserver, OUTSIDE the /api trust fence — so it brings its own bearer-token
- * authentication (first frame `hello` within HELLO_TIMEOUT_MS). Gateway RPCs
- * from the extension are dispatched through the same fetch-shaped handler the
- * /api carrier uses, and session events are pumped per connection. Tools
- * execute by dispatching `tool.call` frames to the connected extension, which
- * performs the action in the tab explicitly controlled by the user.
+ * authentication (first frame `hello` within HELLO_TIMEOUT_MS). It is a pure
+ * tool channel: it carries browser tool frames plus the two bridge-internal
+ * RPCs (snapshot injection, session purge) and no chat or gateway
+ * passthrough. Tools execute by dispatching `tool.call` frames to the
+ * connected extension, which performs the action in the tab explicitly
+ * controlled by the user.
  *
  * Opt-in by design: nothing is registered unless this plugin appears in the
  * composition. No dsh core code is touched.
@@ -16,17 +17,15 @@
  * @module @yuxianglin/dsh-bridge-browser
  */
 
-import { randomUUID } from 'node:crypto'
+import { spawn } from 'node:child_process'
+import { copyFile, mkdir, rename, unlink } from 'node:fs/promises'
+import { basename, join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-attachment'
 import z from '@deepseek-ai/schemastery'
 import type {} from '@deepseek-ai/dsh-tools'
-import type {} from '@deepseek-ai/dsh-host-apiproxy'
 import type { WebRoute, WebUpgradeRoute } from '@deepseek-ai/dsh-host-webserver'
-import type { ApiProxy } from '@deepseek-ai/dsh-host-apiproxy/api'
-import { RpcId } from '@deepseek-ai/dsh-host-apiproxy/api'
-import { toFetchHandler } from '@deepseek-ai/dsh-host-apiproxy'
 import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
 import { BridgeServer } from './server.ts'
 import { BrowserContextInjector } from './browser-context.ts'
@@ -37,16 +36,18 @@ import {
   DEFAULT_SNAPSHOT_MAX_CHARS,
   MIN_SNAPSHOT_MAX_CHARS,
 } from './protocol.ts'
-import { withSessionDeferral } from './session-deferral.ts'
-import { withSessionWorkspace } from './session-workspace.ts'
 import { purgeSessionFiles, type SessionPurgeDeps } from './session-purge.ts'
 import { resolveToken } from './token.ts'
+import {
+  listRunningSessions,
+  type TypertGatewayLike,
+} from './remote-host-api.ts'
 
 /** Cordis plugin name used by loader diagnostics. */
 export const name = 'bridge-browser'
 
 /** Services required by this plugin. */
-export const inject = ['webServer', 'apiProxy', 'tools', 'agents']
+export const inject = ['webServer', 'typertGateway', 'tools', 'agents', 'userQuestions']
 
 /** Default per-tool-call budget (ms). */
 const DEFAULT_TOOL_TIMEOUT_MS = 90_000
@@ -54,14 +55,28 @@ const DEFAULT_TOOL_TIMEOUT_MS = 90_000
 /** Default cap on interactive inventory items per snapshot. */
 const DEFAULT_MAX_INTERACTIVE_ITEMS = 60
 
-/** Default directory backing the browser extension's session group. */
-const DEFAULT_SESSION_WORKSPACE_PATH = dshHomePath('browser-sessions')
-
 /** Durable session storage root written by the JSONL persistence plugin. */
 const SESSIONS_ROOT = dshHomePath('sessions')
 
-/** Default: sessions materialize only on the first message (open-and-close leaves no trace). */
-const DEFAULT_DEFER_SESSION_CREATE = true
+function sanitizePathSegment(value: string): string {
+  const cleaned = value.replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '')
+  return cleaned === '' ? 'export' : cleaned.slice(0, 80)
+}
+
+/** Reveal a folder in the system file manager (host side). */
+function openFolder(path: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const opener = process.platform === 'darwin' ? 'open'
+      : process.platform === 'win32' ? 'explorer'
+        : 'xdg-open'
+    const child = spawn(opener, [path], { stdio: 'ignore' })
+    child.once('error', reject)
+    child.once('exit', (code) => {
+      if (code === 0) resolve()
+      else reject(new Error(`${opener} exited with code ${String(code)}`))
+    })
+  })
+}
 
 /** Plugin config: deployment-varying tunables only; the wire contract stays fixed. */
 export interface Config {
@@ -73,10 +88,6 @@ export interface Config {
   snapshotMaxChars?: number
   /** Upper bound on interactive inventory items per snapshot. Defaults to 60. */
   maxInteractiveItems?: number
-  /** Dedicated workspace path for extension-created sessions. Empty disables grouping. */
-  sessionWorkspacePath?: string
-  /** Defer real session creation until the first prompt. Defaults to true. */
-  deferSessionCreate?: boolean
 }
 
 export const Config: z<Config> = z.object({
@@ -84,8 +95,6 @@ export const Config: z<Config> = z.object({
   toolTimeoutMs: z.number().step(1).min(1).default(DEFAULT_TOOL_TIMEOUT_MS),
   snapshotMaxChars: z.number().step(1).min(MIN_SNAPSHOT_MAX_CHARS).default(DEFAULT_SNAPSHOT_MAX_CHARS),
   maxInteractiveItems: z.number().step(1).min(1).default(DEFAULT_MAX_INTERACTIVE_ITEMS),
-  sessionWorkspacePath: z.string().default(DEFAULT_SESSION_WORKSPACE_PATH),
-  deferSessionCreate: z.boolean().default(DEFAULT_DEFER_SESSION_CREATE),
 })
 
 /** The shape after schemastery applies its defaults to every field. */
@@ -109,8 +118,6 @@ export function resolveConfig(config: Config): ResolvedConfig {
     toolTimeoutMs: config.toolTimeoutMs ?? DEFAULT_TOOL_TIMEOUT_MS,
     snapshotMaxChars: config.snapshotMaxChars ?? DEFAULT_SNAPSHOT_MAX_CHARS,
     maxInteractiveItems: config.maxInteractiveItems ?? DEFAULT_MAX_INTERACTIVE_ITEMS,
-    sessionWorkspacePath: config.sessionWorkspacePath ?? DEFAULT_SESSION_WORKSPACE_PATH,
-    deferSessionCreate: config.deferSessionCreate ?? DEFAULT_DEFER_SESSION_CREATE,
   }
   assertPositiveInteger('toolTimeoutMs', resolved.toolTimeoutMs)
   assertPositiveInteger('snapshotMaxChars', resolved.snapshotMaxChars)
@@ -132,42 +139,50 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   const resolved = resolveConfig(config)
 
   const tokenRes = await resolveToken(resolved.token)
-  // Workspace grouping wraps the gateway create; session deferral wraps the
-  // result so materialization at first prompt still flows through grouping.
-  const api: ApiProxy = withSessionDeferral(
-    withSessionWorkspace(
-      ctx.apiProxy,
-      resolved.sessionWorkspacePath,
-      message => { ctx.logger.warn(message) },
-    ),
-    resolved.deferSessionCreate,
-    ctx.get('attachments')?.imageLimits,
-  )
+  const gateway = ctx.get('typertGateway') as unknown as TypertGatewayLike | undefined
+  if (gateway === undefined) {
+    throw new Error('bridge-browser: dsh 0.1.2 typertGateway service is required')
+  }
   const browserContext = new BrowserContextInjector(ctx.agents)
   ctx.on('agent/session-start', ({ agent }) => { browserContext.activate(agent) })
 
   const purgeSession = async (sessionId: string): Promise<void> => {
     const runningSessionIds = new Set<string>()
     try {
-      const listed = await api.sessions.list({ rpcId: RpcId(randomUUID()), payload: {} })
-      if (listed.result.ok) {
-        for (const entry of listed.result.value.items) {
-          if (entry.running) runningSessionIds.add(entry.sessionId)
-        }
+      const listed = await listRunningSessions(gateway, new AbortController().signal)
+      for (const entry of listed) {
+        if (entry.running) runningSessionIds.add(entry.sessionId)
       }
     } catch {
       // Guard is best-effort: an unavailable listing must not block deletion,
-      // because the panel already refuses running rows and archives first.
+      // because the caller archives the session before purging files.
     }
     const deps: SessionPurgeDeps = { sessionsRoot: SESSIONS_ROOT, runningSessionIds }
     await purgeSessionFiles(deps, sessionId)
   }
 
+  const gdriveRoot = dshHomePath('gdrive')
   const server = new BridgeServer({
     token: tokenRes.token,
-    apiHandler: toFetchHandler(api),
-    openEvents: (signal) => api.events.mux({ rpcId: RpcId(randomUUID()), payload: {} }, signal),
     toolTimeoutMs: resolved.toolTimeoutMs,
+    openGDriveFolder: async () => {
+      await mkdir(gdriveRoot, { recursive: true })
+      await openFolder(gdriveRoot)
+    },
+    gdriveMoveIntoSession: async (sourcePath, sessionId) => {
+      const base = basename(sourcePath)
+      if (base === '' || base === '.' || base === '..') throw new Error('invalid download path')
+      const sessionDir = join(gdriveRoot, sanitizePathSegment(sessionId))
+      await mkdir(sessionDir, { recursive: true })
+      const target = join(sessionDir, base)
+      try {
+        await rename(sourcePath, target)
+      } catch {
+        await copyFile(sourcePath, target)
+        await unlink(sourcePath).catch(() => {})
+      }
+      return { filePath: target }
+    },
     caps: {
       textOnly: true,
       snapshotMaxChars: resolved.snapshotMaxChars,
@@ -217,7 +232,12 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
       order: 107,
       text: 'A browser bridge may be connected. To read or operate the user\'s active browser page, call browser_snapshot '
         + '(text-only; numbered items are the click/type targets), unless the current turn already includes a plugin-provided '
-        + 'followed-page browser_snapshot. Reuse that injected snapshot and its indices directly. Never assume page content you have not snapshotted.',
+        + 'followed-page browser_snapshot. Reuse that injected snapshot and its indices directly. Never assume page content you have not snapshotted. '
+        + 'When the user asks to bind this session to a specific open page (for example "bind to the page"), call browser_bind_interactive — '
+        + 'it lists the pages, asks the user, and binds in one step. '
+        + 'Google Docs/Sheets/Slides/Drive file links are not readable as web pages: always call google_drive_export with the file URL '
+        + 'instead of browser_navigate or browser_snapshot. Never try to read such files through HTML views or page tools; trust the '
+        + 'export result. For spreadsheets: the tool downloads the workbook and asks which sheet to analyze; answer with a sheet name or "all".',
     }), 'bridge-browser: system prompt section')
   }
 

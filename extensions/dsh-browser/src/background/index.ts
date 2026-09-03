@@ -1,46 +1,37 @@
 /**
- * Background service worker entry: owns the bridge connection, the gateway
- * RPC client, controlled-tab tool dispatch, and the panel port service.
+ * Background service worker: pure-tool bridge client.
  *
- * MV3 survival: after the user opens the panel, its port plus a half-minute
- * `alarms` keepalive re-arm the reconnect loop. Merely loading the extension
- * never probes or claims the single-connection bridge.
+ * Owns the token-authenticated WebSocket to the dsh bridge, controlled-tab
+ * tool dispatch, tab affinity, and the small message surface shared by the
+ * status side panel, the options page, and the action popup. There is no chat,
+ * no session list, no event stream, and no host-question relay: those belong
+ * to standard dsh clients now.
  *
- * Panel port protocol (chrome.runtime.connect, name "dsh-panel"):
- *   panel → bg: { type: 'rpc', id, method, payload }
- *   panel → bg: { type: 'respond', id, rpcId, result }
- *   panel → bg: { type: 'settings', settings: Partial<Settings> }
- *   panel → bg: { type: 'session.active', sessionId }
- *   panel → bg: { type: 'approval.response', id, decision }
- *   panel → bg: { type: 'tab-affinity.response', revision, decision, sessionId }
- *   panel → bg: { type: 'tab-affinity.rebind', id }
- *   panel → bg: { type: 'panel.window', windowId }
- *   panel → bg: { type: 'selection.clear', selection? }
- *   panel → bg: { type: 'request-status' }
- *   bg → panel: { type: 'rpc.result', id, ok, result? | error? }
- *   bg → panel: { type: 'respond.result', id, ok, result? | error? }
- *   bg → panel: { type: 'status', state: BridgeState, caps? }
- *   bg → panel: { type: 'event', frame: ServerFrame }
- *   bg → panel: { type: 'approval.request', request }
- *   bg → panel: { type: 'approval.resolved', id }
- *   bg → panel: { type: 'session.resume-hint', sessionId }
- *   bg → panel: { type: 'selection', selection }
- *   bg → panel: { type: 'tab-affinity', state }
- *   bg → panel: { type: 'tab-affinity.rebind.result', id, ok, error? }
+ * The bridge connects on load (auto-discovery when no URL is configured) and
+ * a half-minute `alarms` keepalive re-arms the reconnect loop. A `stopped`
+ * state (for example code 4000: another browser owns the single bridge slot)
+ * is terminal until the popup asks for a manual reconnect or the worker
+ * restarts.
+ *
+ * Runtime message contract (see shared/messages.ts):
+ *   ui → bg: { type: 'ui.state' } ⇒ UiState snapshot
+ *   ui → bg: { type: 'settings.get' } ⇒ Settings
+ *   ui → bg: { type: 'settings.set', patch } ⇒ Settings
+ *   ui → bg: { type: 'approval.response', id, decision }
+ *   ui → bg: { type: 'reconnect' } | { type: 'open-options' }
+ *   bg → ui: push.status / push.affinity / push.approval / push.approval-resolved
  *
  * @module
  */
 
 import {
-  BRIDGE_INJECT_BROWSER_SNAPSHOT_METHOD,
-  isRespondResult,
+  BRIDGE_CONFIG_PATH,
+  BRIDGE_GDRIVE_MOVE_METHOD,
+  BRIDGE_OPEN_GDRIVE_FOLDER_METHOD,
+  BRIDGE_PATH,
   type BridgeCaps,
-  type RespondResult,
 } from '@yuxianglin/dsh-bridge-browser/src/protocol.ts'
-import type { ServerFrame } from '@yuxianglin/dsh-bridge-browser/src/protocol.ts'
-import { BRIDGE_CONFIG_PATH, BRIDGE_PATH } from '@yuxianglin/dsh-bridge-browser/src/protocol.ts'
-import { BridgeClient, type BridgeState } from './bridge.ts'
-import { createRpc } from './rpc.ts'
+import { BridgeClient } from './bridge.ts'
 import { dispatchToolCall, resetTabSnapshot, type ToolAnswer, type ToolCall } from './tools.ts'
 import {
   isApprovalDecision,
@@ -49,50 +40,32 @@ import {
   type ApprovalRequest,
 } from '../security/approval.ts'
 import { getUiLocale } from '../i18n.ts'
-import { InteractionResponseRouter } from './responses.ts'
 import {
   actionCoveredByTrustedOrigins,
   normalizeTrustedOrigin,
 } from '../security/trusted-origins.ts'
-import { TransientEventCache } from './transient-events.ts'
 import {
   TabAffinityController,
-  isTabAffinityDecision,
   type AffinityTab,
-  type TabAffinityDecision,
 } from './tab-affinity.ts'
 import { FocusedWindowTracker } from './focused-window.ts'
-import { SelectionTracker, type SelectionSource } from './selection.ts'
-import { parsePageSelection, parseSelectionCapture } from '../selection.ts'
 import { ApprovalCoordinator, type ApprovalRequestResult } from './approval-coordinator.ts'
 import {
-  RECENT_SESSION_STORAGE_KEY,
-  RecentSessionTracker,
-  sessionIdFromFrame,
-} from './session-continuity.ts'
+  SETTINGS_DEFAULTS,
+  SETTINGS_STORAGE_KEY,
+  type Settings,
+} from '../shared/settings.ts'
+import {
+  sendUiPush,
+  type ControlledTabInfo,
+  type RecentOp,
+  type UiState,
+} from '../shared/messages.ts'
 
-/** User settings persisted in chrome.storage.local. */
-export interface Settings {
-  bridgeUrl: string
-  token: string
-  sharePageContent: 'ask' | 'auto' | 'off'
-  /** Origins whose state-changing actions may run without another prompt. */
-  trustedActionOrigins: string[]
-  /** Show an OS notification when no side panel can display an approval. */
-  approvalNotifications: boolean
-  /** Restore the last active browser conversation when the panel reopens. */
-  autoResumeSession: boolean
-}
+/** Re-exported for any consumer that referenced the worker's settings type. */
+export type { Settings } from '../shared/settings.ts'
 
-const SETTINGS_DEFAULTS: Settings = {
-  // 空地址 = 自动探测本机 dsh（零配置）；手动填地址时优先手动。
-  bridgeUrl: '',
-  token: '',
-  sharePageContent: 'auto',
-  trustedActionOrigins: [],
-  approvalNotifications: true,
-  autoResumeSession: true,
-}
+export const STORAGE_KEY = SETTINGS_STORAGE_KEY
 
 /**
  * 自动探测的候选端口：
@@ -141,7 +114,7 @@ async function probeBridge(url: string): Promise<boolean> {
   }
 }
 
-const STORAGE_KEY = 'dshSettings'
+const BRIDGE_KEEPALIVE_ALARM = 'bridge-keepalive'
 const TAB_AFFINITY_STORAGE_KEY = 'dshTabAffinity'
 
 type StoredTabAffinity =
@@ -151,84 +124,53 @@ type StoredTabAffinity =
 let settings: Settings = { ...SETTINGS_DEFAULTS }
 let caps: BridgeCaps | null = null
 let bridge: BridgeClient | null = null
-let rpc: ReturnType<typeof createRpc> | null = null
-const panelPorts = new Set<chrome.runtime.Port>()
-const BRIDGE_KEEPALIVE_ALARM = 'bridge-keepalive'
-/** Invalidates an asynchronous discovery attempt when its panel lease ends. */
-let bridgeStartRevision = 0
-const interactionResponses = new InteractionResponseRouter()
-const transientEvents = new TransientEventCache()
 const tabAffinity = new TabAffinityController()
 const focusedWindow = new FocusedWindowTracker()
-const selections = new SelectionTracker()
-const recentSession = new RecentSessionTracker({
-  read: async () => (await chrome.storage.session.get(RECENT_SESSION_STORAGE_KEY))[RECENT_SESSION_STORAGE_KEY],
-  write: async (sessionId) => {
-    await chrome.storage.session.set({ [RECENT_SESSION_STORAGE_KEY]: sessionId })
-  },
-})
-/** Ephemeral allowlist: cleared when the last side panel closes or this worker restarts. */
+/** Ephemeral allowlist: cleared when the worker restarts. */
 const sessionTrustedActionOrigins = new Set<string>()
 /** Tool calls that can still be withdrawn by a bridge `tool.cancel` frame. */
 const activeToolCalls = new Map<string, AbortController>()
+/** Origin of the dsh host we connect to (http://host:port), used to keep the
+ * dsh web page itself out of the bindable targets. */
+let bridgeOrigin: string | undefined
+let bridgeHostPort: string | undefined
+
+/** 127.0.0.1 / localhost / [::1] are the same loopback host for us. */
+function normalizedHostPort(url: URL): string {
+  const host = url.hostname === 'localhost' || url.hostname === '[::1]' ? '127.0.0.1' : url.hostname
+  return `${host}:${url.port === '' ? (url.protocol === 'https:' ? '443' : '80') : url.port}`
+}
+
+/** Chrome Memory Saver may discard long-idle background tabs; a controlled
+ * tab must stay live so the agent can operate it while the user chats in the
+ * dsh page. autoDiscardable:false only prevents future discards. */
+function keepTabAlive(tabId: number): void {
+  void chrome.tabs.update(tabId, { autoDiscardable: false } as chrome.tabs.UpdateProperties).catch(() => {})
+}
+
+/** Is this page the dsh web UI we connect to (any loopback alias)? */
+function isDshPageUrl(pageUrl: string): boolean {
+  if (bridgeHostPort === undefined) return false
+  try {
+    const parsed = new URL(pageUrl)
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return false
+    return normalizedHostPort(parsed) === bridgeHostPort
+  } catch {
+    return false
+  }
+}
+/** Approvals awaiting a user decision, mirrored for the popup's ui.state. */
+const pendingApprovals = new Map<string, ApprovalRequest>()
+/** Open assistant pages (side panel / floating window) that can show cards. */
+let assistantPages = 0
+
+chrome.runtime.onConnect.addListener((port) => {
+  if (port.name !== 'assistant') return
+  assistantPages += 1
+  port.onDisconnect.addListener(() => { assistantPages = Math.max(0, assistantPages - 1) })
+})
 let lastPersistedAffinity: string | undefined
 let affinityPersistence = Promise.resolve()
-/** Per-session snapshot refreshes preserve prompt ordering without cross-session cancellation. */
-const sessionSnapshotRefreshes = new Map<string, Promise<void>>()
-const activeFollowRefreshes = new Map<string, AbortController>()
-const TAB_AFFINITY_REBIND_TIMEOUT_MS = 10_000
-
-class TabAffinityRebindError extends Error {
-  constructor(readonly code: 'no-active-tab' | 'timeout' | 'cancelled', message: string) {
-    super(message)
-    this.name = 'TabAffinityRebindError'
-  }
-}
-
-function rebindAbortReason(signal: AbortSignal): Error {
-  return signal.reason instanceof Error
-    ? signal.reason
-    : new TabAffinityRebindError('cancelled', getUiLocale() === 'zh' ? '标签页绑定已取消' : 'Tab binding was cancelled')
-}
-
-function throwIfRebindAborted(signal: AbortSignal): void {
-  if (signal.aborted) throw rebindAbortReason(signal)
-}
-
-/** Reject promptly on cancellation while safely consuming a late Chrome promise. */
-function abortable<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
-  if (signal.aborted) return Promise.reject(rebindAbortReason(signal))
-  return new Promise<T>((resolve, reject) => {
-    const onAbort = (): void => { reject(rebindAbortReason(signal)) }
-    signal.addEventListener('abort', onAbort, { once: true })
-    void promise.then(
-      (value) => {
-        signal.removeEventListener('abort', onAbort)
-        if (signal.aborted) reject(rebindAbortReason(signal))
-        else resolve(value)
-      },
-      (error: unknown) => {
-        signal.removeEventListener('abort', onAbort)
-        reject(error)
-      },
-    )
-  })
-}
-
-async function loadSettings(): Promise<Settings> {
-  const stored = await chrome.storage.local.get(STORAGE_KEY)
-  const loaded = normalizeSettings({ ...SETTINGS_DEFAULTS, ...(stored[STORAGE_KEY] as Partial<Settings> | undefined) })
-  if (loaded.bridgeUrl === LEGACY_LOCAL_URL || loaded.bridgeUrl === `${LEGACY_LOCAL_URL}/`) {
-    loaded.bridgeUrl = ''
-    await chrome.storage.local.set({ [STORAGE_KEY]: loaded })
-  }
-  return loaded
-}
-
-async function persistSettings(next: Partial<Settings>): Promise<void> {
-  settings = normalizeSettings({ ...settings, ...next })
-  await chrome.storage.local.set({ [STORAGE_KEY]: settings })
-}
 
 function normalizeSettings(candidate: Settings): Settings {
   const trusted = Array.isArray(candidate.trustedActionOrigins)
@@ -237,169 +179,104 @@ function normalizeSettings(candidate: Settings): Settings {
   const sharePageContent = candidate.sharePageContent === 'auto' || candidate.sharePageContent === 'off'
     ? candidate.sharePageContent
     : candidate.sharePageContent === 'ask' ? 'ask' : 'auto'
+  // Unknown/absent values fall back to the floating window (the default form).
+  const statusMode = candidate.statusMode === 'panel' ? 'panel' : 'floating'
   return {
     ...candidate,
     sharePageContent,
     trustedActionOrigins: trusted,
     approvalNotifications: candidate.approvalNotifications !== false,
-    autoResumeSession: candidate.autoResumeSession !== false,
+    statusMode,
+    allowCrossDomainNavigation: candidate.allowCrossDomainNavigation === true,
+    blockedOrigins: Array.isArray(candidate.blockedOrigins)
+      ? [...new Set(candidate.blockedOrigins.map(normalizeTrustedOrigin).filter((entry): entry is string => entry !== undefined))].sort()
+      : [],
   }
 }
 
+async function loadSettings(): Promise<Settings> {
+  const stored = await chrome.storage.local.get(SETTINGS_STORAGE_KEY)
+  const loaded = normalizeSettings({ ...SETTINGS_DEFAULTS, ...(stored[SETTINGS_STORAGE_KEY] as Partial<Settings> | undefined) })
+  if (loaded.bridgeUrl === LEGACY_LOCAL_URL || loaded.bridgeUrl === `${LEGACY_LOCAL_URL}/`) {
+    loaded.bridgeUrl = ''
+    await chrome.storage.local.set({ [SETTINGS_STORAGE_KEY]: loaded })
+  }
+  return loaded
+}
+
+async function persistSettings(next: Partial<Settings>): Promise<void> {
+  settings = normalizeSettings({ ...settings, ...next })
+  await chrome.storage.local.set({ [SETTINGS_STORAGE_KEY]: settings })
+}
+
 /** Settings load is shared by every lazy connection trigger. */
-let settingsLoaded = false
 const settingsReady = loadSettings().then((loaded) => {
   settings = loaded
-  settingsLoaded = true
 })
 
 function armBridgeKeepalive(): void {
   chrome.alarms.create(BRIDGE_KEEPALIVE_ALARM, { periodInMinutes: 0.5 })
 }
 
-function disarmBridgeKeepalive(): void {
-  void Promise.resolve(chrome.alarms.clear(BRIDGE_KEEPALIVE_ALARM)).catch(() => {})
+
+/** Live status for the current controlled tab, if any. */
+function controlledTabInfo(): ControlledTabInfo | null {
+  const focused = tabAffinity.focusedSession()
+  if (focused === null) return null
+  const tab = tabAffinity.getSessionTab(focused)
+  if (tab === undefined) return null
+  return {
+    sessionId: focused,
+    tabId: tab.tabId,
+    title: tab.title,
+    url: tab.url,
+  }
+}
+
+function uiState(): UiState {
+  return {
+    bridgeState: bridge?.state ?? 'stopped',
+    caps,
+    affinity: tabAffinity.snapshot(),
+    controlled: controlledTabInfo(),
+    pendingApprovals: [...pendingApprovals.values()],
+    recentOps: [...recentOps],
+  }
+}
+
+/** Toolbar status light: a badge dot reflecting the latest operation.
+ * idle -> grey, running -> green, waiting (approval pending) -> yellow,
+ * failed/error -> red. */
+const BADGE_DOT = '\u25CF'
+const ACTIVITY_COLORS: Record<RecentOp['state'] | 'idle', string> = {
+  running: '#22a06b',
+  waiting: '#d97706',
+  done: '#9aa1ab',
+  error: '#c9372c',
+  cancelled: '#9aa1ab',
+  idle: '#9aa1ab',
+}
+
+function setStatusBadge(color: string, visible: boolean): void {
+  void Promise.resolve(chrome.action.setBadgeBackgroundColor({ color })).catch(() => {})
+  void Promise.resolve(chrome.action.setBadgeText({ text: visible ? BADGE_DOT : '' })).catch(() => {})
+}
+
+/** Recompute the toolbar light from the front of the operation feed. Only
+ * running/waiting/error light up; idle/done/cancelled keep the icon clean. */
+function applyActivityBadge(): void {
+  const top = recentOps[0]
+  const state = top === undefined ? 'idle' : top.state
+  const visible = state === 'running' || state === 'waiting' || state === 'error'
+  setStatusBadge(ACTIVITY_COLORS[state], visible)
 }
 
 function broadcastStatus(): void {
-  const payload = { type: 'status', state: bridge?.state ?? ('stopped' as BridgeState), caps }
-  for (const port of panelPorts) {
-    try { port.postMessage(payload) } catch { /* port already closed */ }
-  }
+  sendUiPush({ type: 'push.status', state: bridge?.state ?? 'stopped', caps })
 }
 
 function broadcastTabAffinity(): void {
-  const payload = { type: 'tab-affinity', state: tabAffinity.snapshot() }
-  for (const port of panelPorts) {
-    try { port.postMessage(payload) } catch { /* port already closed */ }
-  }
-}
-
-/** Which window each panel port belongs to, so a quote stays in its window. */
-const panelWindows = new WeakMap<chrome.runtime.Port, number>()
-
-/**
- * Send one window's selection to that window's panels only.
- *
- * A panel must never be offered a quote from a page its own window is not
- * looking at, which also keeps an incognito window's highlight out of a
- * normal window's composer.
- */
-function broadcastSelection(windowId: number): void {
-  const payload = { type: 'selection', selection: selections.current(windowId) }
-  for (const port of panelPorts) {
-    if (panelWindows.get(port) !== windowId) continue
-    try { port.postMessage(payload) } catch { /* port already closed */ }
-  }
-}
-
-function broadcastSelections(windowIds: readonly number[]): void {
-  for (const windowId of windowIds) broadcastSelection(windowId)
-}
-
-/** Whether a window currently has a panel that can display its selection. */
-function hasPanelInWindow(windowId: number): boolean {
-  for (const port of panelPorts) {
-    if (panelWindows.get(port) === windowId) return true
-  }
-  return false
-}
-
-/**
- * Tell a frame its quote is gone so re-selecting the same passage reports it
- * again; the content script deduplicates against the last text it sent.
- */
-function resetSelectionDedupe(sources: readonly SelectionSource[]): void {
-  for (const { tabId, frameId } of sources) {
-    void Promise.resolve(chrome.tabs.sendMessage(
-      tabId,
-      { type: 'DSH_SELECTION_RESET' },
-      { frameId },
-    ))
-      .catch(() => { /* no content script in this tab */ })
-  }
-}
-
-/** Whether saved privacy settings currently allow page-selection capture. */
-function selectionSharingEnabled(): boolean {
-  // Until storage answers, `settings` still holds the defaults. Reporting the
-  // default here would arm watchers for a user whose saved choice is `off`.
-  return settingsLoaded && settings.sharePageContent !== 'off'
-}
-
-/** Page selections are captured only in a window with an open panel. */
-function selectionWatchEnabled(windowId: number): boolean {
-  return selectionSharingEnabled() && hasPanelInWindow(windowId)
-}
-
-let selectionWatchArmed = false
-/** Distinguishes revisions issued by different MV3 worker lifetimes. */
-const selectionWatchEpoch = crypto.randomUUID()
-/** Orders arm/disarm commands so a slow delivery cannot undo a newer one. */
-let selectionWatchRevision = 0
-
-/**
- * Arm or disarm every content script. `selectionchange` fires on each drag in
- * each tab, so the watcher stays off until a panel can actually show a quote.
- *
- * Delivery is asynchronous, so each command carries a revision: a panel that
- * closes and reopens quickly must not leave watchers in the state of whichever
- * `tabs.query` happened to resolve last.
- */
-function syncSelectionWatch(): void {
-  const anyEnabled = selectionSharingEnabled()
-    && [...panelPorts].some((port) => panelWindows.get(port) !== undefined)
-  const wasArmed = selectionWatchArmed
-  selectionWatchArmed = anyEnabled
-  const revision = ++selectionWatchRevision
-  if (wasArmed && !anyEnabled) {
-    resetSelectionDedupe(selections.sourcesWithSelection())
-    broadcastSelections(selections.clearAll())
-  }
-  void Promise.resolve(chrome.tabs.query({})).then((tabs) => {
-    if (revision !== selectionWatchRevision) return
-    for (const tab of tabs) {
-      if (tab.id === undefined) continue
-      const enabled = selectionWatchEnabled(tab.windowId)
-      void Promise.resolve(chrome.tabs.sendMessage(tab.id, {
-        type: 'DSH_SELECTION_WATCH',
-        enabled,
-        epoch: selectionWatchEpoch,
-        revision,
-      }))
-        .catch(() => { /* no content script in this tab */ })
-    }
-  }).catch(() => {})
-}
-
-/**
- * Accept a capture from the page the user is actually looking at.
- *
- * `sender.tab` already carries the tab's window, active state, and incognito
- * flag, so admission needs no `chrome.tabs` call: a background page cannot
- * make the worker query Chrome by moving its own selection in a loop.
- */
-function recordSelection(tab: chrome.tabs.Tab, frameId: number, value: unknown): void {
-  if (!selectionWatchEnabled(tab.windowId)) return
-  // Only the tab the user is looking at, in its own window, may set a quote.
-  if (tab.id === undefined || tab.active !== true) return
-  const capture = parseSelectionCapture(value)
-  if (capture === null) return
-  if (selections.capture({ windowId: tab.windowId, tabId: tab.id, frameId }, capture)) {
-    broadcastSelection(tab.windowId)
-  }
-}
-
-function broadcastEvent(frame: ServerFrame): void {
-  for (const port of panelPorts) {
-    try { port.postMessage({ type: 'event', frame }) } catch { /* port already closed */ }
-  }
-}
-
-function broadcastApprovalResolved(id: string): void {
-  for (const port of panelPorts) {
-    try { port.postMessage({ type: 'approval.resolved', id }) } catch { /* port already closed */ }
-  }
+  sendUiPush({ type: 'push.affinity', state: tabAffinity.snapshot() })
 }
 
 const APPROVAL_NOTIFICATION_PREFIX = 'dsh-browser-approval:'
@@ -409,22 +286,25 @@ function approvalNotificationId(id: string): string {
 }
 
 function deliverApproval(request: ApprovalRequest): boolean {
-  let delivered = false
-  for (const port of panelPorts) {
-    try {
-      port.postMessage({ type: 'approval.request', request })
-      delivered = true
-    } catch { /* port already closed */ }
+  pendingApprovals.set(request.id, request)
+  if (assistantPages > 0) {
+    // A live assistant page will render the card from push.approval.
+    sendUiPush({ type: 'push.approval', request })
+    return true
   }
-  return delivered
+  // No assistant UI is open: fall back to the OS notification. The card is
+  // also queued (ui.state returns pendingApprovals) so opening the assistant
+  // later still shows it.
+  notifyApproval(request)
+  return true
 }
 
-function notifyApproval(request: ApprovalRequest, _windowId: number): void {
+function notifyApproval(request: ApprovalRequest): void {
   if (!settings.approvalNotifications) return
   const copy = getUiLocale() === 'zh'
     ? {
         title: '浏览器操作等待确认',
-        message: '点击通知打开 dsh 浏览器助手，并在 60 秒内确认或拒绝。',
+        message: '点击打开 dsh 浏览器助手，并在 60 秒内确认或拒绝。',
       }
     : {
         title: 'Browser action awaiting approval',
@@ -443,28 +323,22 @@ function clearApprovalNotification(id: string): void {
   void Promise.resolve(chrome.notifications.clear(approvalNotificationId(id))).catch(() => {})
 }
 
+function approvalResolved(id: string): void {
+  pendingApprovals.delete(id)
+  clearApprovalNotification(id)
+  sendUiPush({ type: 'push.approval-resolved', id })
+}
+
 const approvals = new ApprovalCoordinator({
-  deliver: deliverApproval,
+  deliver: (request) => {
+    if (deliverApproval(request)) return true
+    notifyApproval(request)
+    return false
+  },
   notify: notifyApproval,
   clearNotification: clearApprovalNotification,
-  resolved: broadcastApprovalResolved,
+  resolved: approvalResolved,
 })
-
-function responseMessages(): { unavailable: string; timeout: string; duplicate: string; disconnected: string } {
-  return getUiLocale() === 'zh'
-    ? {
-        unavailable: '未连接 dsh，无法提交回答',
-        timeout: '提交回答超时，请重试',
-        duplicate: '回答请求编号重复，请重试',
-        disconnected: 'dsh 连接已断开，请重新连接后再试',
-      }
-    : {
-        unavailable: 'dsh is not connected, so the answer could not be sent',
-        timeout: 'Sending the answer timed out. Try again.',
-        duplicate: 'The answer request ID was duplicated. Try again.',
-        disconnected: 'The dsh connection was lost. Reconnect and try again.',
-      }
-}
 
 function cancelPendingApprovals(sessionId?: string): void {
   approvals.cancelAll(sessionId)
@@ -520,12 +394,8 @@ function observeActiveSummary(summary: AffinityTab): void {
   if (!tabAffinity.observeActive(summary)) return
   if (previousStatus !== 'handoff' && tabAffinity.snapshot().status === 'handoff') {
     const focused = tabAffinity.focusedSession()
-    if (focused !== null) {
-      activeFollowRefreshes.get(focused)?.abort()
-      cancelPendingApprovals(focused)
-    } else {
-      cancelPendingApprovals()
-    }
+    if (focused !== null) cancelPendingApprovals(focused)
+    else cancelPendingApprovals()
   }
   persistTabAffinity()
   broadcastTabAffinity()
@@ -536,22 +406,15 @@ function observeActiveTab(tab: chrome.tabs.Tab): void {
   if (summary !== null) observeActiveSummary(summary)
 }
 
-async function syncActiveTab(windowId?: number, signal?: AbortSignal): Promise<chrome.tabs.Tab | undefined> {
+async function syncActiveTab(): Promise<chrome.tabs.Tab | undefined> {
   const queryRevision = focusedWindow.beginQuery()
-  const query = windowId === undefined
-    ? { active: true, lastFocusedWindow: true }
-    : { active: true, windowId }
   try {
-    const tabs = chrome.tabs.query(query)
-    const [tab] = signal === undefined ? await tabs : await abortable(tabs, signal)
-    if (signal !== undefined) throwIfRebindAborted(signal)
+    const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true })
     if (tab === undefined) return undefined
     if (!focusedWindow.commitQuery(tab.windowId, queryRevision)) return undefined
-    if (signal !== undefined) throwIfRebindAborted(signal)
     observeActiveTab(tab)
     return tab
   } catch {
-    if (signal !== undefined && signal.aborted) throw rebindAbortReason(signal)
     return undefined
   }
 }
@@ -634,15 +497,29 @@ async function restoreTabAffinity(): Promise<void> {
 
 const affinityReady = restoreTabAffinity()
 
-/** Bind at prompt submission so a switch while the model is thinking is visible. */
+/**
+ * Bind a session's controlled tab on its first browser call. The chat panel
+ * used to bind at prompt submission; with the pure-tool bridge the first
+ * `tool.call` for an unbound session takes the page the user is currently
+ * viewing (bindInitial semantics), so a chat-less agent can still operate a
+ * real tab.
+ */
 async function ensureInitialTabBinding(sessionId?: string): Promise<boolean> {
   await affinityReady
-  if (tabAffinity.resolveTarget(sessionId).kind !== 'initial') return true
+  const alreadyBound = sessionId === undefined
+    ? tabAffinity.resolveTarget().kind !== 'initial'
+    : tabAffinity.hasBinding(sessionId)
+  if (alreadyBound) return true
   try {
     const tab = await syncActiveTab()
     const summary = tab === undefined ? null : summarizeTab(tab)
     if (summary === null) return false
+    // Never hand the dsh web page itself to a session: the user chats there.
+    // For a URL-less first call the user should switch to the target page (or
+    // let browser_navigate open a fresh tab via bindNavigateTab).
+    if (isDshPageUrl(summary.url)) return false
     if (tabAffinity.bindInitial(summary, sessionId)) {
+      keepTabAlive(summary.tabId)
       persistTabAffinity()
       broadcastTabAffinity()
     }
@@ -656,16 +533,22 @@ function affinityFailure(kind: 'handoff' | 'lost' | 'missing'): ToolAnswer {
   if (kind === 'handoff') {
     return {
       ok: false,
-      error: { code: 'action-failed', message: 'The user switched tabs, so browser operations are paused. In the side panel, choose whether to keep the previous page or follow the current page.' },
+      error: { code: 'action-failed', message: 'The user switched tabs, so browser operations are paused. Switch back to the controlled page and retry.' },
     }
   }
   if (kind === 'lost') {
     return {
       ok: false,
-      error: { code: 'content-unavailable', message: 'The controlled tab was closed. Select the current page in the side panel before retrying.' },
+      error: { code: 'content-unavailable', message: 'The controlled tab was closed. Open the target page and retry.' },
     }
   }
-  return { ok: false, error: { code: 'no-active-tab', message: 'No active tab is available for browser operations.' } }
+  return {
+    ok: false,
+    error: {
+      code: 'no-active-tab',
+      message: 'No bindable page is available: switch to the target tab, or ask the agent to open a URL first.',
+    },
+  }
 }
 
 /** Resolve one stable tab target without allowing a manual switch to drift it. */
@@ -674,7 +557,17 @@ async function resolveToolTab(sessionId?: string): Promise<Pick<chrome.tabs.Tab,
   for (let attempt = 0; attempt < 3; attempt += 1) {
     const resolution = tabAffinity.resolveTarget(sessionId)
     if (resolution.kind === 'handoff') return affinityFailure('handoff')
-    if (resolution.kind === 'lost') return affinityFailure('lost')
+    if (resolution.kind === 'lost') {
+      // A session-scoped call with no binding yet auto-binds the page the
+      // user is currently viewing (pure-tool bridge has no chat prompt to
+      // bind on). A previously bound tab that was closed re-binds on the
+      // next call; failing that, report the tab as unavailable.
+      if (sessionId !== undefined && sessionId.trim() !== '') {
+        if (!await ensureInitialTabBinding(sessionId)) return affinityFailure('missing')
+        continue
+      }
+      return affinityFailure('lost')
+    }
     if (resolution.kind === 'initial') {
       if (!await ensureInitialTabBinding(sessionId)) return affinityFailure('missing')
       continue
@@ -683,6 +576,7 @@ async function resolveToolTab(sessionId?: string): Promise<Pick<chrome.tabs.Tab,
       const tab = await chrome.tabs.get(resolution.tab.tabId)
       const summary = summarizeTab(tab)
       if (summary === null) return affinityFailure('missing')
+      keepTabAlive(summary.tabId)
       if (tabAffinity.observeTab(summary)) broadcastTabAffinity()
       const current = tabAffinity.resolveTarget(sessionId)
       if (current.kind === 'handoff') return affinityFailure('handoff')
@@ -691,10 +585,7 @@ async function resolveToolTab(sessionId?: string): Promise<Pick<chrome.tabs.Tab,
     } catch {
       const affectedSessions = tabAffinity.sessionIdsForTab(resolution.tab.tabId)
       if (tabAffinity.removeTab(resolution.tab.tabId)) {
-        for (const sid of affectedSessions) {
-          activeFollowRefreshes.get(sid)?.abort()
-          cancelPendingApprovals(sid)
-        }
+        for (const sid of affectedSessions) cancelPendingApprovals(sid)
         persistTabAffinity()
         broadcastTabAffinity()
       }
@@ -730,98 +621,11 @@ async function authorizeToolCall(
     sessionTrustedActionOrigins.add(prompt.origins[0]!)
     return 'approved'
   }
-  // Retain wire compatibility with panels from the previous build. The new UI
-  // manages permanent trust explicitly in Settings instead of offering it in
-  // the action dialog.
   if (decision === 'trust-origin' && prompt.kind === 'action' && prompt.canTrust && prompt.origins.length === 1) {
     await persistSettings({ trustedActionOrigins: [...settings.trustedActionOrigins, prompt.origins[0]!] })
     return 'approved'
   }
   return decision === 'allow-once' ? 'approved' : 'denied'
-}
-
-/** Capture the newly controlled tab and seed it into this session's next Agent step. */
-async function refreshFollowedPage(sessionId: string, tabId: number): Promise<void> {
-  activeFollowRefreshes.get(sessionId)?.abort()
-  const controller = new AbortController()
-  activeFollowRefreshes.set(sessionId, controller)
-  try {
-    const target = await resolveToolTab(sessionId)
-    if ('ok' in target || target.id !== tabId || controller.signal.aborted) return
-    const budget = caps === null
-      ? undefined
-      : { maxItems: caps.maxInteractiveItems, maxChars: caps.snapshotMaxChars }
-    const answer = await dispatchToolCall(
-      { id: crypto.randomUUID(), name: 'browser_snapshot', args: {} },
-      settings.sharePageContent,
-      budget,
-      (prompt) => authorizeToolCall(prompt, controller.signal, target.windowId, sessionId),
-      controller.signal,
-      target,
-      () => target.id !== undefined && tabAffinity.allowsTarget(target.id, sessionId),
-    )
-    if (!answer.ok || controller.signal.aborted || !tabAffinity.allowsTarget(tabId, sessionId)) return
-    if (typeof answer.result !== 'object' || answer.result === null) return
-    const snapshot = (answer.result as { text?: unknown }).text
-    if (typeof snapshot !== 'string' || snapshot.trim() === '') return
-    await gatewayRpc(BRIDGE_INJECT_BROWSER_SNAPSHOT_METHOD, { sessionId, snapshot })
-  } finally {
-    if (activeFollowRefreshes.get(sessionId) === controller) activeFollowRefreshes.delete(sessionId)
-  }
-}
-
-async function refreshSessionSnapshot(sessionId: string): Promise<void> {
-  await affinityReady
-  const target = await resolveToolTab(sessionId)
-  if (!('ok' in target) && target.id !== undefined) {
-    await refreshFollowedPage(sessionId, target.id)
-  }
-}
-
-async function resolveTabAffinityResponse(response: {
-  revision: number
-  decision: TabAffinityDecision
-  sessionId: unknown
-}): Promise<void> {
-  await affinityReady
-  await syncActiveTab()
-  const sid = typeof response.sessionId === 'string' ? response.sessionId : undefined
-  const accepted = tabAffinity.decide(response.decision, response.revision, sid)
-  const controlled = accepted && response.decision === 'follow'
-    ? tabAffinity.snapshot().controlled
-    : null
-  if (controlled !== null) resetTabSnapshot(controlled.tabId)
-  if (accepted) persistTabAffinity()
-  broadcastTabAffinity()
-  if (controlled !== null && typeof response.sessionId === 'string' && response.sessionId.trim() !== '') {
-    await refreshFollowedPage(response.sessionId, controlled.tabId)
-  }
-}
-
-/** Move browser control to the current tab only after a fresh, valid query. */
-async function rebindTabAffinityToActive(signal: AbortSignal, sessionId?: string): Promise<void> {
-  await abortable(affinityReady, signal)
-  const tab = await syncActiveTab(undefined, signal)
-  throwIfRebindAborted(signal)
-  const summary = tab === undefined ? null : summarizeTab(tab)
-  if (summary === null) {
-    throw new TabAffinityRebindError('no-active-tab', getUiLocale() === 'zh'
-      ? '无法确定当前标签页，原会话和标签页绑定保持不变'
-      : 'The current tab could not be determined; the existing session and tab binding were left unchanged')
-  }
-
-  const previousControlledTabId = tabAffinity.snapshot().controlled?.tabId
-  if (sessionId !== undefined) {
-    activeFollowRefreshes.get(sessionId)?.abort()
-    cancelPendingApprovals(sessionId)
-  }
-  tabAffinity.rebindActive(summary, sessionId)
-  if (previousControlledTabId !== undefined && previousControlledTabId !== summary.tabId) {
-    resetTabSnapshot(previousControlledTabId)
-  }
-  resetTabSnapshot(summary.tabId)
-  persistTabAffinity()
-  broadcastTabAffinity()
 }
 
 /** 把协商的快照预算下发到受控页（尚未绑定时使用活动页）。 */
@@ -844,33 +648,448 @@ async function pushBudgetToControlledTab(negotiated: BridgeCaps): Promise<void> 
   }
 }
 
+/**
+ * A session with no bound tab that asks to navigate gets a brand-new tab
+ * (_blank-like: same profile, login state preserved) instead of hijacking
+ * whatever page happens to be active — in particular the dsh web chat page.
+ * The session is bound to the fresh tab, so later calls operate it even in
+ * the background.
+ */
+async function bindNavigateTab(call: ToolCall): Promise<boolean> {
+  const sessionId = call.sessionId
+  if (sessionId === undefined || sessionId.trim() === '' || call.name !== 'browser_navigate') return false
+  const bound = tabAffinity.getSessionTab(sessionId)
+  if (bound !== undefined && !isDshPageUrl(bound.url)) return false
+  const url = typeof call.args?.url === 'string' ? call.args.url : ''
+  let target: URL
+  try {
+    target = new URL(url)
+  } catch {
+    return false
+  }
+  if (target.protocol !== 'http:' && target.protocol !== 'https:') return false
+  const tab = await chrome.tabs.create({ url: target.href, active: true })
+  const summary = summarizeTab(tab)
+  if (summary === null) return false
+  await affinityReady
+  if (tabAffinity.hasBinding(sessionId)) return true
+  if (!tabAffinity.bindNewSession(sessionId, summary)) return true
+  keepTabAlive(summary.tabId)
+  persistTabAffinity()
+  broadcastTabAffinity()
+  return true
+}
+
+/** Read-only activity feed shown in the assistant (operations, not chat). */
+const RECENT_OPS_MAX = 30
+let recentOps: RecentOp[] = []
+
+function recordOpStart(call: ToolCall): void {
+  const op: RecentOp = { id: call.id, name: call.name, args: call.args ?? {}, state: 'running', startedAt: Date.now() }
+  recentOps = [op, ...recentOps.filter((o) => o.id !== op.id)].slice(0, RECENT_OPS_MAX)
+  applyActivityBadge()
+  sendUiPush({ type: 'push.op', op })
+}
+
+function settleOp(id: string, state: RecentOp['state']): void {
+  const index = recentOps.findIndex((op) => op.id === id)
+  if (index === -1) return
+  const op = { ...recentOps[index]!, state, ...(state === 'running' || state === 'waiting' ? {} : { endedAt: Date.now() }) }
+  recentOps = [op, ...recentOps.filter((o) => o.id !== id)].slice(0, RECENT_OPS_MAX)
+  applyActivityBadge()
+  sendUiPush({ type: 'push.op', op })
+}
+
+function originOfUrl(value: string): string | undefined {
+  try {
+    const url = new URL(value)
+    return url.protocol === 'http:' || url.protocol === 'https:' ? url.origin : undefined
+  } catch {
+    return undefined
+  }
+}
+
+function hostnameOf(url: string): string | undefined {
+  try {
+    const parsed = new URL(url)
+    return parsed.protocol === 'http:' || parsed.protocol === 'https:' ? parsed.hostname.toLowerCase() : undefined
+  } catch {
+    return undefined
+  }
+}
+
+function isDriveFileUrl(value: string): boolean {
+  return !('error' in parseGdriveUrl(value))
+}
+
+/** Settings-policy guard: blocked list, Drive-file routing, cross-host navigation. */
+function operationGuard(call: ToolCall, tab: { url?: string }): ToolAnswer | undefined {
+  if (call.name === 'browser_navigate') {
+    const destinationUrl = typeof call.args?.url === 'string' ? call.args.url : ''
+    const destinationOrigin = originOfUrl(destinationUrl)
+    if (destinationOrigin !== undefined && settings.blockedOrigins.includes(destinationOrigin)) {
+      return { ok: false, error: { code: 'action-failed', message: `Navigation to ${destinationOrigin} is blocked in Settings (blocked list).` } }
+    }
+    if (isDriveFileUrl(destinationUrl)) {
+      return {
+        ok: false,
+        error: { code: 'action-failed', message: 'This looks like a Google Drive file. Read it with google_drive_export instead of navigating to the page.' },
+      }
+    }
+    // Default policy: stay on the host of the currently bound page. Initial
+    // navigation (new-tab binding) and explicit "bind to the page" are the
+    // supported ways to switch; same domain with another host (e.g. another
+    // environment) counts as different.
+    if (!settings.allowCrossDomainNavigation) {
+      const currentHost = hostnameOf(tab.url ?? '')
+      const destinationHost = hostnameOf(destinationUrl)
+      if (currentHost !== undefined && destinationHost !== undefined && currentHost !== destinationHost) {
+        return {
+          ok: false,
+          error: { code: 'action-failed', message: 'Navigation to a different host is blocked by default (the agent may only navigate within the host of the currently bound page). '
+            + 'Switch pages with initial navigation or "bind to the page", or enable "Allow cross-domain navigation" in the extension options.' },
+        }
+      }
+    }
+    return undefined
+  }
+  // Reads and actions on the current controlled page.
+  const origin = originOfUrl(tab.url ?? '')
+  if (origin !== undefined && settings.blockedOrigins.includes(origin)) {
+    return { ok: false, error: { code: 'action-failed', message: `Operations on ${origin} are blocked in Settings (blocked list).` } }
+  }
+  const pageUrl = tab.url ?? ''
+  if (isDriveFileUrl(pageUrl)) {
+    return {
+      ok: false,
+      error: { code: 'action-failed', message: 'This page is a Google Drive file. Read it with google_drive_export using its URL instead of page tools.' },
+    }
+  }
+  return undefined
+}
+
+/** Reject binding/operating a tab the blocked list forbids. */
+function tabPolicyBlocked(url: string | undefined): ToolAnswer | undefined {
+  const origin = originOfUrl(url ?? '')
+  if (origin !== undefined && settings.blockedOrigins.includes(origin)) {
+    return { ok: false, error: { code: 'action-failed', message: `Operations on ${origin} are blocked in Settings (blocked list).` } }
+  }
+  return undefined
+}
+
+/** One-shot extension -> host internal RPC calls (options buttons etc.). */
+const pendingBridgeRpcs = new Map<string, {
+  resolve: (value: unknown) => void
+  reject: (error: Error) => void
+}>()
+
+function bridgeRpc(method: string, payload: unknown): Promise<unknown> {
+  const id = crypto.randomUUID()
+  return new Promise((resolve, reject) => {
+    const socket = bridge
+    if (socket === null) { reject(new Error('Bridge is not connected')); return }
+    pendingBridgeRpcs.set(id, { resolve, reject })
+    socket.send({ t: 'rpc', id, method, payload })
+    setTimeout(() => {
+      const pending = pendingBridgeRpcs.get(id)
+      if (pending !== undefined) {
+        pendingBridgeRpcs.delete(id)
+        pending.reject(new Error(`Bridge RPC ${method} timed out`))
+      }
+    }, 15_000)
+  })
+}
+
+function settleBridgeRpc(id: string, ok: boolean, result: unknown): void {
+  const pending = pendingBridgeRpcs.get(id)
+  if (pending === undefined) return
+  pendingBridgeRpcs.delete(id)
+  if (ok) pending.resolve(result)
+  else pending.reject(new Error(result instanceof Error ? result.message : String(result)))
+}
+
+interface PendingDownload {
+  resolve: (filename: string) => void
+  reject: (error: Error) => void
+  filename: string | undefined
+}
+
+const pendingDownloads = new Map<number, PendingDownload>()
+
+chrome.downloads.onChanged.addListener((delta) => {
+  const pending = pendingDownloads.get(delta.id)
+  if (pending === undefined) return
+  // filename usually arrives in an early delta (creation/interruption), not
+  // necessarily in the 'complete' one — cache whichever we see first.
+  if (delta.filename?.current !== undefined && delta.filename.current !== '') {
+    pending.filename = delta.filename.current
+  }
+  if (delta.state?.current === 'complete') {
+    pendingDownloads.delete(delta.id)
+    if (pending.filename !== undefined) pending.resolve(pending.filename)
+    else pending.reject(new Error('Google export produced no downloadable file (the account may lack access, or a consent/login page was returned)'))
+  } else if (delta.state?.current === 'interrupted') {
+    pendingDownloads.delete(delta.id)
+    pending.reject(new Error(delta.error?.current != null ? `Download interrupted: ${delta.error.current}` : 'Download was interrupted'))
+  }
+})
+
+async function downloadToPath(url: string, filename: string, timeoutMs = 120_000): Promise<string> {
+  const id = await chrome.downloads.download({
+    url,
+    filename: `dsh-gdrive/${filename}`,
+    conflictAction: 'uniquify',
+    saveAs: false,
+  })
+  const pending: PendingDownload = {
+    filename: undefined,
+    resolve: () => {},
+    reject: () => {},
+  }
+  pendingDownloads.set(id, pending)
+  // Seed the filename immediately from the download record when available.
+  const found = await chrome.downloads.search({ id }).catch(() => [])
+  if (found.length > 0 && found[0]?.filename !== undefined) pending.filename = found[0].filename
+  return new Promise((resolve, reject) => {
+    pending.resolve = resolve
+    pending.reject = reject
+    setTimeout(() => {
+      if (pendingDownloads.get(id) === pending) {
+        pendingDownloads.delete(id)
+        reject(new Error('Download timed out'))
+      }
+    }, timeoutMs)
+  })
+}
+
+/**
+ * Download via the real browser session, then move it into the session folder.
+ */
+
+async function downloadGdriveFile(target: { id: string; kind: string }, url: string, ext: string, sessionId: string | undefined, name?: string): Promise<{ filePath: string }> {
+  const source = await downloadToPath(url, name ?? `${target.kind}-${target.id}.${ext}`)
+  const move = await bridgeRpc(BRIDGE_GDRIVE_MOVE_METHOD, { sourcePath: source, sessionId: sessionId ?? 'anonymous' })
+  const filePath = typeof (move as { filePath?: unknown })?.filePath === 'string' ? (move as { filePath: string }).filePath : String(move)
+  return { filePath }
+}
+
+/** Tools the background answers itself (no page content script involved). */
+const VIRTUAL_TOOL_NAMES = new Set(['browser_list_tabs', 'browser_bind_tab', 'gdrive.fetch'])
+
+/** Chrome-internal or otherwise unbindable pages never enter the list. */
+function isBindableTabUrl(url: string | undefined): boolean {
+  return url !== undefined && /^https?:/i.test(url) && !isDshPageUrl(url)
+}
+
+type GdriveKind = 'docs' | 'sheets' | 'slides' | 'drive'
+
+interface GdriveTarget {
+  kind: GdriveKind
+  id: string
+  exportUrl: string
+  binary: boolean
+}
+
+function parseGdriveUrl(value: string): GdriveTarget | { error: string } {
+  let url: URL
+  try { url = new URL(value) } catch { return { error: 'Invalid URL' } }
+  const host = url.hostname.toLowerCase()
+  if (host !== 'docs.google.com' && host !== 'drive.google.com' && host !== 'spreadsheets.google.com') {
+    return { error: 'Only google drive domains are supported' }
+  }
+  const id = (pattern: RegExp): string | undefined => pattern.exec(url.pathname)?.[1]
+  const doc = id(/\/document\/d\/([^/?#]+)/)
+  if (doc !== undefined) return { kind: 'docs', id: doc, exportUrl: `https://docs.google.com/document/d/${doc}/export?format=md`, binary: false }
+  const sheet = id(/\/spreadsheets\/d\/([^/?#]+)/)
+  if (sheet !== undefined) return { kind: 'sheets', id: sheet, exportUrl: `https://docs.google.com/spreadsheets/d/${sheet}/export?format=xlsx`, binary: true }
+  const slide = id(/\/presentation\/d\/([^/?#]+)/)
+  if (slide !== undefined) return { kind: 'slides', id: slide, exportUrl: `https://docs.google.com/presentation/d/${slide}/export?format=pptx`, binary: true }
+  const drive = id(/\/file\/d\/([^/?#]+)/)
+  if (drive !== undefined) return { kind: 'drive', id: drive, exportUrl: `https://drive.google.com/uc?export=download&id=${drive}`, binary: true }
+  return { error: 'Could not find a file id in that Google Drive URL' }
+}
+
+/** Ask the user once per origin before exporting their Drive content. */
+async function ensureGdriveConsent(url: string, signal: AbortSignal): Promise<{ ok: boolean; error?: string }> {
+  const origin = originOfUrl(url)
+  if (origin !== undefined && settings.trustedActionOrigins.includes(origin)) return { ok: true }
+  const win = await chrome.windows.getLastFocused().catch(() => undefined)
+  const windowId = win?.id ?? 0
+  const result = await approvals.request(
+    {
+      kind: 'action',
+      action: 'gdrive.fetch',
+      summary: `Export content from Google Drive: ${url}`,
+      origins: origin === undefined ? [] : [origin],
+      canTrust: origin !== undefined,
+    },
+    signal,
+    windowId,
+    undefined,
+  )
+  if (signal.aborted) return { ok: false, error: 'The export request was cancelled' }
+  if (result.status !== 'decision') return { ok: false, error: `Export not approved (${result.status})` }
+  if (result.decision === 'allow-once' || result.decision === 'trust-origin' || result.decision === 'trust-session') {
+    if (origin !== undefined && result.decision === 'trust-origin') {
+      await persistSettings({ trustedActionOrigins: [...settings.trustedActionOrigins, origin] })
+    }
+    return { ok: true }
+  }
+  return { ok: false, error: 'The export was denied' }
+}
+
+/** Fetch one Drive export with the user's logged-in session. */
+async function gdriveFetch(call: ToolCall, signal: AbortSignal): Promise<ToolAnswer> {
+  const url = typeof call.args?.url === 'string' ? call.args.url : ''
+  if (url.trim() === '') {
+    return { ok: false, error: { code: 'bad-args', message: 'gdrive.fetch requires a url argument' } }
+  }
+  const consent = await ensureGdriveConsent(url, signal)
+  if (!consent.ok) {
+    return { ok: false, error: { code: 'action-failed', message: consent.error ?? 'Export was not approved' } }
+  }
+  const target = parseGdriveUrl(url)
+  if ('error' in target) {
+    return { ok: false, error: { code: 'bad-args', message: target.error } }
+  }
+  const requestedFormat = typeof call.args?.format === 'string' ? call.args.format : undefined
+  const ext = requestedFormat === 'html' ? 'html' : target.kind === 'docs' ? 'md' : target.kind === 'sheets' ? 'xlsx' : target.kind === 'slides' ? 'pptx' : 'bin'
+  const downloadUrl = target.kind === 'docs'
+    ? `https://docs.google.com/document/d/${target.id}/export?format=${ext}`
+    : target.exportUrl
+  try {
+    // Spreadsheets are downloaded once, as the whole xlsx workbook; the host
+    // asks which sheet to analyze and splits the matching CSV(s) itself.
+    const { filePath } = await downloadGdriveFile(target, downloadUrl, ext, call.sessionId)
+    if (signal.aborted) return { ok: false, error: { code: 'bridge-closed', message: 'Export was cancelled' } }
+    return { ok: true, result: { text: JSON.stringify({ ok: true, kind: target.kind, ext, filePath }) } }
+  } catch (error: unknown) {
+    return { ok: false, error: { code: 'action-failed', message: error instanceof Error ? error.message : String(error) } }
+  }
+}
+
+/**
+ * Answer a virtual tool call. browser_list_tabs returns the open web tabs as
+ * stable "ID=<n> | <title> | <url>" lines for the model to present through
+ * ask_user_question; browser_bind_tab binds this session to the chosen tab
+ * and broadcasts the affinity change so the assistant refreshes.
+ */
+async function handleVirtualTool(call: ToolCall, signal: AbortSignal): Promise<ToolAnswer> {
+  if (call.name === 'browser_list_tabs') {
+    const tabs = await chrome.tabs.query({})
+    const lines: string[] = []
+    for (const tab of tabs) {
+      if (tab.id === undefined || !isBindableTabUrl(tab.url)) continue
+      lines.push(`ID=${tab.id} | ${tab.title ?? ''} | ${tab.url}`)
+      if (lines.length >= 60) break
+    }
+    if (signal.aborted) return { ok: false, error: { code: 'bridge-closed', message: 'Tool call was cancelled' } }
+    const text = lines.length === 0
+      ? 'No bindable web tabs are open (open a page first).'
+      : lines.join('\n')
+    return { ok: true, result: { text } }
+  }
+  if (call.name === 'gdrive.fetch') {
+    return gdriveFetch(call, signal)
+  }
+  if (call.name === 'browser_bind_tab') {
+    const sessionId = call.sessionId
+    if (sessionId === undefined || sessionId.trim() === '') {
+      return { ok: false, error: { code: 'action-failed', message: 'No session is attached to this call' } }
+    }
+    const rawId = (call.args as { tabId?: unknown }).tabId
+    if (typeof rawId !== 'number' || !Number.isInteger(rawId) || rawId < 0) {
+      return { ok: false, error: { code: 'bad-args', message: 'tabId must be a tab ID from browser_list_tabs' } }
+    }
+    const tab = await chrome.tabs.get(rawId)
+    const summary = summarizeTab(tab)
+    if (summary === null || !isBindableTabUrl(summary.url)) {
+      return { ok: false, error: { code: 'no-active-tab', message: 'That tab is not a bindable web page' } }
+    }
+    const policyBlocked = tabPolicyBlocked(summary.url)
+    if (policyBlocked !== undefined) return policyBlocked
+    await affinityReady
+    if (signal.aborted) return { ok: false, error: { code: 'bridge-closed', message: 'Tool call was cancelled' } }
+    cancelPendingApprovals(sessionId)
+    resetTabSnapshot(summary.tabId)
+    tabAffinity.bindNewSession(sessionId, summary)
+    keepTabAlive(summary.tabId)
+    persistTabAffinity()
+    broadcastTabAffinity()
+    return { ok: true, result: { text: `Bound session to tab ${summary.tabId}: ${summary.title}` } }
+  }
+  return { ok: false, error: { code: 'action-failed', message: `Unknown virtual tool ${call.name}` } }
+}
+
 /** Route one tool.call frame to the user-approved controlled tab. */
 function routeToolCall(call: ToolCall): void {
   if (bridge === null) return
-  recentSession.remember(call.sessionId)
   activeToolCalls.get(call.id)?.abort()
   const controller = new AbortController()
   activeToolCalls.set(call.id, controller)
   const expiryTimer = call.expiresAt === undefined
     ? undefined
-    : setTimeout(() => { controller.abort() }, Math.max(0, call.expiresAt - Date.now()))
+    : setTimeout(() => {
+        console.warn('[dsh-browser] tool call expired before approval:', call.id, call.name)
+        controller.abort()
+      }, Math.max(0, call.expiresAt - Date.now()))
   const budget = caps === null
     ? undefined
     : { maxItems: caps.maxInteractiveItems, maxChars: caps.snapshotMaxChars }
-  void resolveToolTab(call.sessionId).then((target) => 'ok' in target
+  recordOpStart(call)
+  if (VIRTUAL_TOOL_NAMES.has(call.name)) {
+    void (async () => {
+      let answer: ToolAnswer
+      try {
+        answer = await handleVirtualTool(call, controller.signal)
+      } catch (error: unknown) {
+        answer = { ok: false, error: { code: 'internal', message: error instanceof Error ? error.message : String(error) } }
+      }
+      if (controller.signal.aborted) {
+        if (activeToolCalls.get(call.id) === controller) {
+          settleOp(call.id, 'cancelled')
+          bridge?.send({ t: 'tool.result', id: call.id, ok: false, error: { code: 'action-failed', message: 'Tool call was cancelled' } })
+        }
+        return
+      }
+      const socket = bridge
+      if (socket === null) return
+      if (answer.ok) {
+        settleOp(call.id, 'done')
+        socket.send({ t: 'tool.result', id: call.id, ok: true, result: answer.result })
+      } else {
+        settleOp(call.id, 'error')
+        socket.send({ t: 'tool.result', id: call.id, ok: false, error: answer.error! })
+      }
+    })().finally(() => {
+      if (expiryTimer !== undefined) clearTimeout(expiryTimer)
+      if (activeToolCalls.get(call.id) === controller) activeToolCalls.delete(call.id)
+    })
+    return
+  }
+  void Promise.resolve()
+    .then(() => bindNavigateTab(call))
+    .then(() => resolveToolTab(call.sessionId))
+    .then((target) => 'ok' in target
     ? target
-    : dispatchToolCall(
+    : (operationGuard(call, target as { url?: string }) ?? dispatchToolCall(
         call,
         settings.sharePageContent,
         budget,
-        (prompt) => authorizeToolCall(prompt, controller.signal, target.windowId, call.sessionId),
+        async (prompt) => {
+          settleOp(call.id, 'waiting')
+          const authorization = await authorizeToolCall(prompt, controller.signal, target.windowId, call.sessionId)
+          if (authorization === 'approved') settleOp(call.id, 'running')
+          return authorization
+        },
         controller.signal,
         target,
         () => target.id !== undefined && tabAffinity.allowsTarget(target.id, call.sessionId),
-      )).then(
+      ))).then(
     (answer) => {
       if (controller.signal.aborted) {
         if (activeToolCalls.get(call.id) === controller) {
+          settleOp(call.id, 'cancelled')
           bridge?.send({
             t: 'tool.result',
             id: call.id,
@@ -883,14 +1102,17 @@ function routeToolCall(call: ToolCall): void {
       const socket = bridge
       if (socket === null) return
       if (answer.ok) {
+        settleOp(call.id, 'done')
         socket.send({ t: 'tool.result', id: call.id, ok: true, result: answer.result })
       } else {
+        settleOp(call.id, 'error')
         socket.send({ t: 'tool.result', id: call.id, ok: false, error: answer.error! })
       }
     },
     (error: unknown) => {
       if (controller.signal.aborted) {
         if (activeToolCalls.get(call.id) === controller) {
+          settleOp(call.id, 'cancelled')
           bridge?.send({
             t: 'tool.result',
             id: call.id,
@@ -900,6 +1122,7 @@ function routeToolCall(call: ToolCall): void {
         }
         return
       }
+      settleOp(call.id, 'error')
       bridge?.send({
         t: 'tool.result',
         id: call.id,
@@ -914,6 +1137,7 @@ function routeToolCall(call: ToolCall): void {
 }
 
 function cancelToolCall(id: string): void {
+  console.warn('[dsh-browser] host cancelled tool call:', id)
   activeToolCalls.get(id)?.abort()
 }
 
@@ -924,21 +1148,11 @@ function cancelAllToolCalls(): void {
 
 /** (Re)start the bridge with the current settings. 零配置：地址留空时自动探测；回环连接无需 token。 */
 async function startBridge(): Promise<void> {
-  const revision = ++bridgeStartRevision
-  if (panelPorts.size === 0) return
   let url = settings.bridgeUrl
-  if (url === '') {
-    url = await discoverBridge(() => revision === bridgeStartRevision && panelPorts.size > 0) ?? ''
-  }
-  // Discovery is asynchronous. A panel may have closed or a newer settings
-  // update may have started while its fetches were in flight.
-  if (revision !== bridgeStartRevision || panelPorts.size === 0) return
-  if (url === '') {
-    bridge?.stop()
-    bridge = null
-    rpc = null
-    broadcastStatus()
-    return
+  if (url.trim() === '') {
+    const discovered = await discoverBridge()
+    if (discovered === undefined) return
+    url = discovered
   }
   // 手动填的地址常只有主机部分（如 ws://127.0.0.1:3080）；桥路径是协议
   // 常量，缺省时自动补全，避免连到根路径失败。
@@ -946,6 +1160,9 @@ async function startBridge(): Promise<void> {
     const parsed = new URL(url)
     if (parsed.pathname === '' || parsed.pathname === '/') parsed.pathname = BRIDGE_PATH
     url = parsed.toString()
+    const origin = new URL(url)
+    bridgeOrigin = `${origin.protocol === 'wss:' ? 'https:' : 'http:'}//${origin.host}`
+    bridgeHostPort = normalizedHostPort(new URL(bridgeOrigin))
   } catch {
     // 非法 URL 原样交给 WebSocket 构造函数报错。
   }
@@ -953,44 +1170,25 @@ async function startBridge(): Promise<void> {
     const client = new BridgeClient({
       onStateChange: (state) => {
         if (state !== 'connected') {
+          console.warn('[dsh-browser] bridge state', state, '-> cancelling in-flight tool calls')
           cancelAllToolCalls()
-          interactionResponses.failAll(responseMessages().disconnected)
-          transientEvents.clear()
         }
         broadcastStatus()
-        if (state === 'stopped' && panelPorts.size === 0) disarmBridgeKeepalive()
       },
       onFrame: (frame) => {
-        if (frame.t === 'event') {
-          recentSession.noteActivity(sessionIdFromFrame(frame))
-          transientEvents.ingest(frame)
-          broadcastEvent(frame)
-        }
-        else if (frame.t === 'tool.call') routeToolCall(frame)
+        if (frame.t === 'tool.call') routeToolCall(frame)
         else if (frame.t === 'tool.cancel') cancelToolCall(frame.id)
-        else if (frame.t === 'respond.result') interactionResponses.route(frame)
-        // rpc.result is settled by the rpc facade (wrapped below).
+        else if (frame.t === 'rpc.result') settleBridgeRpc(frame.id, frame.ok, frame.ok ? frame.result : frame.error)
       },
       onHelloOk: (negotiated) => {
         caps = negotiated
         broadcastStatus()
         void pushBudgetToControlledTab(negotiated)
       },
-    }, probeBridge, () => panelPorts.size > 0)
+    }, probeBridge, () => true)
     bridge = client
-    rpc = createRpc(client)
   }
   bridge.start(url, settings.token)
-}
-
-/** Gateway RPC with a helpful error when the bridge is down. */
-async function gatewayRpc(method: string, payload: unknown): Promise<unknown> {
-  if (rpc === null || bridge === null || !bridge.connected) {
-    throw new Error(getUiLocale() === 'zh'
-      ? '未连接 dsh（请检查设置中的地址与 token）'
-      : 'dsh is not connected (check the bridge address and token in Settings)')
-  }
-  return rpc.request(method, payload)
 }
 
 // ---- Content script messages ----
@@ -998,297 +1196,103 @@ async function gatewayRpc(method: string, payload: unknown): Promise<unknown> {
 chrome.runtime.onMessage.addListener((message: unknown, sender, sendResponse) => {
   if (typeof message !== 'object' || message === null) return
   if (sender.id !== chrome.runtime.id) return
-  if (sender.tab?.id === undefined) return
   const type = (message as { type?: unknown }).type
+  if (sender.tab?.id === undefined) return
   if (type === 'DSH_CONTENT_READY') {
     // navigation.ts also listens for this frame-ready announcement; only this
-    // listener answers it, telling a fresh document whether to watch
-    // selections. The revision lets a slow reply lose to a newer broadcast.
+    // listener answers it. Page-selection capture is gone with the chat
+    // surface, so a fresh document never arms its selection watcher.
     sendResponse({
-      selectionWatch: selectionWatchEnabled(sender.tab.windowId),
-      selectionWatchEpoch: selectionWatchEpoch,
-      selectionWatchRevision: selectionWatchRevision,
+      selectionWatch: false,
+      selectionWatchEpoch: '',
+      selectionWatchRevision: 0,
     })
     return
   }
-  if (type !== 'DSH_SELECTION' || sender.tab === undefined) return
-  recordSelection(sender.tab, sender.frameId ?? 0, (message as { selection?: unknown }).selection)
+  // DSH_SELECTION payloads (legacy content watchers) are intentionally ignored.
 })
 
-// ---- Panel ports ----
+// ---- UI messages (status side panel / options / action popup) ----
 
-chrome.runtime.onConnect.addListener((port) => {
-  if (port.name !== 'dsh-panel') return
-  const wasIdle = panelPorts.size === 0
-  const tabAffinityRebinds = new Map<string, {
-    controller: AbortController
-    timer: ReturnType<typeof setTimeout>
-  }>()
-  panelPorts.add(port)
-  if (wasIdle) armBridgeKeepalive()
-  void settingsReady.then(syncSelectionWatch)
-  void settingsReady.then(() => {
-    if (!panelPorts.has(port)) return
-    if (bridge === null || bridge.state === 'stopped') return startBridge()
-  })
-  try { port.postMessage({ type: 'status', state: bridge?.state ?? ('stopped' as BridgeState), caps }) } catch { /* port closed */ }
-  void affinityReady.then(async () => {
-    await syncActiveTab()
-    try { port.postMessage({ type: 'tab-affinity', state: tabAffinity.snapshot() }) } catch { /* port closed */ }
-  })
-  port.onMessage.addListener((message: unknown) => {
-    if (typeof message !== 'object' || message === null) return
-    const msg = message as { type?: string }
-    switch (msg.type) {
-      case 'rpc': {
-        const rpcMsg = message as { id: string; method: string; payload?: unknown }
-        const rpcSessionId = typeof rpcMsg.payload === 'object' && rpcMsg.payload !== null
-          ? (rpcMsg.payload as { sessionId?: string }).sessionId
-          : undefined
-        const refresh = rpcSessionId === undefined
-          ? Promise.resolve()
-          : sessionSnapshotRefreshes.get(rpcSessionId) ?? Promise.resolve()
-        const prepare = rpcMsg.method === 'session.prompt'
-          ? Promise.resolve().then(async () => {
-              await refresh
-              return rpcSessionId === undefined || tabAffinity.getSessionTab(rpcSessionId) !== undefined
-            })
-          : Promise.resolve(true)
-        void prepare.then((ready) => {
-          if (!ready) throw new Error('This session is not bound to a live browser tab')
-          return gatewayRpc(rpcMsg.method, rpcMsg.payload)
-        }).then(
-          (result) => {
-            try { port.postMessage({ type: 'rpc.result', id: rpcMsg.id, ok: true, result }) } catch { /* port closed */ }
-          },
-          (error: unknown) => {
-            try {
-              port.postMessage({
-                type: 'rpc.result',
-                id: rpcMsg.id,
-                ok: false,
-                error: { code: 'bridge-unavailable', message: error instanceof Error ? error.message : String(error) },
-              })
-            } catch { /* port closed */ }
-          },
-        )
-        break
-      }
-      case 'respond': {
-        const response = message as { id?: unknown; rpcId?: unknown; result?: unknown }
-        if (typeof response.id !== 'string' || typeof response.rpcId !== 'string' || !isRespondResult(response.result)) break
-        const messages = responseMessages()
-        interactionResponses.begin(
-          port,
-          response.id,
-          () => bridge?.send({
-            t: 'respond',
-            id: response.id as string,
-            rpcId: response.rpcId as string,
-            result: response.result as RespondResult,
-          }) === true,
-          messages,
-        )
-        break
-      }
-      case 'settings': {
-        const settingsMsg = message as { settings: Partial<Settings> }
-        void settingsReady.then(async () => {
-          const previousConnection = { bridgeUrl: settings.bridgeUrl, token: settings.token }
-          await persistSettings(settingsMsg.settings)
-          syncSelectionWatch()
-          if (panelPorts.size > 0) {
-            await startBridge()
-            broadcastStatus()
-            return
-          }
-          const connectionChanged = settings.bridgeUrl !== previousConnection.bridgeUrl
-            || settings.token !== previousConnection.token
-          if (!connectionChanged) return
-          // The settings write outlived its originating panel. Do not keep a
-          // healthy socket authenticated with stale connection settings: make
-          // the next explicit panel lease start from the persisted values.
-          bridgeStartRevision += 1
-          bridge?.stop()
-          bridge = null
-          rpc = null
-          caps = null
-          broadcastStatus()
-          disarmBridgeKeepalive()
-        })
-        break
-      }
-      case 'panel.window': {
-        // The panel reports its own window; a side panel has no sender.tab.
-        const registration = message as { windowId?: unknown }
-        if (typeof registration.windowId !== 'number'
-          || !Number.isInteger(registration.windowId)
-          || registration.windowId < 0) break
-        panelWindows.set(port, registration.windowId)
-        syncSelectionWatch()
-        try {
-          port.postMessage({ type: 'selection', selection: selections.current(registration.windowId) })
-        } catch { /* port closed */ }
-        break
-      }
-      case 'selection.clear': {
-        // The user sent, dismissed, or explicitly abandoned this window's
-        // quote. A send/dismiss names the value it acted on so a newer capture
-        // that arrived while work was in flight cannot be cleared by mistake.
-        const windowId = panelWindows.get(port)
-        if (windowId === undefined) break
-        const request = message as { selection?: unknown }
-        const expected = request.selection === undefined ? undefined : parsePageSelection(request.selection)
-        if (expected === null) break
-        const source = selections.source(windowId)
-        const cleared = expected === undefined
-          ? selections.clear(windowId)
-          : selections.clearIfCurrent(windowId, expected)
-        if (cleared && source !== null) resetSelectionDedupe([source])
-        // Also repairs a panel that acted on a stale attachment.
-        broadcastSelection(windowId)
-        break
-      }
-      case 'session.active': {
-        const session = message as { sessionId?: unknown; isNew?: boolean }
-        recentSession.remember(session.sessionId)
-        if (typeof session.sessionId === 'string' && session.sessionId.trim() !== '') {
-          const sid = session.sessionId
-          if (session.isNew === true && tabAffinity.getSessionTab(sid) === undefined) {
-            const bind = affinityReady.then(async () => {
-              if (tabAffinity.getSessionTab(sid) !== undefined) return
-              const tab = await syncActiveTab()
-              const summary = tab === undefined ? null : summarizeTab(tab)
-              if (summary === null) throw new Error('No active tab is available to bind this session')
-              if (tabAffinity.getSessionTab(sid) !== undefined) return
-              tabAffinity.bindNewSession(sid, summary)
-              resetTabSnapshot(summary.tabId)
-              persistTabAffinity()
-              broadcastTabAffinity()
-              await refreshSessionSnapshot(sid)
-            }).catch(() => {})
-            sessionSnapshotRefreshes.set(sid, bind)
-            void bind.finally(() => {
-              if (sessionSnapshotRefreshes.get(sid) === bind) sessionSnapshotRefreshes.delete(sid)
-            })
-          } else if (tabAffinity.focusSession(sid)) {
-            persistTabAffinity()
-            broadcastTabAffinity()
-          }
-        }
-        break
-      }
-      case 'approval.response': {
-        const approval = message as { id?: unknown; decision?: unknown }
-        if (typeof approval.id === 'string' && isApprovalDecision(approval.decision)) {
-          approvals.respond(approval.id, approval.decision)
-        }
-        break
-      }
-      case 'tab-affinity.response': {
-        const response = message as { revision?: unknown; decision?: unknown; sessionId?: unknown }
-        if (typeof response.revision !== 'number' || !isTabAffinityDecision(response.decision)) break
-        const sid = typeof response.sessionId === 'string' ? response.sessionId : undefined
-        const decision = resolveTabAffinityResponse({
-          revision: response.revision,
-          decision: response.decision,
-          sessionId: response.sessionId,
-        }).catch(() => {})
-        if (response.decision === 'follow' && sid !== undefined) {
-          sessionSnapshotRefreshes.set(sid, decision)
-          void decision.finally(() => {
-            if (sessionSnapshotRefreshes.get(sid) === decision) sessionSnapshotRefreshes.delete(sid)
-          })
-        } else {
-          void decision
-        }
-        break
-      }
-      case 'tab-affinity.rebind': {
-        const request = message as { id?: unknown; sessionId?: unknown }
-        if (typeof request.id !== 'string') break
-        const requestId = request.id
-        const rebindSessionId = typeof request.sessionId === 'string' ? request.sessionId : undefined
-        if (tabAffinityRebinds.has(requestId)) break
-        const controller = new AbortController()
-        const timer = setTimeout(() => {
-          controller.abort(new TabAffinityRebindError('timeout', getUiLocale() === 'zh'
-            ? '绑定当前标签页超时，请重试'
-            : 'Binding the current tab timed out. Try again.'))
-        }, TAB_AFFINITY_REBIND_TIMEOUT_MS)
-        tabAffinityRebinds.set(requestId, { controller, timer })
-        void rebindTabAffinityToActive(controller.signal, rebindSessionId).then(
-          () => {
-            try { port.postMessage({ type: 'tab-affinity.rebind.result', id: requestId, ok: true }) } catch { /* port closed */ }
-          },
-          (error: unknown) => {
-            try {
-              port.postMessage({
-                type: 'tab-affinity.rebind.result',
-                id: requestId,
-                ok: false,
-                error: {
-                  code: error instanceof TabAffinityRebindError ? error.code : 'no-active-tab',
-                  message: error instanceof Error ? error.message : String(error),
-                },
-              })
-            } catch { /* port closed */ }
-          },
-        ).finally(() => {
-          const current = tabAffinityRebinds.get(requestId)
-          if (current?.controller !== controller) return
-          clearTimeout(current.timer)
-          tabAffinityRebinds.delete(requestId)
-        })
-        break
-      }
-      case 'request-status':
-        try {
-          port.postMessage({ type: 'status', state: bridge?.state ?? ('stopped' as BridgeState), caps })
-          port.postMessage({ type: 'tab-affinity', state: tabAffinity.snapshot() })
-          const statusWindowId = panelWindows.get(port)
-          if (statusWindowId !== undefined) {
-            port.postMessage({ type: 'selection', selection: selections.current(statusWindowId) })
-          }
-          for (const frame of transientEvents.replay()) port.postMessage({ type: 'event', frame })
-          approvals.replay((request) => {
-            port.postMessage({ type: 'approval.request', request })
-            return true
-          })
-          void recentSession.ready.then(() => {
-            try {
-              port.postMessage({ type: 'session.resume-hint', sessionId: recentSession.current() })
-            } catch { /* port closed */ }
-          })
-        } catch { /* port closed */ }
-        break
+chrome.runtime.onMessage.addListener((message: unknown, _sender, sendResponse) => {
+  if (typeof message !== 'object' || message === null) return
+  const request = message as { type?: unknown }
+  switch (request.type) {
+    case 'ui.state':
+      sendResponse(uiState())
+      return
+    case 'settings.get':
+      sendResponse(settings)
+      return
+    case 'settings.set': {
+      const patch = (message as { patch?: unknown }).patch
+      if (typeof patch !== 'object' || patch === null || Array.isArray(patch)) return
+      void settingsReady.then(async () => {
+        const previousConnection = { bridgeUrl: settings.bridgeUrl, token: settings.token }
+        const next = await persistSettings(patch as Partial<Settings>)
+        const connectionChanged = settings.bridgeUrl !== previousConnection.bridgeUrl
+          || settings.token !== previousConnection.token
+        if (connectionChanged) restartBridge()
+        sendResponse(next)
+      })
+      return true
     }
-  })
-  port.onDisconnect.addListener(() => {
-    for (const operation of tabAffinityRebinds.values()) {
-      clearTimeout(operation.timer)
-      operation.controller.abort(new TabAffinityRebindError('cancelled', getUiLocale() === 'zh'
-        ? '后台连接已断开，标签页绑定已取消'
-        : 'The background connection was lost, so tab binding was cancelled'))
+    case 'approval.response': {
+      const approval = message as { id?: unknown; decision?: unknown }
+      if (typeof approval.id === 'string' && isApprovalDecision(approval.decision)) {
+        approvals.respond(approval.id, approval.decision)
+      }
+      sendResponse({ accepted: true })
+      return
     }
-    tabAffinityRebinds.clear()
-    const panelWindowId = panelWindows.get(port)
-    panelPorts.delete(port)
-    interactionResponses.removePort(port)
-    if (panelWindowId !== undefined && !hasPanelInWindow(panelWindowId)) {
-      const source = selections.source(panelWindowId)
-      if (selections.clear(panelWindowId) && source !== null) resetSelectionDedupe([source])
+    case 'ops.clear':
+      recentOps = []
+      applyActivityBadge()
+      sendUiPush({ type: 'push.ops-cleared' })
+      sendResponse({ accepted: true })
+      return
+    case 'session.unbind': {
+      const sessionId = tabAffinity.focusedSession()
+      if (sessionId !== null && tabAffinity.unbindSession(sessionId)) {
+        cancelPendingApprovals(sessionId)
+        persistTabAffinity()
+        broadcastTabAffinity()
+        sendResponse({ accepted: true })
+      } else {
+        sendResponse({ accepted: false })
+      }
+      return
     }
-    syncSelectionWatch()
-    if (panelPorts.size === 0) {
-      bridgeStartRevision += 1
-      bridge?.suspendReconnect()
-      sessionTrustedActionOrigins.clear()
-      approvals.notifyPending()
-      if (bridge?.state !== 'connected') disarmBridgeKeepalive()
-    }
-  })
+    case 'open-export-folder':
+      void bridgeRpc(BRIDGE_OPEN_GDRIVE_FOLDER_METHOD, {}).then(
+        () => sendResponse({ accepted: true }),
+        () => sendResponse({ accepted: false }),
+      )
+      return true
+    case 'reconnect':
+      void settingsReady.then(() => { startBridge() })
+      sendResponse({ accepted: true })
+      return
+    case 'open-options':
+      void chrome.runtime.openOptionsPage().catch(() => {})
+      sendResponse({ accepted: true })
+      return
+    default:
+      return
+  }
 })
+
+/** Drop a healthy socket authenticated with stale connection settings and reconnect. */
+function restartBridge(): void {
+  bridge?.stop()
+  bridge = null
+  caps = null
+  cancelAllToolCalls()
+  broadcastStatus()
+  void startBridge()
+}
+
+// ---- Notifications ----
 
 chrome.notifications.onClicked.addListener((notificationId) => {
   if (!notificationId.startsWith(APPROVAL_NOTIFICATION_PREFIX)) return
@@ -1298,7 +1302,7 @@ chrome.notifications.onClicked.addListener((notificationId) => {
   clearApprovalNotification(id)
   // Notification clicks are extension user gestures; both panel APIs require
   // the call to remain inside this handler.
-  openAssistantPanel(windowId)
+  void openStatusSurface(windowId)
 })
 
 // ---- Tab affinity ----
@@ -1325,18 +1329,10 @@ chrome.tabs.onUpdated.addListener((tabId, _changeInfo, tab) => {
 })
 
 chrome.tabs.onReplaced.addListener((addedTabId, removedTabId) => {
-  // The old document is gone even though Chrome transfers the tab identity.
-  broadcastSelections(selections.clearTab(removedTabId))
   void affinityReady.then(() => {
-    // onReplaced is an identity swap (for example prerender activation), not
-    // a close or user-visible switch. Transfer IDs synchronously before any
-    // metadata lookup so tool resolution never observes the removed target.
     const affectedSessions = tabAffinity.sessionIdsForTab(removedTabId)
     if (!tabAffinity.replaceTab(removedTabId, addedTabId)) return
-    for (const sid of affectedSessions) {
-      activeFollowRefreshes.get(sid)?.abort()
-      cancelPendingApprovals(sid)
-    }
+    for (const sid of affectedSessions) cancelPendingApprovals(sid)
     resetTabSnapshot(removedTabId)
     resetTabSnapshot(addedTabId)
     persistTabAffinity()
@@ -1349,49 +1345,31 @@ chrome.tabs.onReplaced.addListener((addedTabId, removedTabId) => {
 })
 
 chrome.tabs.onRemoved.addListener((tabId) => {
-  broadcastSelections(selections.clearTab(tabId))
   void affinityReady.then(() => {
     const affectedSessions = tabAffinity.sessionIdsForTab(tabId)
     if (!tabAffinity.removeTab(tabId)) return
-    for (const sid of affectedSessions) {
-      activeFollowRefreshes.get(sid)?.abort()
-      cancelPendingApprovals(sid)
-    }
+    for (const sid of affectedSessions) cancelPendingApprovals(sid)
     persistTabAffinity()
     broadcastTabAffinity()
   })
 })
 
-// A committed navigation replaces a document; a same-document history or
-// fragment update does not, and must not drop a quote still on the screen.
-// Matching the exact frame keeps an iframe's navigation from invalidating a
-// quote taken from its parent page, and vice versa.
-chrome.webNavigation.onCommitted.addListener(({ tabId, frameId }) => {
-  broadcastSelections(selections.clearTab(tabId, frameId))
-})
-
-// Ports are cleaned up by their own disconnect; only the window's quote is
-// left behind when the whole window goes away.
-chrome.windows.onRemoved.addListener((windowId) => {
-  selections.clear(windowId)
-})
-
 chrome.windows.onFocusChanged.addListener((windowId) => {
   if (windowId === chrome.windows.WINDOW_ID_NONE) return
   focusedWindow.markFocused(windowId)
-  void affinityReady.then(() => syncActiveTab(windowId))
+  void affinityReady.then(() => syncActiveTab())
+})
+
+chrome.windows.onRemoved.addListener((windowId) => {
+  if (floatingWindowId === windowId) floatingWindowId = undefined
 })
 
 // ---- Keepalive ----
 
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name !== BRIDGE_KEEPALIVE_ALARM) return
-  if (panelPorts.size === 0) {
-    if (bridge === null || bridge.state !== 'connected') disarmBridgeKeepalive()
-    return
-  }
-  // `stopped` is intentionally terminal until an explicit panel reopen or
-  // settings save. In particular, code 4000 means another browser owns the
+  // `stopped` is intentionally terminal until an explicit popup reconnect or
+  // a worker restart. In particular, code 4000 means another browser owns the
   // single bridge slot and the keepalive must not reclaim it.
   if (bridge === null || bridge.state === 'reconnecting') {
     void settingsReady.then(() => startBridge())
@@ -1404,28 +1382,70 @@ interface FirefoxSidebarAction {
   open(): Promise<void> | void
 }
 
-function openAssistantPanel(windowId?: number): void {
-  if (import.meta.env.EXT_TARGET === 'firefox') {
-    const sidebar = (chrome as unknown as { sidebarAction?: FirefoxSidebarAction }).sidebarAction
-    if (sidebar === undefined) return
-    void Promise.resolve(sidebar.open()).catch(() => {})
+/** The floating status window we last opened, re-focused when still alive. */
+let floatingWindowId: number | undefined
+
+/** Open the persistent status surface chosen in Settings (side panel or floating popup). */
+function openStatusSurface(windowId?: number): void {
+  if (settings.statusMode === 'panel') {
+    if (import.meta.env.EXT_TARGET === 'firefox') {
+      const sidebar = (chrome as unknown as { sidebarAction?: FirefoxSidebarAction }).sidebarAction
+      if (sidebar === undefined) return
+      void Promise.resolve(sidebar.open()).catch(() => {})
+      return
+    }
+    // chrome.sidePanel.open must run synchronously inside the user gesture;
+    // any await before it drops the gesture and the open is rejected. The
+    // action click gives us the window id synchronously, so open right away.
+    if (windowId !== undefined) {
+      void chrome.sidePanel.open({ windowId }).catch(() => {})
+      return
+    }
+    void Promise.resolve(chrome.windows.getLastFocused()).then((win) => {
+      if (win.id !== undefined) {
+        void chrome.sidePanel.open({ windowId: win.id }).catch(() => {})
+      }
+    }).catch(() => {})
     return
   }
-  if (windowId !== undefined) void chrome.sidePanel.open({ windowId }).catch(() => {})
+  // Floating popup: refocus the window we opened if it still exists.
+  void Promise.resolve(
+    floatingWindowId === undefined
+      ? Promise.resolve(false)
+      : chrome.windows.get(floatingWindowId).then((win) => win !== undefined).catch(() => false),
+  ).then((alive) => {
+    if (alive && floatingWindowId !== undefined) {
+      void chrome.windows.update(floatingWindowId, { focused: true }).catch(() => {})
+      return
+    }
+    void chrome.windows.create({
+      url: chrome.runtime.getURL('floating/index.html'),
+      type: 'popup',
+      width: 380,
+      height: 560,
+    }).then((win) => {
+      if (win.id !== undefined) floatingWindowId = win.id
+    }).catch(() => {})
+  })
 }
 
-// Open the side panel when the toolbar icon is clicked.
-// Chrome 116+ uses chrome.sidePanel; Firefox has no sidePanel API, so the
-// action click opens the sidebar via sidebarAction.open() (user gesture).
-if (import.meta.env.EXT_TARGET === 'firefox') {
-  chrome.action.onClicked.addListener(() => { openAssistantPanel() })
-} else {
-  void chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(() => {})
+// The toolbar icon opens the whole assistant in the configured form
+// (floating window by default, or the side panel). Approvals live inside
+// the assistant, so there is no separate action popup.
+chrome.action.onClicked.addListener((tab) => {
+  void openStatusSurface(tab?.windowId)
+})
+
+// Pre-rewrite builds set openPanelOnActionClick so the icon opened the side
+// panel; that behavior persists in Chrome and would swallow onClicked.
+// Clear it explicitly so the icon click reaches the handler above.
+if (import.meta.env.EXT_TARGET !== 'firefox') {
+  void chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: false }).catch(() => {})
 }
 
-// Alarms survive some extension/service-worker restarts. Remove any stale
-// schedule left by an older eager-connection build; onConnect re-arms it.
-disarmBridgeKeepalive()
+armBridgeKeepalive()
+applyActivityBadge()
 
-// `settingsReady` intentionally has no bridge-start continuation: opening a
-// side panel is the first action allowed to claim the bridge connection.
+// Eager connection: the pure-tool bridge claims its slot on load so a
+// dsh session can drive this Chrome without any panel interaction.
+void settingsReady.then(() => { startBridge() })
