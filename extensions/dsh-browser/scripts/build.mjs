@@ -20,6 +20,8 @@ const configs = [
   'vite.background.config.ts',
   'vite.content.config.ts',
   'vite.panel.config.ts',
+  'vite.options.config.ts',
+  'vite.floating.config.ts',
 ]
 
 if (watch) {

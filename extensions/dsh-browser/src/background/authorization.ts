@@ -40,24 +40,33 @@ export function approvalPromptForCall(
   }
 
   if (!STATE_CHANGING_ACTIONS.has(call.name)) return undefined
+
+  // Navigation consent is about the DESTINATION: once the user trusts a site,
+  // the model may drive the controlled tab to it from anywhere. The departure
+  // page is never added to an allowlist (the bound tab is itself the user's
+  // consent surface), so cross-origin navigations can offer trust too.
+  if (call.name === 'browser_navigate') {
+    const destination = originFromUrl(typeof call.args.url === 'string' ? call.args.url : '')
+    return {
+      kind: 'action',
+      action: call.name,
+      summary: summarizeAction(call, locale),
+      origins: destination === undefined ? [] : [destination],
+      // Invalid, opaque, or non-http(s) destinations stay untrustable.
+      canTrust: destination !== undefined,
+    }
+  }
+
   const frameId = requestedFrame(call.args)
   const target = frames.find((frame) => frame.frameId === frameId) ?? frames.find((frame) => frame.frameId === 0)
   const origins = uniqueOrigins(target === undefined ? [] : [target], frames)
-  let canTrust = origins.length === 1 && call.name !== 'browser_back' && call.name !== 'browser_forward'
-  if (call.name === 'browser_navigate') {
-    const destination = originFromUrl(typeof call.args.url === 'string' ? call.args.url : '')
-    if (destination !== undefined && !origins.includes(destination)) origins.push(destination)
-    // Do not let an invalid, opaque, or cross-origin navigation become a
-    // back door for adding the current page to the persistent allowlist.
-    canTrust = destination !== undefined && origins.length === 1 && origins[0] === destination
-  }
+  // History destinations are unknown, so back/forward can never expand trust.
+  const canTrust = origins.length === 1 && call.name !== 'browser_back' && call.name !== 'browser_forward'
   return {
     kind: 'action',
     action: call.name,
     summary: summarizeAction(call, locale),
     origins,
-    // Cross-origin/invalid navigation and unknown history destinations always
-    // require a fresh decision; they must never expand trust implicitly.
     canTrust,
   }
 }

@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { Context } from '@deepseek-ai/cordis'
 import type { BridgeServer } from '../src/server.ts'
-import { BROWSER_TOOL_NAMES, registerBrowserTools } from '../src/tools.ts'
+import { BIND_INTERACTIVE_TIMEOUT_MS, BROWSER_TOOL_NAMES, GOOGLE_DRIVE_TIMEOUT_MS, registerBrowserTools } from '../src/tools.ts'
 
 describe('registerBrowserTools', () => {
   function makeHarness() {
@@ -24,8 +24,9 @@ describe('registerBrowserTools', () => {
   it('registers the full v1 tool set', () => {
     const { ctx, bridge, registered } = makeHarness()
     const disposers = registerBrowserTools(ctx, bridge, { toolTimeoutMs: 1_000, snapshotMaxChars: 12_000, maxInteractiveItems: 60 })
-    expect(registered.map((r) => r.name).sort()).toEqual([...BROWSER_TOOL_NAMES].sort())
-    expect(disposers.size).toBe(BROWSER_TOOL_NAMES.length)
+    const expected = [...BROWSER_TOOL_NAMES, 'browser_bind_interactive', 'google_drive_export']
+    expect(registered.map((r) => r.name).sort()).toEqual(expected.sort())
+    expect(disposers.size).toBe(expected.length)
     for (const dispose of disposers.values()) dispose()
   })
 
@@ -140,8 +141,8 @@ describe('registerBrowserTools', () => {
   it('declares cooperative timeoutMs on every tool', () => {
     const { ctx, bridge, registered } = makeHarness()
     registerBrowserTools(ctx, bridge, { toolTimeoutMs: 5_000, snapshotMaxChars: 12_000, maxInteractiveItems: 60 })
-    for (const { definition } of registered) {
-      expect(definition.timeoutMs).toBe(5_000)
+    for (const { name, definition } of registered) {
+      expect(definition.timeoutMs).toBe(name === 'browser_bind_interactive' ? BIND_INTERACTIVE_TIMEOUT_MS : name === 'google_drive_export' ? GOOGLE_DRIVE_TIMEOUT_MS : 5_000)
     }
   })
 
@@ -159,7 +160,7 @@ describe('registerBrowserTools', () => {
     const { ctx, bridge, registered } = makeHarness()
     registerBrowserTools(ctx, bridge, { toolTimeoutMs: 5_000, snapshotMaxChars: 12_000, maxInteractiveItems: 60 })
     const descriptionChars = registered.reduce((sum, { definition }) => sum + String(definition.description).length, 0)
-    expect(descriptionChars).toBeLessThan(1_500)
+    expect(descriptionChars).toBeLessThan(2_200)
   })
 
   it('exposes optional frame routing on frame-local tools only', () => {

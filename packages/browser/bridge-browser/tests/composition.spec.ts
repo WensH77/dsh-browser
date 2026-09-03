@@ -1,15 +1,13 @@
 /**
  * REAL-composition coverage: a test-only cordis.yml booted through the
  * published Loader mounts the webserver, the minimal spine (sessions /
- * user-questions / agents / system-prompt / tools), a test-only api host
- * providing `ctx.apiProxy` over `createApiProxy` (the same shape the apiproxy
- * package's own tests use), and the bridge plugin itself. A real WebSocket
- * client then authenticates over a real socket and drives real gateway RPCs
- * against the real session store; disposal removes the tool registrations
- * (HMR safety).
+ * user-questions / agents / system-prompt / tools), a test-only dsh 0.1.2
+ * Remote-service seam, and the bridge plugin itself. A real WebSocket client
+ * then authenticates over a real socket and drives Host calls against the real
+ * Session store; disposal removes the tool registrations (HMR safety).
  *
- * Mocked boundary: only the api host's model routing defaults (no LLM
- * adapter) — RPCs exercised here (session.create/list) never touch the model.
+ * Mocked boundary: the unpublished 0.1.2 Gateway and Connection services;
+ * focused adapter tests pin their wire contracts against the upstream source.
  */
 
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
@@ -29,7 +27,6 @@ import ToolRegistry from '@deepseek-ai/dsh-tools'
 import LlmService from '@deepseek-ai/dsh-llm'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import UserQuestionService from '@deepseek-ai/dsh-user-questions'
-import { createApiProxy } from '@deepseek-ai/dsh-host-apiproxy'
 import * as BridgeBrowser from '../src/index.ts'
 import { BRIDGE_PATH, type BridgeFrame } from '../src/protocol.ts'
 
@@ -47,19 +44,64 @@ afterEach(async () => {
 })
 
 /**
- * The gateway over the minimal spine, provided as `ctx.apiProxy` — the same
- * factory the apiproxy package's own tests use. Model routing is stubbed
- * (provider/model names only; no adapter), which is the one external
- * boundary this composition does not exercise.
+ * Minimal structural implementation of the dsh 0.1.2 Host seams. Focused
+ * Remote-adapter tests pin the argument and stream contracts separately; this
+ * fixture verifies Loader injection, real sockets, and real Session storage.
  */
 const ApiHost = {
   name: 'api-host',
-  inject: ['sessions', 'userQuestions', 'agents'],
+  inject: ['sessions'],
   apply(ctx: Context, config: { cwd: string }): void {
-    ctx.provide('apiProxy', createApiProxy(ctx, {
-      defaultModelSelection: () => ({ provider: 'p', model: 'm' }),
-      cwd: config.cwd,
-    }))
+    const gateway = {
+      wireStream: {
+        async open(endpoint: string, _payload: unknown, signal: AbortSignal): Promise<AsyncIterable<unknown>> {
+          if (endpoint === '$events') {
+            return {
+              async *[Symbol.asyncIterator]() {
+                yield { type: 'ready', clientId: 'composition-client', host: { home: root } }
+                await new Promise<void>((resolve) => { signal.addEventListener('abort', () => { resolve() }, { once: true }) })
+              },
+            }
+          }
+          throw new Error(`unexpected composition stream ${endpoint}`)
+        },
+        failure: (error: unknown) => ({ code: 'internal', message: String(error), details: {} }),
+      },
+      async invoke(request: { namespace: string; method: string; args: Record<string, unknown> }) {
+        if (request.namespace === 'session' && request.method === 'create') {
+          const payload = request.args.request as { sessionId?: string; cwd?: string }
+          const session = ctx.sessions.create(
+            SessionId(payload.sessionId ?? `session-${crypto.randomUUID()}`),
+            { meta: { cwd: payload.cwd ?? config.cwd } },
+          )
+          return { sessionId: session.id }
+        }
+        if (request.namespace === 'session' && request.method === 'list') {
+          return {
+            items: ctx.sessions.list().map(session => ({
+              sessionId: session.id,
+              cwd: session.header.cwd,
+              running: false,
+              blank: session.events.length === 0,
+              updatedAt: session.header.createdAt,
+            })),
+          }
+        }
+        throw new Error(`unexpected composition invoke ${request.namespace}/${request.method}`)
+      },
+    }
+    const connection = {
+      createSharedFetchHandler: () => ({
+        fetch: async (request: Request) => {
+          const envelope = await request.json() as { rpcId: string }
+          return Response.json({
+            type: 'server-response', rpcId: envelope.rpcId, result: { ok: true },
+          })
+        },
+      }),
+    }
+    ctx.provide('typertGateway' as never, gateway as never)
+    ctx.provide('connection' as never, connection as never)
   },
 }
 
@@ -85,10 +127,6 @@ async function loadComposition(): Promise<{ ctx: Context; configPath: string; po
     `- name: '${BRIDGE}'`,
     '  config:',
     `    token: '${TOKEN}'`,
-    `    sessionWorkspacePath: '${join(root, 'browser-sessions')}'`,
-    // This spec drives the raw gateway chain (create → real session); the
-    // deferred-creation behavior is covered by the extension e2e instead.
-    '    deferSessionCreate: false',
     '',
   ].join('\n'))
 
@@ -127,7 +165,11 @@ async function loadComposition(): Promise<{ ctx: Context; configPath: string; po
 /** 扩展上下文 Origin（回环免 token 的必要条件）。 */
 const EXT_ORIGIN = 'chrome-extension://test-extension-id'
 
-function connect(port: number): Promise<{ ws: WebSocket; frames: BridgeFrame[]; closed: Promise<void> }> {
+function connect(port: number): Promise<{
+  ws: WebSocket
+  frames: BridgeFrame[]
+  closed: Promise<{ code: number; reason: string }>
+}> {
   return new Promise((resolve, reject) => {
     const ws = new WebSocket(`ws://127.0.0.1:${port}${BRIDGE_PATH}`, { headers: { origin: EXT_ORIGIN } })
     const frames: BridgeFrame[] = []
@@ -137,7 +179,9 @@ function connect(port: number): Promise<{ ws: WebSocket; frames: BridgeFrame[]; 
       resolve({
         ws,
         frames,
-        closed: new Promise<void>((doneResolve) => { ws.on('close', () => { doneResolve() }) }),
+        closed: new Promise((doneResolve) => {
+          ws.on('close', (code, reason) => { doneResolve({ code, reason: reason.toString() }) })
+        }),
       })
     })
   })
@@ -156,7 +200,7 @@ async function waitFor(predicate: () => boolean, timeoutMs = 5_000): Promise<voi
 }
 
 describe('real Loader composition', () => {
-  it('boots the bridge, authenticates over a real socket, and drives real gateway RPCs', { timeout: 60_000 }, async () => {
+  it('boots the pure tool bridge: tools registered, hello auth, internal RPCs only', { timeout: 60_000 }, async () => {
     const { ctx, port } = await loadComposition()
 
     // The bridge plugin mounted the browser tool set on the real registry.
@@ -182,26 +226,24 @@ describe('real Loader composition', () => {
     // non-loopback token gate is covered by server.spec overrides).
     const client = await connect(port)
     send(client.ws, { t: 'hello', token: '', caps: { textOnly: true, snapshotMaxChars: 32_000, maxInteractiveItems: 60 } })
-    await waitFor(() => client.frames.some((f) => f.t === 'hello.ok'))
+    await Promise.race([
+      waitFor(() => client.frames.some((f) => f.t === 'hello.ok')),
+      client.closed.then(({ code, reason }) => {
+        throw new Error(`bridge closed before hello.ok (${String(code)} ${reason}): ${JSON.stringify(client.frames)}`)
+      }),
+    ])
     expect(client.frames.find((f) => f.t === 'hello.ok')).toEqual({
       t: 'hello.ok',
       caps: { textOnly: true, snapshotMaxChars: 32_000, maxInteractiveItems: 60 },
     })
 
-    // Gateway RPC round-trip against the real session store.
-    send(client.ws, { t: 'rpc', id: 'c-1', method: 'session.create', payload: { cwd: root } })
+    // The bridge is a pure tool channel: gateway methods are refused rather
+    // than passed through to the Host adapter.
+    send(client.ws, { t: 'rpc', id: 'c-1', method: 'session.list', payload: {} })
     await waitFor(() => client.frames.some((f) => f.t === 'rpc.result' && f.id === 'c-1'))
-    const created = client.frames.find((f): f is Extract<BridgeFrame, { t: 'rpc.result' }> => f.t === 'rpc.result' && f.id === 'c-1')!
-    expect(created.ok).toBe(true)
-    const sessionId = ((created as { result: { result: { value: { sessionId: string } } } }).result).result.value.sessionId
-    expect(sessionId).toMatch(/^session-[0-9a-f-]{36}$/)
-    expect(ctx.sessions.get(SessionId(sessionId))?.header.cwd).toBe(root)
-
-    send(client.ws, { t: 'rpc', id: 'c-2', method: 'session.list', payload: {} })
-    await waitFor(() => client.frames.some((f) => f.t === 'rpc.result' && f.id === 'c-2'))
-    const listed = client.frames.find((f) => f.t === 'rpc.result' && f.id === 'c-2')!
-    const listedText = JSON.stringify((listed as { result: unknown }).result)
-    expect(listedText).toContain(sessionId)
+    const refused = client.frames.find((f): f is Extract<BridgeFrame, { t: 'rpc.result' }> => f.t === 'rpc.result' && f.id === 'c-1')!
+    expect(refused.ok).toBe(false)
+    expect(refused.error).toMatchObject({ code: 'method-not-allowed' })
 
     client.ws.close()
   })

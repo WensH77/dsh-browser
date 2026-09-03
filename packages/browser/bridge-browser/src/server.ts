@@ -1,16 +1,14 @@
 /**
- * Bridge WebSocket carrier: token-authenticated connection registry, gateway
- * RPC passthrough, per-connection event pump, and tool-call dispatch to the
- * connected browser extension.
+ * Bridge WebSocket carrier: token-authenticated connection registry and
+ * tool-call dispatch to the connected browser extension.
  *
  * The route this server mounts (`/ext/bridge`) lives OUTSIDE the /api trust
  * fence (which only guards the client-connection routes), so the bridge brings
  * its own authentication: a bearer token presented in the `hello` frame within
- * HELLO_TIMEOUT_MS. Gateway RPCs are dispatched through the same fetch-shaped
- * handler the /api carrier uses (`toFetchHandler`), so schema validation and
- * error envelopes are identical to the GUI path. Methods the /api carrier
- * pins to loopback (`PRIVILEGED_METHODS`) stay loopback-only here regardless
- * of the token, defense in depth for `--host 0.0.0.0` deployments.
+ * HELLO_TIMEOUT_MS. The bridge is a pure tool channel: it carries no chat,
+ * settings, credentials, or gateway passthrough. Two bridge-internal RPCs
+ * remain (`bridge.injectBrowserSnapshot`, `bridge.session.purge`), serviced
+ * directly by plugin dependencies; every other RPC method is refused.
  *
  * One active connection at a time: a new authenticated socket replaces the
  * previous one (the old socket is closed and its in-flight tool calls settle
@@ -23,9 +21,10 @@ import { randomUUID } from 'node:crypto'
 import type { IncomingMessage } from 'node:http'
 import type { Duplex } from 'node:stream'
 import { WebSocket, WebSocketServer } from 'ws'
-import type { MuxFrame, RpcRequest } from '@deepseek-ai/dsh-host-apiproxy/api'
 import {
+  BRIDGE_GDRIVE_MOVE_METHOD,
   BRIDGE_INJECT_BROWSER_SNAPSHOT_METHOD,
+  BRIDGE_OPEN_GDRIVE_FOLDER_METHOD,
   BRIDGE_SESSION_PURGE_METHOD,
   HELLO_TIMEOUT_MS,
   PING_INTERVAL_MS,
@@ -37,32 +36,6 @@ import {
 } from './protocol.ts'
 import { SessionPurgeError } from './session-purge.ts'
 import { verifyToken } from './token.ts'
-
-/**
- * Gateway methods the /api carrier pins to loopback (mirror of
- * client-connection's PRIVILEGED_METHODS; kept verbatim so the two fences
- * cannot drift). The bridge rejects these for non-loopback remotes even with
- * a valid token.
- */
-const PRIVILEGED_METHODS = new Set([
-  'host.pickDirectory',
-  'host.openPath',
-  'settings.describe',
-  'settings.openDocument',
-  'settings.update',
-  'settings.replace',
-  'settings.mutate',
-  'credentials.describe',
-  'credentials.set',
-  'credentials.unset',
-])
-
-/** Session mutations whose WebSocket arrival order is behaviorally significant. */
-const ORDERED_SESSION_METHODS = new Set([
-  BRIDGE_INJECT_BROWSER_SNAPSHOT_METHOD,
-  'session.prompt',
-  'session.cancel',
-])
 
 /** Loopback IPv4/IPv6 literals (IPv4-mapped included). Exported for tests and reuse. */
 export function isLoopbackAddress(address: string | undefined): boolean {
@@ -84,23 +57,23 @@ export class BridgeToolError extends Error {
 export interface BridgeServerDeps {
   /** Bearer token the extension must present in `hello`. */
   token: string
-  /** Fetch-shaped gateway carrier (from `toFetchHandler(ctx.apiProxy)`). */
-  apiHandler: { fetch: (request: Request) => Promise<Response> }
-  /** Per-connection event stream (usually `ctx.apiProxy.events.mux`). */
-  openEvents: (signal: AbortSignal) => AsyncIterable<RpcRequest<MuxFrame>>
   /** Default per-tool-call timeout in ms. */
   toolTimeoutMs: number
   /** Capabilities to echo in `hello.ok` (negotiated snapshot budgets). */
   caps: BridgeCaps
-  /** Seed a followed-page snapshot into a live or deferred Agent session. */
+  /** Seed a followed-page snapshot into a live Agent session. */
   injectBrowserSnapshot: (sessionId: string, snapshot: string) => void | Promise<void>
+  /** Reveal the GDrive export root in the system file manager. */
+  openGDriveFolder: () => void | Promise<void>
+  /** Move a finished Google download into ~/.dsh/gdrive/<sessionId>/. */
+  gdriveMoveIntoSession: (sourcePath: string, sessionId: string) => Promise<{ filePath: string }>
   /**
    * Permanently delete one session's durable storage. Callers archive the
    * session through the gateway first; this only removes files.
    */
   purgeSession: (sessionId: string) => Promise<void>
   /**
-   * Test seam: force the remote address seen by the privilege gate. The
+   * Test seam: force the remote address seen by the hello loopback gate. The
    * sandbox cannot bind arbitrary loopback literals, so the non-loopback
    * branch is exercised through this override; production never sets it.
    */
@@ -121,10 +94,6 @@ interface PendingTool {
 /** A socket that passed authentication and owns the single active slot. */
 interface ReadyConnection {
   ws: WebSocket
-  /** Remote address captured at upgrade time (loopback gate for privileged methods). */
-  remoteAddress: string | undefined
-  abort: AbortController
-  pump: Promise<void>
   ping: NodeJS.Timeout
 }
 
@@ -156,7 +125,6 @@ export class BridgeServer {
   private readonly wss = new WebSocketServer({ noServer: true })
   private current: ReadyConnection | null = null
   private readonly pendingTools = new Map<string, PendingTool>()
-  private readonly orderedSessionRpcs = new Map<string, Promise<void>>()
   private closed = false
 
   constructor(private readonly deps: BridgeServerDeps) {}
@@ -247,15 +215,13 @@ export class BridgeServer {
   /**
    * Terminate the server: close the acceptor, drop all sockets, reject all
    * in-flight tool calls.
-   * @returns a promise resolving after the acceptor and all pumps stop.
+   * @returns a promise resolving after the acceptor stops.
    */
   async close(): Promise<void> {
     // Idempotent: a second close must not touch the acceptor (ws throws
     // "The server is not running" when closing an already-closed server).
     if (this.closed) return
     this.closed = true
-    // Capture the live pump BEFORE replaceConnection nulls the connection.
-    const pumps = this.current === null ? [] : [this.current.pump]
     this.replaceConnection()
     for (const socket of this.wss.clients) socket.terminate()
     this.current = null
@@ -268,7 +234,6 @@ export class BridgeServer {
         else reject(error)
       })
     })
-    await Promise.all(pumps)
   }
 
   /** @returns whether an authenticated extension is currently connected. */
@@ -313,7 +278,7 @@ export class BridgeServer {
         }
         clearTimeout(helloTimer)
         helloTimer = undefined
-        this.promote(ws, remoteAddress)
+        this.promote(ws)
         return
       }
       this.handleReadyFrame(frame)
@@ -328,40 +293,20 @@ export class BridgeServer {
   }
 
   /** Promote an authenticated socket to the single active slot. */
-  private promote(ws: WebSocket, remoteAddress: string | undefined): void {
+  private promote(ws: WebSocket): void {
     this.replaceConnection()
-    const abort = new AbortController()
     const ping = setInterval(() => { sendFrame(ws, { t: 'ping' }) }, this.deps.pingIntervalMs ?? PING_INTERVAL_MS)
-    const pump = (async () => {
-      try {
-        for await (const envelope of this.deps.openEvents(abort.signal)) {
-          if (ws.readyState !== WebSocket.OPEN) break
-          sendFrame(ws, {
-            t: 'event',
-            frame: { rpcId: envelope.rpcId, method: envelope.payload.type, payload: envelope.payload },
-          })
-        }
-      } catch (error: unknown) {
-        if (!abort.signal.aborted && ws.readyState === WebSocket.OPEN) {
-          sendFrame(ws, { t: 'error', code: 'stream-failed', message: String(error) })
-        }
-      }
-    })()
-    this.current = { ws, remoteAddress, abort, pump, ping }
+    this.current = { ws, ping }
     sendFrame(ws, { t: 'hello.ok', caps: this.deps.caps })
     ws.once('close', () => {
       clearInterval(ping)
-      abort.abort()
     })
   }
 
   private handleReadyFrame(frame: BridgeFrame): void {
     switch (frame.t) {
       case 'rpc':
-        this.routeRpc(frame)
-        break
-      case 'respond':
-        void this.handleRespond(frame)
+        void this.handleRpc(frame)
         break
       case 'tool.result':
         this.settleTool(frame.id, frame.ok, frame.ok ? frame.result : frame.error)
@@ -370,8 +315,6 @@ export class BridgeServer {
       case 'hello':
       case 'hello.ok':
       case 'rpc.result':
-      case 'respond.result':
-      case 'event':
       case 'tool.call':
       case 'tool.cancel':
       case 'ping':
@@ -383,38 +326,15 @@ export class BridgeServer {
   }
 
   /**
-   * Preserve prompt/cancel arrival order per session. In particular, the
-   * first prompt may still be materializing a provisional session; its cancel
-   * must not reach the gateway until that admission has completed.
+   * Service the two bridge-internal RPC methods only; every other method is
+   * refused. The bridge carries no gateway passthrough: chat, settings, and
+   * credentials all belong to standard dsh clients now.
    */
-  private routeRpc(frame: Extract<ClientFrame, { t: 'rpc' }>): void {
-    const sessionId = orderedSessionId(frame)
-    if (sessionId === undefined) {
-      void this.handleRpc(frame)
-      return
-    }
-    const previous = this.orderedSessionRpcs.get(sessionId) ?? Promise.resolve()
-    const task = previous.then(
-      () => this.handleRpc(frame),
-      () => this.handleRpc(frame),
-    )
-    this.orderedSessionRpcs.set(sessionId, task)
-    const clear = (): void => {
-      if (this.orderedSessionRpcs.get(sessionId) === task) this.orderedSessionRpcs.delete(sessionId)
-    }
-    void task.then(clear, clear)
-  }
-
   private async handleRpc(frame: Extract<ClientFrame, { t: 'rpc' }>): Promise<void> {
     const conn = this.current
     /* v8 ignore next -- replacement race: a frame can land between a socket
     replacement and the next promotion; the re-check keeps the handler total */
     if (conn === null) return
-    const forbidden = PRIVILEGED_METHODS.has(frame.method) && !isLoopbackAddress(conn.remoteAddress)
-    if (forbidden) {
-      sendFrame(conn.ws, { t: 'rpc.result', id: frame.id, ok: false, error: { code: 'forbidden', message: 'method is loopback-only' } })
-      return
-    }
     if (frame.method === BRIDGE_INJECT_BROWSER_SNAPSHOT_METHOD) {
       const payload = browserSnapshotPayload(frame.payload)
       if (payload === undefined) {
@@ -435,6 +355,40 @@ export class BridgeServer {
           id: frame.id,
           ok: false,
           error: { code: 'internal', message: String(error) },
+        })
+      }
+      return
+    }
+    if (frame.method === BRIDGE_GDRIVE_MOVE_METHOD) {
+      const movePayload = gdriveMovePayload(frame.payload)
+      if (movePayload === null) {
+        sendFrame(conn.ws, { t: 'rpc.result', id: frame.id, ok: false, error: { code: 'bad-request', message: 'sourcePath and sessionId must be non-empty strings' } })
+        return
+      }
+      const { sourcePath, sessionId } = movePayload
+      if (sourcePath === '') {
+        sendFrame(conn.ws, { t: 'rpc.result', id: frame.id, ok: false, error: { code: 'bad-request', message: 'sourcePath and sessionId must be non-empty strings' } })
+        return
+      }
+      try {
+        const result = await this.deps.gdriveMoveIntoSession(sourcePath, sessionId)
+        sendFrame(conn.ws, { t: 'rpc.result', id: frame.id, ok: true, result })
+      } catch (error: unknown) {
+        sendFrame(conn.ws, {
+          t: 'rpc.result', id: frame.id, ok: false,
+          error: { code: 'internal', message: error instanceof Error ? error.message : String(error) },
+        })
+      }
+      return
+    }
+    if (frame.method === BRIDGE_OPEN_GDRIVE_FOLDER_METHOD) {
+      try {
+        await this.deps.openGDriveFolder()
+        sendFrame(conn.ws, { t: 'rpc.result', id: frame.id, ok: true, result: { opened: true } })
+      } catch (error: unknown) {
+        sendFrame(conn.ws, {
+          t: 'rpc.result', id: frame.id, ok: false,
+          error: { code: 'internal', message: error instanceof Error ? error.message : String(error) },
         })
       }
       return
@@ -460,58 +414,12 @@ export class BridgeServer {
       }
       return
     }
-    const body = JSON.stringify({ type: 'client-request', rpcId: frame.id, method: frame.method, payload: frame.payload })
-    const request = new Request(new URL(`/api/${frame.method}`, 'http://dsh.internal'), {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body,
+    sendFrame(conn.ws, {
+      t: 'rpc.result',
+      id: frame.id,
+      ok: false,
+      error: { code: 'method-not-allowed', message: `bridge refuses RPC method ${frame.method}` },
     })
-    try {
-      const response = await this.deps.apiHandler.fetch(request)
-      const text = await response.text()
-      if (!response.ok) {
-        sendFrame(conn.ws, { t: 'rpc.result', id: frame.id, ok: false, error: { code: 'http', message: text } })
-        return
-      }
-      let result: unknown
-      try {
-        result = JSON.parse(text)
-      } catch {
-        result = text
-      }
-      sendFrame(conn.ws, { t: 'rpc.result', id: frame.id, ok: true, result })
-    } catch (error: unknown) {
-      sendFrame(conn.ws, { t: 'rpc.result', id: frame.id, ok: false, error: { code: 'internal', message: String(error) } })
-    }
-  }
-
-  /** Relay a pending host-interaction response through the GUI's /api/respond channel. */
-  private async handleRespond(frame: Extract<ClientFrame, { t: 'respond' }>): Promise<void> {
-    const conn = this.current
-    /* v8 ignore next -- replacement race; a closed socket simply drops the receipt */
-    if (conn === null) return
-    const request = new Request(new URL('/api/respond', 'http://dsh.internal'), {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ type: 'client-response', rpcId: frame.rpcId, result: frame.result }),
-    })
-    try {
-      const response = await this.deps.apiHandler.fetch(request)
-      const text = await response.text()
-      if (!response.ok) {
-        sendFrame(conn.ws, { t: 'respond.result', id: frame.id, ok: false, error: { code: 'http', message: text } })
-        return
-      }
-      let result: unknown
-      try {
-        result = JSON.parse(text)
-      } catch {
-        result = text
-      }
-      sendFrame(conn.ws, { t: 'respond.result', id: frame.id, ok: true, result })
-    } catch (error: unknown) {
-      sendFrame(conn.ws, { t: 'respond.result', id: frame.id, ok: false, error: { code: 'internal', message: String(error) } })
-    }
   }
 
   private settleTool(id: string, ok: boolean, payload: unknown): void {
@@ -529,7 +437,6 @@ export class BridgeServer {
     if (conn === null) return
     this.current = null
     clearInterval(conn.ping)
-    conn.abort.abort()
     if (conn.ws.readyState === WebSocket.OPEN || conn.ws.readyState === WebSocket.CONNECTING) {
       conn.ws.close(4000, 'replaced')
     }
@@ -554,13 +461,6 @@ function purgeSessionPayload(payload: unknown): string | undefined {
   const { sessionId } = payload as Record<string, unknown>
   if (typeof sessionId !== 'string' || sessionId.trim() === '') return undefined
   return sessionId
-}
-
-function orderedSessionId(frame: Extract<ClientFrame, { t: 'rpc' }>): string | undefined {
-  if (!ORDERED_SESSION_METHODS.has(frame.method)) return undefined
-  if (typeof frame.payload !== 'object' || frame.payload === null || Array.isArray(frame.payload)) return undefined
-  const sessionId = (frame.payload as Record<string, unknown>).sessionId
-  return typeof sessionId === 'string' ? sessionId : undefined
 }
 
 /**
@@ -593,4 +493,13 @@ export function payloadMessage(payload: unknown): string {
     return 'browser action failed'
   }
   return 'browser action failed'
+}
+
+
+function gdriveMovePayload(payload: unknown): { sourcePath: string; sessionId: string } | null {
+  if (typeof payload !== 'object' || payload === null || Array.isArray(payload)) return null
+  const { sourcePath, sessionId } = payload as Record<string, unknown>
+  if (typeof sourcePath !== 'string' || sourcePath.trim() === ''
+    || typeof sessionId !== 'string' || sessionId.trim() === '') return null
+  return { sourcePath, sessionId }
 }

@@ -94,6 +94,9 @@ export class ApprovalCoordinator {
     if (pending === undefined) return
     this.pending.delete(id)
     clearTimeout(pending.timer)
+    if (result.status !== 'decision') {
+      console.warn('[dsh-browser] approval', id, 'settled', result.status)
+    }
     pending.resolve(result)
     this.callbacks.clearNotification(id)
     this.callbacks.resolved(id)

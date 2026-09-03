@@ -3,18 +3,25 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { Context } from '@deepseek-ai/cordis'
-import type { ApiProxy } from '@deepseek-ai/dsh-host-apiproxy/api'
-import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
 import { apply, assertPositiveInteger, Config, resolveConfig } from '../src/index.ts'
 
 /** Minimal context stub: apply only needs the services at registration time. */
 function stubContext(): Context {
+  const gateway = {
+    wireStream: {
+      open: async (): Promise<AsyncIterable<unknown>> => ({ async *[Symbol.asyncIterator]() {} }),
+      failure: (error: unknown) => ({ code: 'internal', message: String(error), details: {} }),
+    },
+    invoke: async () => undefined,
+  }
+  const connection = {
+    createSharedFetchHandler: () => ({ fetch: async () => new Response('not found', { status: 404 }) }),
+  }
   return {
-    apiProxy: { sessions: {} } as ApiProxy,
     webServer: { port: 0, registerUpgrade: () => () => {}, register: () => () => {} },
     tools: { register: () => () => {} },
     agents: { get: () => undefined },
-    get: () => undefined,
+    get: (key: string) => key === 'typertGateway' ? gateway : key === 'connection' ? connection : undefined,
     on: () => () => {},
     logger: { info: () => {}, warn: () => {}, error: () => {} },
     effect: (fn: () => unknown, label?: string) => {
@@ -43,38 +50,27 @@ describe('assertPositiveInteger', () => {
 const VALID = { toolTimeoutMs: 90_000, snapshotMaxChars: 32_000, maxInteractiveItems: 60 }
 
 describe('config', () => {
-  it('resolves defaults, including an enabled workspace under the dsh home', () => {
-    expect(resolveConfig({})).toEqual({
-      ...VALID,
-      sessionWorkspacePath: dshHomePath('browser-sessions'),
-      deferSessionCreate: true,
-    })
-    expect(new Config().sessionWorkspacePath).toBe(dshHomePath('browser-sessions'))
+  it('resolves defaults for every tunable', () => {
+    expect(resolveConfig({})).toEqual(VALID)
+    expect(new Config().toolTimeoutMs).toBe(90_000)
+    expect(new Config().snapshotMaxChars).toBe(32_000)
+    expect(new Config().maxInteractiveItems).toBe(60)
   })
 
-  it('preserves explicit values and the empty-string workspace opt-out', () => {
-    expect(resolveConfig({
+  it('preserves explicit values', () => {
+    const explicit = {
       token: 'fixed',
       toolTimeoutMs: 1,
       snapshotMaxChars: 500,
       maxInteractiveItems: 3,
-      sessionWorkspacePath: '',
-      deferSessionCreate: false,
-    })).toEqual({
-      token: 'fixed',
-      toolTimeoutMs: 1,
-      snapshotMaxChars: 500,
-      maxInteractiveItems: 3,
-      sessionWorkspacePath: '',
-      deferSessionCreate: false,
-    })
-    expect(new Config({ sessionWorkspacePath: '' }).sessionWorkspacePath).toBe('')
+    }
+    expect(resolveConfig(explicit)).toEqual(explicit)
   })
 })
 
 describe('apply', () => {
   it('registers the bridge with a fixed token (no generation)', async () => {
-    await apply(stubContext(), { token: 'fixed-token', ...VALID, sessionWorkspacePath: '' })
+    await apply(stubContext(), { token: 'fixed-token', ...VALID })
   })
 
   it('generates and persists a token when none is configured', async () => {

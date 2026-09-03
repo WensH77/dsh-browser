@@ -40,18 +40,18 @@
   ],
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",
-    "@deepseek-ai/dsh-agent": "^0.1.1-rc.1",
-    "@deepseek-ai/dsh-attachment": "^0.1.1-rc.1",
-    "@deepseek-ai/dsh-host-apiproxy": "^0.1.1-rc.1",
-    "@deepseek-ai/dsh-host-webserver": "^0.1.1-rc.1",
-    "@deepseek-ai/dsh-invariants": "^0.1.1-rc.1",
-    "@deepseek-ai/dsh-llm": "^0.1.1-rc.1",
-    "@deepseek-ai/dsh-home-paths": "^0.1.1-rc.1",
-    "@deepseek-ai/dsh-tools": "^0.1.1-rc.1"
+    "@deepseek-ai/dsh-agent": "^0.1.2-alpha.4",
+    "@deepseek-ai/dsh-attachment": "^0.1.2-alpha.4",
+    "@deepseek-ai/dsh-home-paths": "^0.1.2-alpha.4",
+    "@deepseek-ai/dsh-host-webserver": "^0.1.2-alpha.4",
+    "@deepseek-ai/dsh-invariants": "^0.1.2-alpha.4",
+    "@deepseek-ai/dsh-llm": "^0.1.2-alpha.4",
+    "@deepseek-ai/dsh-tools": "^0.1.2-alpha.4"
   },
   "dependencies": {
     "@deepseek-ai/schemastery": "^3.18.1",
-    "ws": "^8.21.0"
+    "ws": "^8.21.0",
+    "xlsx": "^0.18.5"
   },
   "scripts": {
     "test": "vitest run",
@@ -66,7 +66,6 @@
     "@deepseek-ai/dsh-agent-loop": "0.1.1-rc.1",
     "@deepseek-ai/dsh-attachment": "0.1.1-rc.1",
     "@deepseek-ai/dsh-home-paths": "0.1.1-rc.1",
-    "@deepseek-ai/dsh-host-apiproxy": "0.1.1-rc.1",
     "@deepseek-ai/dsh-host-webserver": "0.1.1-rc.1",
     "@deepseek-ai/dsh-invariants": "0.1.1-rc.1",
     "@deepseek-ai/dsh-llm": "0.1.1-rc.1",
