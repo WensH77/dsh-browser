@@ -16,23 +16,20 @@ dsh 的**纯浏览器操作端**：让模型直接读取并操作你在浏览器
 | 导航 | `browser_navigate` / `browser_back` / `browser_forward` / `browser_reload` | 受控标签页内跳转，登录态保留 |
 | 读区域 | `browser_get_text` | 懒加载内容 / 局部文本 |
 | 等待 | `browser_wait` | 页面加载与渲染稳定检测 |
-| 图片对话 | `session.prompt` / `session.attachment` | 按宿主能力启用图片选择、纯图片发送和持久历史预览 |
-| 引用你划选的内容 | 侧栏输入框 | 你在页面里选中的文字会变成输入框里的引用，随下一条消息一起发送 |
 
 ## 架构
 
 ```
-side panel (React) ◄─port─► background SW/事件页 ◄─WS─► dsh bridge plugin
+状态面板 / options / popup ◄─runtime messages─► background SW/事件页 ◄─WS─► dsh bridge plugin
                                  │
-                  tabs.sendMessage (DSH_ACTION, DSH_SELECTION_WATCH)
-                                 ▲ DSH_SELECTION
+                     tabs.sendMessage (DSH_ACTION / DSH_BUDGET / DSH_CONTENT_READY)
                                  ▼
-                        content script (snapshot/actions/privacy/selection)
+                        content script (snapshot/actions/privacy)
 ```
 
-- **background**（`src/background/`）：桥连接（token 认证 + 指数退避重连 + 保活）、网关 RPC 客户端，以及**失败关闭地分发工具到用户受控标签页**。
-- **content script**（`src/content/`）：纯文本快照（可读性主文 + 编号交互清单 + 表单字段）、**稳定编号**（`data-dsh-el`）、delta 变化、点击/输入/按键/滚动/导航动作、敏感字段掩码，以及带防抖的划选监听——只有侧栏打开且页面共享不是「关闭」时才会启用。
-- **panel**（`src/panel/`）：React 对话界面（可续接会话/历史/实时事件/设置）；图片选择和预检由宿主声明的限制控制，持久图片通过会话授权读取；消息以已消毒的 Markdown 渲染，`ask_user_question` 请求会显示成可直接作答的卡片，手动切页时显示控制权交接条，运行中的回合提供标准停止按钮，页面划选的段落显示为可移除的引用卡片，并在下一条消息中包在不可信内容边界里发送。
+- **background**（`src/background/`）：桥连接（token 认证 + 指数退避重连 + 保活）、两个桥内部 RPC 调用，以及**失败关闭地分发工具到用户受控标签页**。
+- **content script**（`src/content/`）：纯文本快照（可读性主文 + 编号交互清单 + 表单字段）、**稳定编号**（`data-dsh-el`）、delta 变化、点击/输入/按键/滚动/导航动作与敏感字段掩码。
+- **panel / options**（`src/panel/`、`src/options/`）：两个精简 React 页面——状态面板（依 `statusMode` 设置，也会以浮窗 popup 打开同一页面）展示连接状态、受控标签页、最近操作与待审批项；options 页管理桥 URL/token、页面共享、信任源与审批通知。
 - **协议**：`@yuxianglin/dsh-bridge-browser` workspace 包中的 `protocol.ts` 是两端共享的真源，具体通过该包的源码 export 共享。
 
 ## 构建
@@ -82,19 +79,19 @@ pnpm --filter dsh-browser-extension run test
 
    如果使用 clone，请改为在仓库根目录运行 `pnpm start`。
 
-   或在正式发布后使用受支持的精确公开版本：
+   或使用受支持的精确公开版本（钉定 0.1.2 预发布版）：
 
    ```sh
-   npx @deepseek-ai/dsh@0.1.2 web
+   npx @deepseek-ai/dsh@0.1.2-rc.1 web
    ```
 
    两种命令都会从本机 `web` profile 加载同一个 bundle。默认端口为 3080；如被占用，可追加 `--port <port>`。
 
-   **DSH Desktop 用户**：桌面版默认让系统随机分配本地 Web 端口（`dsh-desktop.port: 0`），自动探测无法预知随机端口。请在桌面版设置中把端口固定为 `43189`（见 [deepseek-harness-desktop 用户指南](https://github.com/anywhere-labs/deepseek-harness-desktop/blob/master/docs/user-guide.md)），扩展的自动探测会覆盖该端口；或直接在侧栏设置中手动填写 `http://127.0.0.1:<端口>`。
+   **DSH Desktop 用户**：桌面版默认让系统随机分配本地 Web 端口（`dsh-desktop.port: 0`），自动探测无法预知随机端口。请在桌面版设置中把端口固定为 `43189`（见 [deepseek-harness-desktop 用户指南](https://github.com/anywhere-labs/deepseek-harness-desktop/blob/master/docs/user-guide.md)），扩展的自动探测会覆盖该端口；或直接在扩展 options 中手动填写 `http://127.0.0.1:<端口>`。
 
-   加载或重新加载扩展本身是被动的：只有打开侧栏后，扩展才会探测本机端口并创建 WebSocket。用户已建立的健康连接可在侧栏关闭后继续用于后台审批；但连接一旦掉线或被另一浏览器替换，没有打开侧栏时就不会重连。
+   扩展加载后即连接自动探测到的桥，并带退避持续重连；即使你在其它标签页工作，审批也能在状态窗中弹出。连接掉线或被另一浏览器 Profile 顶替时，扩展会自动重连。
 
-3. **开始使用**：打开普通的 `http://` 或 `https://` 页面，点击 DeepSeek 鲸鱼图标打开侧边栏。两个构建都会自动探测本机 dsh。Chrome 回环连接无需地址或 Token；Firefox 的 `moz-extension://` UUID 不能证明扩展身份，必须在设置中填入 `~/.dsh/ext-bridge-token`。可以直接对话，或先点「读取页面」。
+3. **开始使用**：打开普通的 `http://` 或 `https://` 页面，点击 DeepSeek 鲸鱼图标。两个构建都会自动探测本机 dsh。Chrome 回环连接无需地址或 Token；Firefox 的 `moz-extension://` UUID 不能证明扩展身份，必须在设置中填入 `~/.dsh/ext-bridge-token`。
 
 页面即使在扩展安装或重载之前已经打开，也会在第一次操作时自动补加载内容脚本，无需手动刷新。`chrome://`、Chrome Web Store 等浏览器内置或受保护页面不支持读取和操作。
 
@@ -107,17 +104,16 @@ pnpm --filter dsh-browser-extension run test
 - **稳定编号**：元素编号跨快照保持（WeakMap + `data-dsh-el`），模型可以说"点 7 号"；页面大改时显式提示"编号已重排"。
 - **delta 模式**：`browser_snapshot({delta:true})` 只返回变化元素的编号，省 token。
 - **隐私**：密码/卡号字段的值永远以 `••••` 呈现，绝不回传；可访问名称从不使用敏感字段的当前值。
-- **标签页绑定**：提交提示时会在模型开始工作前绑定活动标签页；如果直接调用浏览器工具，也会在需要时完成首次绑定。手动切换标签页或窗口后，后续工具会暂停，并询问助手继续原页面还是跟随当前页。选择原页面后允许后台操作，但不会改变用户正在看的页面；选择跟随后会重置页面引用状态。受控页关闭后失败关闭，直到用户选择当前页；切页还会撤销尚未完成的操作审批。
-- **分级审批**：默认「自动共享」允许模型按需读取受控标签页而不额外弹窗；「每次询问」可恢复逐次读取确认，「关闭」会阻断读取。在「每次询问」模式下，读取弹窗可以仅允许一次，也可以持久切回自动读取，之后仍可在设置中关闭。状态变更工具仍然失败关闭，并显示实际 origin 和脱敏动作摘要；用户可拒绝、仅允许一次，或只在当前侧栏会话中信任单个 origin。最后一个侧栏关闭或 Service Worker 重启会清空临时信任；永久信任需在设置中显式管理。侧栏关闭时，审批最多保留 60 秒；启用通知后，系统通知可把用户带回侧栏。会话级审批只会在其所属会话恢复完成后显示。调用方取消或桥接超时时，会先撤销尚未完成的审批，过期动作不会继续执行。
-- **会话续接**：重新打开侧栏时默认恢复最近活跃的浏览器会话；若该会话不可用，则恢复最新的非空持久会话，最后才创建新会话。可在设置中关闭。
+- **标签页绑定**：首次浏览器工具调用时会把当时的活动标签页绑定给该会话。手动切换标签页或窗口后，后续工具会暂停，并通过状态窗中的审批询问助手继续原页面还是跟随当前页。选择原页面后允许后台操作，但不会改变用户正在看的页面；选择跟随后会重置页面引用状态。受控页关闭后失败关闭，直到下一次调用显式选择页面；切页还会撤销尚未完成的操作审批。
+- **分级审批**：默认「自动共享」允许模型按需读取受控标签页而不额外弹窗；「每次询问」可恢复逐次读取确认，「关闭」会阻断读取。在「每次询问」模式下，读取弹窗可以仅允许一次，也可以持久切回自动读取，之后仍可在设置中关闭。状态变更工具仍然失败关闭，并显示实际 origin 和脱敏动作摘要；用户可拒绝、仅允许一次，或信任单个 origin 用于当前会话。临时信任在 Service Worker 重启时清空；永久信任需在扩展 options 页中显式管理。审批最多保留 60 秒；启用通知后，系统通知可打开状态窗供用户处理。调用方取消或桥接超时时，会先撤销尚未完成的审批，过期动作不会继续执行。
 
 ## 权限说明
 
-Chrome 使用 `sidePanel`，Firefox 使用 `sidebar_action`。两者都申请 `storage`（设置与最近会话续接）、`notifications`（侧栏关闭时可选的审批提醒）、`tabs` + `activeTab` + `scripting`（观察切页，并向用户显式选择的受控标签页注入/发消息；安装前已打开的页面也会按需补注入）、`webNavigation`（枚举该标签页中的 frame，并把消息绑定到具体文档）、`alarms`（后台保活）和 `http/https`（内容脚本注入普通网页）。Firefox AMO manifest 如实声明扩展会把浏览活动、网页内容/操作和对话内容发送给用户配置的 dsh/模型服务。扩展绝不改变用户正在看的标签页，也不会静默跟随手动切页；只有用户选择继续原页面后，助手才会在后台操作。
+Chrome 使用 `sidePanel`，Firefox 使用 `sidebar_action`。两者都申请 `storage`（设置）、`notifications`（没有状态窗打开时可选的审批提醒）、`tabs` + `activeTab` + `scripting`（观察切页，并向用户显式选择的受控标签页注入/发消息；安装前已打开的页面也会按需补注入）、`webNavigation`（枚举该标签页中的 frame，并把消息绑定到具体文档）、`alarms`（后台保活）和 `http/https`（内容脚本注入普通网页）。Firefox AMO manifest 如实声明扩展会把浏览活动、网页内容/操作和对话内容发送给用户配置的 dsh/模型服务。扩展绝不改变用户正在看的标签页，也不会静默跟随手动切页；只有用户选择继续原页面后，助手才会在后台操作。
 
 ## 已知限制
 
-- 同时只有一个扩展连接桥。未打开侧栏的浏览器 Profile 不会抢占连接；另一个已打开的侧栏顶替连接后，被替换的一端会主动让权，不再反复重连互踢。
+- 同时只有一个扩展连接桥。未打开侧栏的浏览器 Profile 不会抢占连接；另一个浏览器 Profile 顶替连接后，被替换的一端会主动让权，不再反复重连互踢。
 - 标签页绑定属于整个扩展连接，而不是单个对话会话。
 - 可访问的跨源 iframe 会进入快照，并通过稳定的 `(frame, index)` 地址执行操作；受保护或已销毁的 frame 会标记为不可访问，不影响整页快照。
 - 验证码/纯图片按钮无法处理——工具结果会标注"存在无文本可访问名的元素"，提示用户手动完成该步。

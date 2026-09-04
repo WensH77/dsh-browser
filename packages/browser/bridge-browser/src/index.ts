@@ -6,8 +6,7 @@
  * webserver, OUTSIDE the /api trust fence — so it brings its own bearer-token
  * authentication (first frame `hello` within HELLO_TIMEOUT_MS). It is a pure
  * tool channel: it carries browser tool frames plus the two bridge-internal
- * RPCs (snapshot injection, session purge) and no chat or gateway
- * passthrough. Tools execute by dispatching `tool.call` frames to the
+ * RPCs (gdrive move/folder reveal) and no chat or gateway passthrough. Tools execute by dispatching `tool.call` frames to the
  * connected extension, which performs the action in the tab explicitly
  * controlled by the user.
  *
@@ -28,7 +27,6 @@ import type {} from '@deepseek-ai/dsh-tools'
 import type { WebRoute, WebUpgradeRoute } from '@deepseek-ai/dsh-host-webserver'
 import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
 import { BridgeServer } from './server.ts'
-import { BrowserContextInjector } from './browser-context.ts'
 import { registerBrowserTools } from './tools.ts'
 import {
   BRIDGE_CONFIG_PATH,
@@ -36,27 +34,19 @@ import {
   DEFAULT_SNAPSHOT_MAX_CHARS,
   MIN_SNAPSHOT_MAX_CHARS,
 } from './protocol.ts'
-import { purgeSessionFiles, type SessionPurgeDeps } from './session-purge.ts'
 import { resolveToken } from './token.ts'
-import {
-  listRunningSessions,
-  type TypertGatewayLike,
-} from './remote-host-api.ts'
 
 /** Cordis plugin name used by loader diagnostics. */
 export const name = 'bridge-browser'
 
 /** Services required by this plugin. */
-export const inject = ['webServer', 'typertGateway', 'tools', 'agents', 'userQuestions']
+export const inject = ['webServer', 'tools', 'userQuestions']
 
 /** Default per-tool-call budget (ms). */
 const DEFAULT_TOOL_TIMEOUT_MS = 90_000
 
 /** Default cap on interactive inventory items per snapshot. */
 const DEFAULT_MAX_INTERACTIVE_ITEMS = 60
-
-/** Durable session storage root written by the JSONL persistence plugin. */
-const SESSIONS_ROOT = dshHomePath('sessions')
 
 function sanitizePathSegment(value: string): string {
   const cleaned = value.replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '')
@@ -120,9 +110,8 @@ export function resolveConfig(config: Config): ResolvedConfig {
     maxInteractiveItems: config.maxInteractiveItems ?? DEFAULT_MAX_INTERACTIVE_ITEMS,
   }
   assertPositiveInteger('toolTimeoutMs', resolved.toolTimeoutMs)
-  assertPositiveInteger('snapshotMaxChars', resolved.snapshotMaxChars)
-  if (resolved.snapshotMaxChars < MIN_SNAPSHOT_MAX_CHARS) {
-    throw new Error(`bridge-browser: snapshotMaxChars must be at least ${MIN_SNAPSHOT_MAX_CHARS}`)
+  if (!Number.isInteger(resolved.snapshotMaxChars) || resolved.snapshotMaxChars < MIN_SNAPSHOT_MAX_CHARS) {
+    throw new Error(`bridge-browser: snapshotMaxChars must be an integer of at least ${MIN_SNAPSHOT_MAX_CHARS}`)
   }
   assertPositiveInteger('maxInteractiveItems', resolved.maxInteractiveItems)
   return resolved
@@ -139,27 +128,6 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   const resolved = resolveConfig(config)
 
   const tokenRes = await resolveToken(resolved.token)
-  const gateway = ctx.get('typertGateway') as unknown as TypertGatewayLike | undefined
-  if (gateway === undefined) {
-    throw new Error('bridge-browser: dsh 0.1.2 typertGateway service is required')
-  }
-  const browserContext = new BrowserContextInjector(ctx.agents)
-  ctx.on('agent/session-start', ({ agent }) => { browserContext.activate(agent) })
-
-  const purgeSession = async (sessionId: string): Promise<void> => {
-    const runningSessionIds = new Set<string>()
-    try {
-      const listed = await listRunningSessions(gateway, new AbortController().signal)
-      for (const entry of listed) {
-        if (entry.running) runningSessionIds.add(entry.sessionId)
-      }
-    } catch {
-      // Guard is best-effort: an unavailable listing must not block deletion,
-      // because the caller archives the session before purging files.
-    }
-    const deps: SessionPurgeDeps = { sessionsRoot: SESSIONS_ROOT, runningSessionIds }
-    await purgeSessionFiles(deps, sessionId)
-  }
 
   const gdriveRoot = dshHomePath('gdrive')
   const server = new BridgeServer({
@@ -188,8 +156,6 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
       snapshotMaxChars: resolved.snapshotMaxChars,
       maxInteractiveItems: resolved.maxInteractiveItems,
     },
-    injectBrowserSnapshot: (sessionId, snapshot) => { browserContext.inject(sessionId, snapshot) },
-    purgeSession,
   })
 
   const route: WebUpgradeRoute = {
@@ -237,7 +203,7 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
         + 'it lists the pages, asks the user, and binds in one step. '
         + 'Google Docs/Sheets/Slides/Drive file links are not readable as web pages: always call google_drive_export with the file URL '
         + 'instead of browser_navigate or browser_snapshot. Never try to read such files through HTML views or page tools; trust the '
-        + 'export result. For spreadsheets: the tool downloads the workbook and asks which sheet to analyze; answer with a sheet name or "all".',
+        + 'export result. For spreadsheets: the tool downloads the workbook and asks which sheet to analyze; answer with a sheet name or "all". A browser action may wait for the user to confirm it in the assistant window; the call returns only after the decision. If an action seemingly changed nothing after confirmation, take a fresh browser_snapshot before concluding.',
     }), 'bridge-browser: system prompt section')
   }
 

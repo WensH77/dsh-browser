@@ -71,20 +71,6 @@ export class ApprovalCoordinator {
     }
   }
 
-  /** Re-send every live request after a panel has installed its listeners. */
-  replay(deliver: (request: ApprovalRequest) => boolean): void {
-    for (const { request } of this.pending.values()) {
-      if (deliver(request)) this.callbacks.clearNotification(request.id)
-    }
-  }
-
-  /** Notify for requests that lost their final visible panel. */
-  notifyPending(): void {
-    for (const { request, windowId } of this.pending.values()) {
-      this.callbacks.notify(request, windowId)
-    }
-  }
-
   windowId(id: string): number | undefined {
     return this.pending.get(id)?.windowId
   }

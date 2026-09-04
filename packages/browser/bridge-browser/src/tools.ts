@@ -48,6 +48,25 @@ const TEXT_OUTPUT = {
 } as const
 
 
+/** Shape of the dsh user-questions service consumed by interactive flows. */
+type UserQuestionsLike = {
+  ask(request: {
+    questions: Array<Record<string, unknown>>
+    agent?: unknown
+    signal?: AbortSignal
+  }): Promise<{ answers: Array<{ id: string; selected: string[]; custom?: string }> }>
+}
+
+/** Normalize any thrown value into a human-readable message. */
+function errText(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
+}
+
+/** Optional agent context: only attach it when a live agent session exists. */
+function spreadAgent(exec: Pick<ToolRunContext, 'agent'>): { agent?: unknown } {
+  return exec.agent === undefined ? {} : { agent: exec.agent }
+}
+
 /** User may take a while to pick a page; keep the tool alive while asking. */
 export const BIND_INTERACTIVE_TIMEOUT_MS = 600_000
 export const GOOGLE_DRIVE_TIMEOUT_MS = 600_000
@@ -73,15 +92,7 @@ async function bindInteractiveRun(
   exec: Pick<ToolRunContext, 'agent' | 'signal'>,
 ): Promise<TextResult> {
   const sessionId = exec.agent === undefined ? undefined : String(exec.agent.id)
-  const userQuestions = ctx.get('userQuestions') as
-    | {
-      ask(request: {
-        questions: Array<Record<string, unknown>>
-        agent?: unknown
-        signal?: AbortSignal
-      }): Promise<{ answers: Array<{ id: string; selected: string[]; custom?: string }> }>
-    }
-    | undefined
+  const userQuestions = ctx.get('userQuestions') as UserQuestionsLike | undefined
   if (userQuestions === undefined) {
     return { text: 'Binding is unavailable: the user-questions service is not mounted in this composition.' }
   }
@@ -105,14 +116,14 @@ async function bindInteractiveRun(
         question: 'Which open page should this session operate?',
         options,
       }],
-      ...exec.agent === undefined ? {} : { agent: exec.agent },
+      ...spreadAgent(exec),
       signal: exec.signal,
     })
     const selected = answers.answers[0]?.selected[0]
     const match = /^(\d+)/.exec(String(selected ?? ''))
     if (match !== null) pickedId = Number(match[1])
   } catch (error: unknown) {
-    const message = error instanceof Error ? error.message : String(error)
+    const message = errText(error)
     return { text: `Binding cancelled: ${message}` }
   }
   if (pickedId === undefined || !entries.some((entry) => entry.id === pickedId)) {
@@ -167,14 +178,14 @@ async function openWorkbook(filePath: string): Promise<{ ok: true; source: Workb
   try {
     data = await readFile(filePath)
   } catch (error: unknown) {
-    const message = error instanceof Error ? error.message : String(error)
+    const message = errText(error)
     return { ok: false, text: `Google export succeeded (${workbookName}), but the workbook could not be read: ${message}. The xlsx file is kept at ${filePath}.` }
   }
   let workbook: XLSX.WorkBook
   try {
     workbook = XLSX.read(data, { type: 'buffer' })
   } catch (error: unknown) {
-    const message = error instanceof Error ? error.message : String(error)
+    const message = errText(error)
     return { ok: false, text: `Google export succeeded (${workbookName}), but it could not be parsed as xlsx: ${message}. The xlsx file is kept at ${filePath}.` }
   }
   return {
@@ -231,7 +242,7 @@ async function splitAllSheetsRun(source: WorkbookSource): Promise<TextResult> {
         previews.push(`--- ${sheetName} ${clipped ? `(first ${CSV_PREVIEW_CHARS} characters)` : '(full)'} ---\n${preview === '' ? '(empty sheet)' : preview}`)
       }
     } catch (error: unknown) {
-      const message = error instanceof Error ? error.message : String(error)
+      const message = errText(error)
       failure = `Sheet "${sheetName}" (sheet ${index + 1} of ${sheetNames.length}) failed to export as CSV: ${message}. `
         + `Earlier sheets were written; the original xlsx stays at ${source.filePath}.`
       break
@@ -256,7 +267,7 @@ async function exportChosenSheetRun(source: WorkbookSource, sheetName: string): 
         + `${preview === '' ? '(empty sheet)' : preview}`,
     }
   } catch (error: unknown) {
-    const message = error instanceof Error ? error.message : String(error)
+    const message = errText(error)
     return {
       text: `Sheet "${sheetName}" of ${source.base} failed to export as CSV: ${message}. The xlsx workbook stays at ${source.filePath}.`,
     }
@@ -300,15 +311,7 @@ async function sheetsChoiceRun(
   if (source.sheetNames.length === 0) {
     return { text: keptUnsplitText(source, 'The downloaded workbook contains no sheets.') }
   }
-  const userQuestions = ctx.get('userQuestions') as
-    | {
-      ask(request: {
-        questions: Array<Record<string, unknown>>
-        agent?: unknown
-        signal?: AbortSignal
-      }): Promise<{ answers: Array<{ id: string; selected: string[]; custom?: string }> }>
-    }
-    | undefined
+  const userQuestions = ctx.get('userQuestions') as UserQuestionsLike | undefined
   if (userQuestions === undefined) {
     return { text: keptUnsplitText(source, 'No sheet could be chosen: the user-question service is not mounted in this composition.') }
   }
@@ -316,12 +319,12 @@ async function sheetsChoiceRun(
   try {
     const asked = await userQuestions.ask({
       questions: [sheetChoiceQuestion(source)],
-      ...(exec.agent === undefined ? {} : { agent: exec.agent }),
+      ...spreadAgent(exec),
       signal: exec.signal,
     })
     answer = asked.answers[0]
   } catch (error: unknown) {
-    const message = error instanceof Error ? error.message : String(error)
+    const message = errText(error)
     return { text: keptUnsplitText(source, `No sheet was chosen (${message}).`) }
   }
   const selected = answer?.selected[0]
@@ -365,7 +368,7 @@ async function gdriveExportRun(
     try {
       fetched = await bridge.requestTool('gdrive.fetch', args, exec.signal, GOOGLE_DRIVE_TIMEOUT_MS, sessionId)
     } catch (error: unknown) {
-      throw new Error(error instanceof Error ? error.message : String(error))
+      throw new Error(errText(error))
     }
     const text = (fetched as { text?: unknown }).text
     if (typeof text !== 'string') throw new Error('Google export returned no data.')
@@ -399,7 +402,7 @@ async function gdriveExportRun(
       return await sheetsChoiceRun(ctx, exec, opened.source)
     }
   } catch (error: unknown) {
-    return { text: `Google export failed: ${error instanceof Error ? error.message : String(error)}` }
+    return { text: `Google export failed: ${errText(error)}` }
   }
   const textLike = result.ext === 'md' || result.ext === 'html' || result.ext === 'csv' || result.ext === 'txt'
   let preview = '(binary file stored; the model cannot read it)'

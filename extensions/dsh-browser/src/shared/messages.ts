@@ -20,6 +20,8 @@ export interface RecentOp {
   name: string
   args: Record<string, unknown>
   state: 'running' | 'waiting' | 'done' | 'error' | 'cancelled'
+  /** Agent session the operation belongs to (hidden until that session is bound). */
+  sessionId?: string
   /** Epoch ms when the operation started. */
   startedAt: number
   /** Epoch ms when the operation settled (done/error/cancelled). */
@@ -63,6 +65,7 @@ export type UiPush =
   | { type: 'push.approval'; request: ApprovalRequest }
   | { type: 'push.approval-resolved'; id: string }
   | { type: 'push.op'; op: RecentOp }
+  | { type: 'push.ops'; ops: RecentOp[] }
   | { type: 'push.ops-cleared' }
 
 /** Fire a request and await its response value. */

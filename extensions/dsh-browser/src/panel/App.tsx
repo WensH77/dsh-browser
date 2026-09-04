@@ -184,6 +184,9 @@ export function App(): ReactElement {
         refresh()
       } else if (type === 'push.ops-cleared') {
         setUi((prev) => prev === null ? prev : { ...prev, recentOps: [] })
+      } else if (type === 'push.ops') {
+        const push = message as { ops: import('../shared/messages.ts').RecentOp[] }
+        setUi((prev) => prev === null ? prev : { ...prev, recentOps: push.ops })
       } else if (type === 'push.op') {
         const push = message as { op: import('../shared/messages.ts').RecentOp }
         setUi((prev) => prev === null
@@ -257,6 +260,7 @@ export function App(): ReactElement {
                     <button
                       type="button"
                       key={button.id}
+                      className={button.id === 'allow-once' ? 'btn btn--sm btn--primary' : 'btn btn--sm btn--ghost'}
                       onClick={() => { void sendUiRequest({ type: 'approval.response', id: request.id, decision: button.id }) }}
                     >
                       {button.label}

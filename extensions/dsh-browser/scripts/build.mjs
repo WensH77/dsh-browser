@@ -1,8 +1,9 @@
 /**
- * Build all three extension targets sequentially into dist/ (or dist-firefox/
- * with --firefox):
- * background (es|iife) → content (iife) → panel (React). The first target
- * cleans the output; the later ones append. Pass --watch for dev rebuilds.
+ * Build all extension targets sequentially into dist/ (or dist-firefox/ with
+ * --firefox): background (es|iife) → content (iife) → panel (React) →
+ * options (React). The panel page doubles as the floating status window
+ * (chrome.windows.create opens panel/index.html). The first target cleans the
+ * output; the later ones append. Pass --watch for dev rebuilds.
  */
 
 import { spawn, spawnSync } from 'node:child_process'
@@ -21,11 +22,10 @@ const configs = [
   'vite.content.config.ts',
   'vite.panel.config.ts',
   'vite.options.config.ts',
-  'vite.floating.config.ts',
 ]
 
 if (watch) {
-  // 三个 watcher 并行启动（串行时第一个永不停机，后面的永远不会启动）。
+  // 四个 watcher 并行启动（串行时第一个永不停机，后面的永远不会启动）。
   const children = configs.map((config) => spawn('vite', ['build', '--config', config, '--watch'], {
     cwd: root,
     stdio: 'inherit',

@@ -1,7 +1,7 @@
 # Browser bridge layer for the dsh `web` profile.
 #
 # `dsh plugin --profile web add` registers this package's `dsh.bundle`
-# manifest, so both the repository launcher and `npx @deepseek-ai/dsh@0.1.2 web`
+# manifest, so both the repository launcher and `npx @deepseek-ai/dsh@0.1.2-rc.1 web`
 # apply this patch without an extra command-line option.
 #
 # On first boot the plugin generates a bearer token and persists it at
@@ -15,7 +15,7 @@
 #
 # Security: the bridge path carries its own token auth and serves no gateway
 # methods — only tool frames and the two bridge-internal RPCs
-# (bridge.injectBrowserSnapshot, bridge.session.purge). Do not run
+# (bridge.gdrive.moveIntoSession, bridge.openGDriveFolder). Do not run
 # `dsh web --host 0.0.0.0` on untrusted networks with this layer.
 
 - insert:

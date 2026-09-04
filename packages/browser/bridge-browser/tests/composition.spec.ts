@@ -1,13 +1,12 @@
 /**
  * REAL-composition coverage: a test-only cordis.yml booted through the
  * published Loader mounts the webserver, the minimal spine (sessions /
- * user-questions / agents / system-prompt / tools), a test-only dsh 0.1.2
- * Remote-service seam, and the bridge plugin itself. A real WebSocket client
- * then authenticates over a real socket and drives Host calls against the real
- * Session store; disposal removes the tool registrations (HMR safety).
- *
- * Mocked boundary: the unpublished 0.1.2 Gateway and Connection services;
- * focused adapter tests pin their wire contracts against the upstream source.
+ * user-questions / agents / system-prompt / tools), and the bridge plugin
+ * itself. A real WebSocket client authenticates over a real socket and
+ * exercises the browser tool channel; disposal removes the tool
+ * registrations (HMR safety). The test-only api-host shell exists solely to
+ * exercise Loader injection — the 0.1.2 typertGateway/connection seams were
+ * consumed only by the removed purge guard.
  */
 
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
@@ -20,7 +19,7 @@ import Loader from '@deepseek-ai/cordis-plugin-loader'
 import Include from '@deepseek-ai/cordis-plugin-include'
 import WebSocket from 'ws'
 import WebServer from '@deepseek-ai/dsh-host-webserver'
-import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
+import SessionStore from '@deepseek-ai/dsh-session'
 import AgentRegistry from '@deepseek-ai/dsh-agent'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRegistry from '@deepseek-ai/dsh-tools'
@@ -51,58 +50,11 @@ afterEach(async () => {
 const ApiHost = {
   name: 'api-host',
   inject: ['sessions'],
-  apply(ctx: Context, config: { cwd: string }): void {
-    const gateway = {
-      wireStream: {
-        async open(endpoint: string, _payload: unknown, signal: AbortSignal): Promise<AsyncIterable<unknown>> {
-          if (endpoint === '$events') {
-            return {
-              async *[Symbol.asyncIterator]() {
-                yield { type: 'ready', clientId: 'composition-client', host: { home: root } }
-                await new Promise<void>((resolve) => { signal.addEventListener('abort', () => { resolve() }, { once: true }) })
-              },
-            }
-          }
-          throw new Error(`unexpected composition stream ${endpoint}`)
-        },
-        failure: (error: unknown) => ({ code: 'internal', message: String(error), details: {} }),
-      },
-      async invoke(request: { namespace: string; method: string; args: Record<string, unknown> }) {
-        if (request.namespace === 'session' && request.method === 'create') {
-          const payload = request.args.request as { sessionId?: string; cwd?: string }
-          const session = ctx.sessions.create(
-            SessionId(payload.sessionId ?? `session-${crypto.randomUUID()}`),
-            { meta: { cwd: payload.cwd ?? config.cwd } },
-          )
-          return { sessionId: session.id }
-        }
-        if (request.namespace === 'session' && request.method === 'list') {
-          return {
-            items: ctx.sessions.list().map(session => ({
-              sessionId: session.id,
-              cwd: session.header.cwd,
-              running: false,
-              blank: session.events.length === 0,
-              updatedAt: session.header.createdAt,
-            })),
-          }
-        }
-        throw new Error(`unexpected composition invoke ${request.namespace}/${request.method}`)
-      },
-    }
-    const connection = {
-      createSharedFetchHandler: () => ({
-        fetch: async (request: Request) => {
-          const envelope = await request.json() as { rpcId: string }
-          return Response.json({
-            type: 'server-response', rpcId: envelope.rpcId, result: { ok: true },
-          })
-        },
-      }),
-    }
-    ctx.provide('typertGateway' as never, gateway as never)
-    ctx.provide('connection' as never, connection as never)
-  },
+  // The composition previously stubbed the 0.1.2 Host seams (typertGateway
+  // wireStream/invoke + connection) for the purge guard and session listing;
+  // both consumers were removed with the pure-tool refactor, so the host
+  // fixture is now a no-op shell that only exercises Loader injection.
+  apply(): void {},
 }
 
 /** Write a dist fixture and the composition cordis.yml, then boot it through the real Loader. */

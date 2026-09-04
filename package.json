@@ -12,7 +12,7 @@
     "test": "pnpm --filter @yuxianglin/dsh-bridge-browser run test && pnpm --filter dsh-browser-extension run test",
     "typecheck": "pnpm --filter @yuxianglin/dsh-bridge-browser run typecheck && pnpm --filter dsh-browser-extension run typecheck"
   },
-  "dependencies": {
-    "@deepseek-ai/dsh": "0.1.1-rc.1"
+  "devDependencies": {
+    "@deepseek-ai/dsh": "0.1.2-rc.1"
   }
 }

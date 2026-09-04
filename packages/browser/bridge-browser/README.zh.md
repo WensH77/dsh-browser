@@ -33,13 +33,13 @@ cd $HOME\.dsh\dsh-browser; pnpm start
 
 开发者也可以 clone 仓库，在 checkout 中依次运行 `./scripts/install.sh` 和 `pnpm start`。本地模式直接使用当前分支，不会下载或覆盖源码。两种安装模式都会注册同一个 profile bundle；构建工具只从选定的 workspace 解析，绝不读取父 checkout 或父目录的 `node_modules`。
 
-dsh 0.1.2 发布到 npm 后，也可以用该精确版本加载已注册的 bundle；不支持 0.1.2 之前的运行时：
+钉定的 0.1.2 预发布版运行时即可加载已注册的 bundle；不支持 0.1.2 之前的运行时：
 
 ```sh
-npx @deepseek-ai/dsh@0.1.2 web
+npx @deepseek-ai/dsh@0.1.2-rc.1 web
 ```
 
-安装器会把已解压扩展复制到 `~/.dsh/browser-extension` 并打开 `chrome://extensions`。在 Chrome 中加载这个稳定目录，然后使用侧边栏。扩展会自动发现回环连接，无需输入 token；非回环部署仍需要配置的 bearer token。
+安装器会把已解压扩展复制到 `~/.dsh/browser-extension` 并打开 `chrome://extensions`。在 Chrome 中加载这个稳定目录，然后使用助手窗（状态侧栏或浮窗，依设置）。扩展会自动发现回环连接，无需输入 token；非回环部署仍需要配置的 bearer token。
 
 ## 安全模型
 
@@ -47,16 +47,16 @@ npx @deepseek-ai/dsh@0.1.2 web
 - `/api` 载体钉在回环上的方法（`settings.*`、`credentials.*`、`host.pickDirectory`、`host.openPath`）对非回环来源**即使 token 正确也拒绝**——对 `--host 0.0.0.0` 部署的纵深防御。
 - 同一时刻仅一个活动连接，新认证连接顶替旧连接。
 - 桥是 confused-deputy 边界而非通用认证层：不要把 `dsh web --host 0.0.0.0` 暴露在不信任的网络上。
-- 抽取的页面文字会标记为模型的不可信输入。页面读取遵循扩展的询问/自动/关闭策略；状态变更工具必须经过按 origin 的侧边栏决策，没有侧边栏时失败关闭。同源后续操作可只在当前侧栏会话中临时信任，永久信任仍需显式设置。
+- 抽取的页面文字会标记为模型的不可信输入。页面读取遵循扩展的询问/自动/关闭策略；状态变更工具必须经过按 origin 的审批，未获批准时失败关闭。同源后续操作可只在当前会话中临时信任，永久信任仍需显式设置。
 
 ## 线协议
 
 帧为按 `t` 判别的 JSON 对象，定义在 [`protocol.ts`](src/protocol.ts)，是通过 workspace 包的 `./src/*` export 与扩展共享的真源。构建后的包还会发布 `@yuxianglin/dsh-bridge-browser/protocol`，供外部消费方使用。
 
-- 客户端 → 服务端：`hello`（认证+caps）、`rpc`（网关方法透传）、`respond`（按 RPC id 结算宿主交互）、`tool.result`、`pong`。
-- 服务端 → 客户端：`hello.ok`（回显协商后的 caps）、`rpc.result`、`respond.result`（相关联的受理结果或错误）、`event`（由 dsh Remote 流与 waterfall 投影而来的 bridge 内部事件）、`tool.call`、`ping`、`error`。
+- 客户端 → 服务端：`hello`（认证 + caps）、`rpc`（两个 GDrive 内部方法之一）、`tool.result`、`pong`。
+- 服务端 → 客户端：`hello.ok`（回显协商后的 caps）、`rpc.result`、`tool.call`、`tool.cancel`、`ping`、`error`。
 
-每个 `respond` 同时携带全局唯一的传输 id 与宿主交互的 `rpcId`。扩展只把回执路由给发起操作的面板，并在超时、面板关闭或桥断线时拒绝尚未完成的响应。
+`tool.call` 携带稳定 id，扩展在其 `tool.result` 中回显；`expiresAt` 让过期调用以 `timeout` 结算。桥只是请求/响应通道——认证完成后不再有事件帧。
 
 ## 工具
 

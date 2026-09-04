@@ -49,8 +49,6 @@ export class BridgeClient {
   constructor(
     readonly sinks: BridgeSinks,
     private readonly probe: BridgeProbe = async () => true,
-    /** Whether a disconnected client still has an active user-owned lease. */
-    private readonly shouldReconnect: () => boolean = () => true,
   ) {}
 
   /** Current coarse state (mirrors the last emitted sink value). */
@@ -81,16 +79,6 @@ export class BridgeClient {
     this.emitState('stopped')
   }
 
-  /**
-   * Drop an in-progress reconnect when its UI lease disappears, while keeping
-   * an authenticated socket alive for background approvals already enabled by
-   * the user. A later socket loss will still consult shouldReconnect().
-   */
-  suspendReconnect(): void {
-    if (this.state === 'connected') return
-    this.stop()
-  }
-
   /** Whether a frame can be sent right now. */
   get connected(): boolean {
     return this.ws !== null && this.ws.readyState === WebSocket.OPEN
@@ -110,10 +98,8 @@ export class BridgeClient {
 
   private async loop(generation: number): Promise<void> {
     while (this.running && generation === this.generation) {
-      if (!this.retryAllowed()) return
       const reachable = await this.probe(this.url).catch(() => false)
       if (!this.running || generation !== this.generation) return
-      if (!this.retryAllowed()) return
       if (!reachable) {
         this.emitState('reconnecting')
         await this.waitBeforeRetry()
@@ -166,7 +152,7 @@ export class BridgeClient {
               this.clearAckTimer()
               resolve(true)
               this.sinks.onHelloOk(frame.caps)
-            } else if (frame.t === 'error' || frame.t === 'rpc.result') {
+            } else if (frame.t === 'rpc.result') {
               this.sinks.onFrame(frame)
             }
             return
@@ -210,16 +196,8 @@ export class BridgeClient {
       socket.close()
     }
     if (!this.running) return
-    if (!this.retryAllowed()) return
     this.emitState('reconnecting')
     await this.waitBeforeRetry()
-  }
-
-  private retryAllowed(): boolean {
-    if (this.shouldReconnect()) return true
-    this.running = false
-    this.emitState('stopped')
-    return false
   }
 
   private async waitBeforeRetry(): Promise<void> {

@@ -43,6 +43,7 @@ import { getUiLocale } from '../i18n.ts'
 import {
   actionCoveredByTrustedOrigins,
   normalizeTrustedOrigin,
+  originMatchesTrusted,
 } from '../security/trusted-origins.ts'
 import {
   TabAffinityController,
@@ -118,7 +119,7 @@ const BRIDGE_KEEPALIVE_ALARM = 'bridge-keepalive'
 const TAB_AFFINITY_STORAGE_KEY = 'dshTabAffinity'
 
 type StoredTabAffinity =
-  | { controlledTabId: number; keptActiveTabId?: number; pinned?: true; sessionTabs?: Record<string, AffinityTab>; focusedSessionId?: string }
+  | { controlledTabId: number; sessionTabs?: Record<string, AffinityTab>; focusedSessionId?: string }
   | { lost: true; sessionTabs?: Record<string, AffinityTab>; focusedSessionId?: string }
 
 let settings: Settings = { ...SETTINGS_DEFAULTS }
@@ -240,7 +241,7 @@ function uiState(): UiState {
     affinity: tabAffinity.snapshot(),
     controlled: controlledTabInfo(),
     pendingApprovals: [...pendingApprovals.values()],
-    recentOps: [...recentOps],
+    recentOps: activeOps(),
   }
 }
 
@@ -257,18 +258,27 @@ const ACTIVITY_COLORS: Record<RecentOp['state'] | 'idle', string> = {
   idle: '#9aa1ab',
 }
 
-function setStatusBadge(color: string, visible: boolean): void {
+function setStatusBadge(color: string, visible: boolean, text = BADGE_DOT): void {
   void Promise.resolve(chrome.action.setBadgeBackgroundColor({ color })).catch(() => {})
-  void Promise.resolve(chrome.action.setBadgeText({ text: visible ? BADGE_DOT : '' })).catch(() => {})
+  void Promise.resolve(chrome.action.setBadgeText({ text: visible ? text : '' })).catch(() => {})
 }
 
 /** Recompute the toolbar light from the front of the operation feed. Only
  * running/waiting/error light up; idle/done/cancelled keep the icon clean. */
 function applyActivityBadge(): void {
-  const top = recentOps[0]
+  const top = activeOps()[0]
   const state = top === undefined ? 'idle' : top.state
   const visible = state === 'running' || state === 'waiting' || state === 'error'
   setStatusBadge(ACTIVITY_COLORS[state], visible)
+}
+
+/** Pending approvals take priority: a red '?' means someone must decide. */
+function refreshBadge(): void {
+  if (pendingApprovals.size > 0) {
+    setStatusBadge('#c9372c', true, '?')
+    return
+  }
+  applyActivityBadge()
 }
 
 function broadcastStatus(): void {
@@ -277,6 +287,8 @@ function broadcastStatus(): void {
 
 function broadcastTabAffinity(): void {
   sendUiPush({ type: 'push.affinity', state: tabAffinity.snapshot() })
+  // Focus/bind changes switch which session's operations are shown.
+  sendUiPush({ type: 'push.ops', ops: activeOps() })
 }
 
 const APPROVAL_NOTIFICATION_PREFIX = 'dsh-browser-approval:'
@@ -287,14 +299,16 @@ function approvalNotificationId(id: string): string {
 
 function deliverApproval(request: ApprovalRequest): boolean {
   pendingApprovals.set(request.id, request)
+  refreshBadge()
   if (assistantPages > 0) {
     // A live assistant page will render the card from push.approval.
     sendUiPush({ type: 'push.approval', request })
     return true
   }
-  // No assistant UI is open: fall back to the OS notification. The card is
-  // also queued (ui.state returns pendingApprovals) so opening the assistant
-  // later still shows it.
+  // No assistant UI is open: pop the floating window so the card is hard to
+  // miss (side-panel mode cannot open without a gesture, so keep the OS
+  // notification as the fallback there).
+  openStatusSurface()
   notifyApproval(request)
   return true
 }
@@ -325,6 +339,7 @@ function clearApprovalNotification(id: string): void {
 
 function approvalResolved(id: string): void {
   pendingApprovals.delete(id)
+  refreshBadge()
   clearApprovalNotification(id)
   sendUiPush({ type: 'push.approval-resolved', id })
 }
@@ -363,10 +378,6 @@ function storedAffinity(): StoredTabAffinity | null {
   if (state.controlled !== null) {
     return {
       controlledTabId: state.controlled.tabId,
-      ...(state.status === 'background' && state.active !== null
-        ? { keptActiveTabId: state.active.tabId }
-        : {}),
-      ...(state.pinned ? { pinned: true as const } : {}),
       ...(hasSessionTabs ? { sessionTabs } : {}),
       ...focus,
     }
@@ -428,14 +439,9 @@ async function restoreTabAffinity(): Promise<void> {
     const focusedSessionId = (candidate as { focusedSessionId?: unknown } | undefined)?.focusedSessionId
     const focus = typeof focusedSessionId === 'string' && focusedSessionId.trim() !== '' ? { focusedSessionId } : {}
     if (typeof controlledTabId === 'number' && Number.isInteger(controlledTabId) && controlledTabId >= 0) {
-      const keptActiveTabId = (candidate as { keptActiveTabId?: unknown }).keptActiveTabId
       const sessionTabs = (candidate as { sessionTabs?: Record<string, AffinityTab> }).sessionTabs
       record = {
         controlledTabId,
-        ...(typeof keptActiveTabId === 'number' && Number.isInteger(keptActiveTabId) && keptActiveTabId >= 0
-          ? { keptActiveTabId }
-          : {}),
-        ...((candidate as { pinned?: unknown }).pinned === true ? { pinned: true as const } : {}),
         ...(typeof sessionTabs === 'object' && sessionTabs !== null ? { sessionTabs } : {}),
         ...focus,
       }
@@ -481,16 +487,7 @@ async function restoreTabAffinity(): Promise<void> {
     tabAffinity.restoreLost()
   }
 
-  // Restore the pin before syncing the active tab: otherwise the sync would
-  // surface a handoff prompt for a switch the user already said not to ask about.
-  if (record !== null && 'pinned' in record && record.pinned === true) tabAffinity.restorePinned()
   await syncActiveTab()
-  if (record !== null && 'keptActiveTabId' in record) {
-    const state = tabAffinity.snapshot()
-    if (state.status === 'handoff' && state.active?.tabId === record.keptActiveTabId) {
-      tabAffinity.decide('keep', state.revision)
-    }
-  }
   persistTabAffinity()
   broadcastTabAffinity()
 }
@@ -684,11 +681,23 @@ async function bindNavigateTab(call: ToolCall): Promise<boolean> {
 const RECENT_OPS_MAX = 30
 let recentOps: RecentOp[] = []
 
+/** Operations of the currently focused (bound) session only. */
+function activeOps(): RecentOp[] {
+  const focused = tabAffinity.focusedSession()
+  return focused === null ? [] : recentOps.filter((op) => op.sessionId === focused)
+}
+
+/** Whether a single op should reach the UI right now. */
+function opVisible(op: RecentOp): boolean {
+  const focused = tabAffinity.focusedSession()
+  return focused !== null && op.sessionId === focused
+}
+
 function recordOpStart(call: ToolCall): void {
-  const op: RecentOp = { id: call.id, name: call.name, args: call.args ?? {}, state: 'running', startedAt: Date.now() }
+  const op: RecentOp = { id: call.id, name: call.name, args: call.args ?? {}, sessionId: call.sessionId, state: 'running', startedAt: Date.now() }
   recentOps = [op, ...recentOps.filter((o) => o.id !== op.id)].slice(0, RECENT_OPS_MAX)
-  applyActivityBadge()
-  sendUiPush({ type: 'push.op', op })
+  refreshBadge()
+  if (opVisible(op)) sendUiPush({ type: 'push.op', op })
 }
 
 function settleOp(id: string, state: RecentOp['state']): void {
@@ -696,8 +705,8 @@ function settleOp(id: string, state: RecentOp['state']): void {
   if (index === -1) return
   const op = { ...recentOps[index]!, state, ...(state === 'running' || state === 'waiting' ? {} : { endedAt: Date.now() }) }
   recentOps = [op, ...recentOps.filter((o) => o.id !== id)].slice(0, RECENT_OPS_MAX)
-  applyActivityBadge()
-  sendUiPush({ type: 'push.op', op })
+  refreshBadge()
+  if (opVisible(op)) sendUiPush({ type: 'push.op', op })
 }
 
 function originOfUrl(value: string): string | undefined {
@@ -727,7 +736,7 @@ function operationGuard(call: ToolCall, tab: { url?: string }): ToolAnswer | und
   if (call.name === 'browser_navigate') {
     const destinationUrl = typeof call.args?.url === 'string' ? call.args.url : ''
     const destinationOrigin = originOfUrl(destinationUrl)
-    if (destinationOrigin !== undefined && settings.blockedOrigins.includes(destinationOrigin)) {
+    if (destinationOrigin !== undefined && originMatchesTrusted(destinationOrigin, settings.blockedOrigins)) {
       return { ok: false, error: { code: 'action-failed', message: `Navigation to ${destinationOrigin} is blocked in Settings (blocked list).` } }
     }
     if (isDriveFileUrl(destinationUrl)) {
@@ -755,7 +764,7 @@ function operationGuard(call: ToolCall, tab: { url?: string }): ToolAnswer | und
   }
   // Reads and actions on the current controlled page.
   const origin = originOfUrl(tab.url ?? '')
-  if (origin !== undefined && settings.blockedOrigins.includes(origin)) {
+  if (origin !== undefined && originMatchesTrusted(origin, settings.blockedOrigins)) {
     return { ok: false, error: { code: 'action-failed', message: `Operations on ${origin} are blocked in Settings (blocked list).` } }
   }
   const pageUrl = tab.url ?? ''
@@ -771,7 +780,7 @@ function operationGuard(call: ToolCall, tab: { url?: string }): ToolAnswer | und
 /** Reject binding/operating a tab the blocked list forbids. */
 function tabPolicyBlocked(url: string | undefined): ToolAnswer | undefined {
   const origin = originOfUrl(url ?? '')
-  if (origin !== undefined && settings.blockedOrigins.includes(origin)) {
+  if (origin !== undefined && originMatchesTrusted(origin, settings.blockedOrigins)) {
     return { ok: false, error: { code: 'action-failed', message: `Operations on ${origin} are blocked in Settings (blocked list).` } }
   }
   return undefined
@@ -912,7 +921,7 @@ function parseGdriveUrl(value: string): GdriveTarget | { error: string } {
 /** Ask the user once per origin before exporting their Drive content. */
 async function ensureGdriveConsent(url: string, signal: AbortSignal): Promise<{ ok: boolean; error?: string }> {
   const origin = originOfUrl(url)
-  if (origin !== undefined && settings.trustedActionOrigins.includes(origin)) return { ok: true }
+  if (origin !== undefined && originMatchesTrusted(origin, settings.trustedActionOrigins)) return { ok: true }
   const win = await chrome.windows.getLastFocused().catch(() => undefined)
   const windowId = win?.id ?? 0
   const result = await approvals.request(
@@ -1185,32 +1194,11 @@ async function startBridge(): Promise<void> {
         broadcastStatus()
         void pushBudgetToControlledTab(negotiated)
       },
-    }, probeBridge, () => true)
+    }, probeBridge)
     bridge = client
   }
   bridge.start(url, settings.token)
 }
-
-// ---- Content script messages ----
-
-chrome.runtime.onMessage.addListener((message: unknown, sender, sendResponse) => {
-  if (typeof message !== 'object' || message === null) return
-  if (sender.id !== chrome.runtime.id) return
-  const type = (message as { type?: unknown }).type
-  if (sender.tab?.id === undefined) return
-  if (type === 'DSH_CONTENT_READY') {
-    // navigation.ts also listens for this frame-ready announcement; only this
-    // listener answers it. Page-selection capture is gone with the chat
-    // surface, so a fresh document never arms its selection watcher.
-    sendResponse({
-      selectionWatch: false,
-      selectionWatchEpoch: '',
-      selectionWatchRevision: 0,
-    })
-    return
-  }
-  // DSH_SELECTION payloads (legacy content watchers) are intentionally ignored.
-})
 
 // ---- UI messages (status side panel / options / action popup) ----
 
@@ -1247,7 +1235,8 @@ chrome.runtime.onMessage.addListener((message: unknown, _sender, sendResponse) =
     }
     case 'ops.clear':
       recentOps = []
-      applyActivityBadge()
+      refreshBadge()
+      sendUiPush({ type: 'push.ops', ops: [] })
       sendUiPush({ type: 'push.ops-cleared' })
       sendResponse({ accepted: true })
       return
@@ -1419,7 +1408,7 @@ function openStatusSurface(windowId?: number): void {
       return
     }
     void chrome.windows.create({
-      url: chrome.runtime.getURL('floating/index.html'),
+      url: chrome.runtime.getURL('panel/index.html'),
       type: 'popup',
       width: 380,
       height: 560,
@@ -1444,7 +1433,7 @@ if (import.meta.env.EXT_TARGET !== 'firefox') {
 }
 
 armBridgeKeepalive()
-applyActivityBadge()
+refreshBadge()
 
 // Eager connection: the pure-tool bridge claims its slot on load so a
 // dsh session can drive this Chrome without any panel interaction.

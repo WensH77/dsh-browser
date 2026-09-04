@@ -18,12 +18,6 @@ export const BRIDGE_PATH = '/ext/bridge'
 /** Zero-config discovery endpoint: returns `{ wsUrl }` for the extension. */
 export const BRIDGE_CONFIG_PATH = '/ext/bridge-config'
 
-/** Internal RPC used after an explicit tab handoff to seed the Agent's next step. */
-export const BRIDGE_INJECT_BROWSER_SNAPSHOT_METHOD = 'bridge.injectBrowserSnapshot'
-
-/** Internal RPC used by the panel to permanently delete one session's durable storage. */
-export const BRIDGE_SESSION_PURGE_METHOD = 'bridge.session.purge'
-
 /** Internal RPC used by the options page to reveal the GDrive export root. */
 export const BRIDGE_OPEN_GDRIVE_FOLDER_METHOD = 'bridge.openGDriveFolder'
 
@@ -96,8 +90,6 @@ export type ServerFrame =
   | { t: 'tool.cancel'; id: string }
   /** Liveness probe. */
   | { t: 'ping' }
-  /** Fatal connection error; the client should re-authenticate. */
-  | { t: 'error'; code: string; message: string }
 
 /** Any frame on the wire. */
 export type BridgeFrame = ClientFrame | ServerFrame
@@ -115,18 +107,8 @@ export function isServerFrame(frame: BridgeFrame): frame is ServerFrame {
     || frame.t === 'tool.call'
     || frame.t === 'tool.cancel'
     || frame.t === 'ping'
-    || frame.t === 'error'
 }
 
-/**
- * Type guard: is this frame one the CLIENT may send? Server-only shapes
- * narrow out, so client-side consumers never dispatch on server vocabulary.
- * @param frame - parsed frame.
- * @returns true for client-sendable frames.
- */
-export function isClientFrame(frame: BridgeFrame): frame is ClientFrame {
-  return frame.t === 'hello' || frame.t === 'rpc' || frame.t === 'tool.result' || frame.t === 'pong'
-}
 
 /**
  * Parse one WebSocket message into a frame.
@@ -194,10 +176,6 @@ export function parseBridgeFrame(text: string): BridgeFrame | undefined {
       return typeof frame.id === 'string' ? { t: 'tool.cancel', id: frame.id } : undefined
     case 'ping':
       return { t: 'ping' }
-    case 'error':
-      return typeof frame.code === 'string' && typeof frame.message === 'string'
-        ? { t: 'error', code: frame.code, message: frame.message }
-        : undefined
     default:
       return undefined
   }

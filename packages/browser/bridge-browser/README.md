@@ -33,13 +33,13 @@ cd $HOME\.dsh\dsh-browser; pnpm start
 
 Developers can instead clone the repository and run `./scripts/install.sh` followed by `pnpm start` from that checkout. The local mode uses the current branch without downloading or overwriting source files. Both installation modes register the same profile bundle; build tools resolve only from the selected workspace and never from a parent checkout or parent `node_modules` directory.
 
-Once dsh 0.1.2 is published to npm, that exact runtime can also load the registered bundle. Pre-0.1.2 runtimes are not supported:
+The pinned 0.1.2 pre-release runtime loads the registered bundle; pre-0.1.2 runtimes are not supported:
 
 ```sh
-npx @deepseek-ai/dsh@0.1.2 web
+npx @deepseek-ai/dsh@0.1.2-rc.1 web
 ```
 
-The installer copies the unpacked extension to `~/.dsh/browser-extension` and opens `chrome://extensions`. Load that stable directory in Chrome and use the side panel. Loopback connections are discovered automatically and require no token entry; non-loopback deployments still require the configured bearer token.
+The installer copies the unpacked extension to `~/.dsh/browser-extension` and opens `chrome://extensions`. Load that stable directory in Chrome and use the assistant window (status side panel or floating popup, per settings). Loopback connections are discovered automatically and require no token entry; non-loopback deployments still require the configured bearer token.
 
 ## Security model
 
@@ -47,16 +47,16 @@ The installer copies the unpacked extension to `~/.dsh/browser-extension` and op
 - Gateway methods the `/api` carrier pins to loopback (`settings.*`, `credentials.*`, `host.pickDirectory`, `host.openPath`) are refused for non-loopback remotes **even with a valid token** — defense in depth for `--host 0.0.0.0` deployments.
 - One active connection at a time; a new authenticated socket replaces the previous one.
 - The bridge is a confused-deputy boundary, not a general auth layer: never expose `dsh web --host 0.0.0.0` on untrusted networks.
-- Extracted page text is marked as untrusted model input. Page reads honor the extension's ask/auto/off policy, while state-changing tools require an origin-scoped side-panel decision and fail closed without a panel. Same-origin repetition can be trusted for the current panel session; permanent trust remains an explicit setting.
+- Extracted page text is marked as untrusted model input. Page reads honor the extension's ask/auto/off policy, while state-changing tools require an origin-scoped approval and fail closed without one. Same-origin repetition can be trusted for the current session; permanent trust remains an explicit setting.
 
 ## Wire protocol
 
 Frames are JSON objects discriminated by `t`, defined in [`protocol.ts`](src/protocol.ts) — the single source of truth shared with the extension through the workspace package's `./src/*` export. The built package also publishes `@yuxianglin/dsh-bridge-browser/protocol` for external consumers.
 
-- Client → server: `hello` (auth + caps), `rpc` (gateway method passthrough), `respond` (resolve a host interaction by its RPC id), `tool.result`, `pong`.
-- Server → client: `hello.ok` (echoes negotiated caps), `rpc.result`, `respond.result` (correlated acceptance or error), `event` (bridge-owned projection of dsh Remote streams and waterfalls), `tool.call`, `ping`, `error`.
+- Client → server: `hello` (auth + caps), `rpc` (one of the two GDrive-internal methods), `tool.result`, `pong`.
+- Server → client: `hello.ok` (echoes negotiated caps), `rpc.result`, `tool.call`, `tool.cancel`, `ping`, `error`.
 
-Each `respond` carries a globally unique transport id as well as the host interaction's `rpcId`. The extension routes its receipt only to the panel that initiated it and rejects pending responses on timeout, panel closure, or bridge disconnection.
+`tool.call` carries a stable id the extension echoes back on its `tool.result`; `expiresAt` lets a stale call settle as `timeout`. The bridge is a request/response channel only — once auth completes, no event frames flow.
 
 ## Tools
 
