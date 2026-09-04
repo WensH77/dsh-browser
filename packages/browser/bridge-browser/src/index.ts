@@ -203,7 +203,7 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
         + 'it lists the pages, asks the user, and binds in one step. '
         + 'Google Docs/Sheets/Slides/Drive file links are not readable as web pages: always call google_drive_export with the file URL '
         + 'instead of browser_navigate or browser_snapshot. Never try to read such files through HTML views or page tools; trust the '
-        + 'export result. For spreadsheets: the tool downloads the workbook and asks which sheet to analyze; answer with a sheet name or "all". A browser action may wait for the user to confirm it in the assistant window; the call returns only after the decision. If an action seemingly changed nothing after confirmation, take a fresh browser_snapshot before concluding.',
+        + 'export result. For spreadsheets: the tool downloads the workbook and asks which sheet to analyze; answer with a sheet name or "all". A browser action may wait for the user to confirm it in the assistant window; the call returns only after the decision. If an action seemingly changed nothing after confirmation, take a fresh browser_snapshot before concluding. Snapshot text is charged to the conversation context, so read economically: while a page is still loading use browser_wait instead of repeating browser_snapshot; use delta:true for consecutive reads of the same page, region to scope a read, and maxChars when only a bounded excerpt is needed.',
     }), 'bridge-browser: system prompt section')
   }
 

@@ -10,7 +10,7 @@ const zh = {
   reconnecting: '重连中…',
   stopped: '未连接',
   idle: '当前没有正在操作的页面。让 dsh 打开一个网址(首次导航会自动新开标签页并绑定本会话)，或在会话中发送“绑定网页”指定某个标签页。',
-  operating: '正在操作',
+  operating: '操作',
   session: '会话',
   settings: '设置',
   reconnect: '重连',
@@ -51,7 +51,7 @@ const en = {
   reconnecting: 'Reconnecting…',
   stopped: 'Disconnected',
   idle: 'No page is being operated. Ask dsh to open a URL (the first navigation opens a new tab and binds this session to it), or send "bind to the page" in the session to choose a tab.',
-  operating: 'Operating',
+  operating: 'Operation',
   session: 'Session',
   settings: 'Settings',
   reconnect: 'Reconnect',
@@ -87,10 +87,6 @@ const en = {
 }
 
 const copy = getUiLocale() === 'zh' ? zh : en
-
-function shortId(sessionId: string): string {
-  return sessionId.length <= 14 ? sessionId : `${sessionId.slice(0, 11)}…`
-}
 
 function statusLabel(state: string): string {
   switch (state) {
@@ -133,10 +129,6 @@ function fmtClock(epochMs: number): string {
   const date = new Date(epochMs)
   const pad = (value: number): string => String(value).padStart(2, '0')
   return `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`
-}
-
-function hostOf(url: string): string {
-  try { return new URL(url).host } catch { return '' }
 }
 
 function opTitle(op: import('../shared/messages.ts').RecentOp): string {
@@ -199,8 +191,9 @@ export function App(): ReactElement {
         const push = message as { state: UiState['bridgeState']; caps: UiState['caps'] }
         setUi((prev) => prev === null ? null : { ...prev, bridgeState: push.state, caps: push.caps })
       } else if (type === 'push.affinity') {
-        const push = message as { state: UiState['affinity'] }
-        setUi((prev) => prev === null ? null : { ...prev, affinity: push.state })
+        // Affinity changes (bind/unbind/focus) also affect controlled and the
+        // ops list; reload the full ui.state so the UI follows immediately.
+        refresh()
       }
     }
     chrome.runtime.onMessage.addListener(onMessage)
@@ -232,15 +225,6 @@ export function App(): ReactElement {
           {copy.reconnect}
         </button>
       </header>
-      {controlled !== null && (
-        <div className="bound">
-          <span className="bound__label">{copy.bound}</span>
-          <span className="bound__value" title={controlled.url}>
-            {controlled.title || controlled.url}
-          </span>
-          <span className="bound__host">{hostOf(controlled.url)}</span>
-        </div>
-      )}
 
       <main className="panel__body">
         {pending.length > 0 && (
@@ -299,11 +283,12 @@ export function App(): ReactElement {
           ? (
             <section className="operating">
               <div className="operating__label">{copy.operating}</div>
-              <div className="operating__title" title={controlled.url}>{controlled.title || controlled.url}</div>
-              <div className="operating__meta">
-                {controlled.url}
-                <br />
-                {copy.session}: {shortId(controlled.sessionId)}
+              <div className="operating__title" title={controlled.title || controlled.url}>
+                {controlled.title || controlled.url}
+              </div>
+              <div className="operating__url" title={controlled.url}>{controlled.url}</div>
+              <div className="operating__session">
+                {copy.session}: <span className="operating__session-value">{controlled.sessionId}</span>
               </div>
             </section>
           )

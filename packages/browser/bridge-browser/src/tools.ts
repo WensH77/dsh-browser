@@ -508,18 +508,20 @@ type BindInteractiveRun = (exec: Pick<ToolRunContext, 'agent' | 'signal'>) => Pr
 function defineTools(call: Call, options: BrowserToolsOptions, bindRun: BindInteractiveRun): ToolDefinition[] {
   const snapshot = (): ToolDefinition => defineTool({
     name: 'browser_snapshot',
-    description: `Read the page and accessible iframes as structured text with numbered action targets. Use frame for iframe targets and delta=true for changes only. ${UNTRUSTED_CONTENT_WARNING}`,
+    description: `Read the page and accessible iframes as structured text with numbered action targets. Use frame for iframe targets, delta=true for changes only, and region to limit tokens. Truncation is reported in the snapshot notes. ${UNTRUSTED_CONTENT_WARNING}`,
     parameters: {
       delta: { type: 'boolean', description: 'Return changes since the previous snapshot.' },
       region: { type: 'string', description: 'CSS selector or "main" to read only that region.' },
+      maxChars: { type: 'number', description: 'Optional character budget for this read (500 up to the negotiated cap); content beyond it is truncated with a note.' },
     },
     timeoutMs: options.toolTimeoutMs,
     output: TEXT_OUTPUT,
     execute: (args, exec) => {
-      const a = args as { delta?: boolean; region?: string }
+      const a = args as { delta?: boolean; region?: string; maxChars?: number }
       return call(exec, 'browser_snapshot', {
         ...a.delta !== undefined ? { delta: a.delta } : {},
         ...a.region !== undefined ? { region: a.region } : {},
+        ...a.maxChars !== undefined ? { maxChars: a.maxChars } : {},
       })
     },
   })
@@ -616,6 +618,7 @@ function defineTools(call: Call, options: BrowserToolsOptions, bindRun: BindInte
     parameters: {
       selector: { type: 'string', description: 'CSS selector. Omit to read the whole page.' },
       frame: FRAME_PARAMETER,
+      maxChars: { type: 'number', description: 'Optional character budget for this read (500-32000, default 8000); content beyond it is truncated with a note.' },
     },
     timeoutMs: options.toolTimeoutMs,
     output: TEXT_OUTPUT,

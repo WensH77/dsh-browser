@@ -180,3 +180,7 @@ button {
 .ops__dot--cancelled { background: #9aa1ab; }
 .ops__text { word-break: break-all; min-width: 0; }
 .ops__state { margin-left: auto; flex: none; color: var(--muted); font-size: 11px; }
+
+.operating__url { font-size: 12px; color: var(--muted); word-break: break-all; line-height: 1.5; margin-top: 4px; }
+.operating__session { margin-top: 6px; font-size: 12px; color: var(--muted); word-break: break-all; }
+.operating__session-value { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; color: inherit; }

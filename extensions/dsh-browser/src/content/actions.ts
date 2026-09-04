@@ -198,8 +198,9 @@ export async function runAction(action: string, args: Record<string, unknown>, c
 function snapshotAction(args: Record<string, unknown>, ctx: ActionContext): ActionResult {
   const delta = args.delta === true
   const region = typeof args.region === 'string' && args.region !== '' ? args.region : undefined
+  const budget = { ...ctx.budget, maxChars: optionalCharsBudget(args, ctx.budget.maxChars) }
   // 基线在每次快照后都更新：delta 调用才能相对上一次（无论是否 delta）比较。
-  const view = buildSnapshot(ctx.ids, { delta, region, budget: ctx.budget }, lastSnapshot)
+  const view = buildSnapshot(ctx.ids, { delta, region, budget }, lastSnapshot)
   lastSnapshot = view
   return { text: renderSnapshot(view, delta) }
 }
@@ -402,7 +403,7 @@ async function getTextAction(args: Record<string, unknown>): Promise<ActionResul
   const selector = typeof args.selector === 'string' && args.selector !== '' ? args.selector : undefined
   const source = selector !== undefined ? document.querySelector(selector) : null
   const text = source !== null ? pageText(source) : selector !== undefined ? `No element matched selector: ${selector}` : pageText()
-  const truncated = truncate(text, 8_000)
+  const truncated = truncate(text, optionalCharsBudget(args, 8_000))
   return { text: truncated.text + (truncated.truncated > 0 ? `\n(Truncated ${truncated.truncated} characters.)` : '') }
 }
 
@@ -411,6 +412,12 @@ async function waitAction(args: Record<string, unknown>, ctx: ActionContext): Pr
   await waitForPageSettled(EXPLICIT_WAIT_SETTLE)
   if (ms > 0) await sleep(ms)
   return withPageDelta(`The page is stable${ms > 0 ? ` after an additional ${ms}ms wait` : ''}.`, ctx)
+}
+
+function optionalCharsBudget(args: Record<string, unknown>, fallbackMax: number): number {
+  const value = args.maxChars
+  if (typeof value !== 'number' || !Number.isInteger(value)) return fallbackMax
+  return Math.min(Math.max(value, 500), fallbackMax)
 }
 
 function numberArg(args: Record<string, unknown>, name: string): number {
