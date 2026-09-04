@@ -105,26 +105,4 @@ describe('BridgeClient connection probe', () => {
     expect(states.at(-1)).toBe('stopped')
     expect(FakeWebSocket.instances).toHaveLength(1)
   })
-
-  it('stops reconnecting after its user-owned lease disappears', async () => {
-    vi.useFakeTimers()
-    vi.stubGlobal('WebSocket', FakeWebSocket)
-    let active = true
-    const states: BridgeState[] = []
-    const client = new BridgeClient({
-      onStateChange: (state) => { states.push(state) },
-      onFrame: () => {},
-      onHelloOk: () => {},
-    }, async () => true, () => active)
-
-    client.start('ws://127.0.0.1:3080/ext/bridge', '')
-    await vi.advanceTimersByTimeAsync(0)
-    const socket = FakeWebSocket.instances[0]!
-    active = false
-    socket.close()
-    await vi.advanceTimersByTimeAsync(30_000)
-
-    expect(states.at(-1)).toBe('stopped')
-    expect(FakeWebSocket.instances).toHaveLength(1)
-  })
 })

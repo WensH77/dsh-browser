@@ -85,14 +85,6 @@ describe('TabAffinityController', () => {
     followed.observeActive(tab(5))
     expect(followed.snapshot().status).toBe('handoff')
 
-    const rebound = new TabAffinityController()
-    rebound.observeActive(tab(1))
-    rebound.bindInitial(tab(1))
-    rebound.observeActive(tab(2))
-    rebound.decide('keep-always', rebound.snapshot().revision)
-    rebound.rebindActive(tab(2))
-    expect(rebound.snapshot().pinned).toBe(false)
-
     const closed = new TabAffinityController()
     closed.observeActive(tab(1))
     closed.bindInitial(tab(1))
@@ -125,29 +117,6 @@ describe('TabAffinityController', () => {
     expect(affinity.decide('ask-again', affinity.snapshot().revision)).toBe(false)
   })
 
-  it('keeps a pin when focus replays the same session, drops it when the tab moves', () => {
-    const affinity = new TabAffinityController()
-    affinity.observeActive(tab(1))
-    affinity.bindNewSession('s1', tab(1))
-    affinity.bindNewSession('s2', tab(2))
-    affinity.focusSession('s1')
-    affinity.observeActive(tab(3))
-    affinity.decide('keep-always', affinity.snapshot().revision)
-    expect(affinity.snapshot()).toMatchObject({ status: 'background', pinned: true, controlled: { tabId: 1 } })
-
-    // Session resume replays the focused session: the binding is unchanged, so
-    // the pin must survive and no revision is burned.
-    const before = affinity.snapshot()
-    expect(affinity.focusSession('s1')).toBe(false)
-    expect(affinity.snapshot()).toMatchObject({ revision: before.revision, pinned: true, status: 'background' })
-
-    // Moving focus to a session on a different tab drops the pin, and the
-    // change is reported so the panel and the persisted record follow.
-    expect(affinity.focusSession('s2')).toBe(true)
-    expect(affinity.snapshot()).toMatchObject({ pinned: false, controlled: { tabId: 2 } })
-    expect(affinity.snapshot().revision).toBeGreaterThan(before.revision)
-  })
-
   it('keeps a restored pin when the tab navigated while the worker was down', () => {
     // Restart shape: the stored session snapshot carries the metadata from when
     // the session was bound, while the live tab has since navigated.
@@ -160,8 +129,6 @@ describe('TabAffinityController', () => {
     expect(affinity.snapshot()).toMatchObject({ status: 'background', pinned: true })
 
     // Same tab id, different title/url: still the binding the user pinned.
-    affinity.focusSession('s1')
-    expect(affinity.snapshot()).toMatchObject({ pinned: true, controlled: { tabId: 1 } })
     expect(affinity.resolveTarget()).toMatchObject({ kind: 'target', tab: { tabId: 1 } })
   })
 
@@ -177,18 +144,6 @@ describe('TabAffinityController', () => {
     restored.observeActive(tab(2))
     expect(restored.snapshot()).toMatchObject({ status: 'background', pinned: true })
     expect(restored.restorePinned()).toBe(false)
-  })
-
-  it('supports explicit rebindActive when starting new chat', () => {
-    const affinity = new TabAffinityController()
-    affinity.observeActive(tab(1))
-    affinity.bindInitial(tab(1))
-    affinity.observeActive(tab(2))
-    affinity.decide('keep', affinity.snapshot().revision)
-
-    expect(affinity.rebindActive(tab(2))).toBe(true)
-    expect(affinity.snapshot()).toMatchObject({ status: 'following', controlled: { tabId: 2 }, active: { tabId: 2 } })
-    expect(affinity.resolveTarget()).toMatchObject({ kind: 'target', tab: { tabId: 2 } })
   })
 
   it('does not silently rebind after the controlled tab closes', () => {
@@ -284,7 +239,7 @@ describe('TabAffinityController', () => {
     expect(affinity.bindInitial(tab(1), 'session-1')).toBe(true)
 
     affinity.observeActive(tab(2))
-    expect(affinity.rebindActive(tab(2), 'session-2')).toBe(true)
+    expect(affinity.bindInitial(tab(2), 'session-2')).toBe(true)
 
     expect(affinity.resolveTarget('session-1')).toEqual({ kind: 'target', tab: tab(1) })
     expect(affinity.resolveTarget('session-2')).toEqual({ kind: 'target', tab: tab(2) })
@@ -293,11 +248,6 @@ describe('TabAffinityController', () => {
     expect(affinity.allowsTarget(2, 'session-1')).toBe(false)
     expect(affinity.allowsTarget(2, 'session-2')).toBe(true)
     expect(affinity.allowsTarget(1, 'session-2')).toBe(false)
-
-    expect(affinity.focusSession('session-1')).toBe(true)
-    expect(affinity.snapshot()).toMatchObject({ controlled: { tabId: 1 } })
-    expect(affinity.focusSession('session-2')).toBe(true)
-    expect(affinity.snapshot()).toMatchObject({ controlled: { tabId: 2 } })
 
     expect(affinity.hasBinding('session-1')).toBe(true)
     expect(affinity.hasBinding('session-2')).toBe(true)

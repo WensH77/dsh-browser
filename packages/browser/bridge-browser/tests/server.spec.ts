@@ -1,10 +1,9 @@
 import { createServer, type Server } from 'node:http'
 import type { AddressInfo } from 'node:net'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it } from 'vitest'
 import WebSocket from 'ws'
 import { BridgeServer, BridgeToolError, isLoopbackAddress, messageToText, payloadCode, payloadMessage } from '../src/server.ts'
-import { BRIDGE_INJECT_BROWSER_SNAPSHOT_METHOD, BRIDGE_SESSION_PURGE_METHOD, type BridgeFrame } from '../src/protocol.ts'
-import { SessionPurgeError } from '../src/session-purge.ts'
+import type { BridgeFrame } from '../src/protocol.ts'
 
 const TOKEN = 'deadbeefdeadbeefdeadbeefdeadbeef'
 
@@ -26,8 +25,6 @@ async function startBridge(overrides: Partial<ConstructorParameters<typeof Bridg
     token: TOKEN,
     toolTimeoutMs: 1_000,
     caps: { textOnly: true, snapshotMaxChars: 12_000, maxInteractiveItems: 60 },
-    injectBrowserSnapshot: vi.fn(),
-    purgeSession: vi.fn(async () => {}),
     ...overrides,
   })
   const server = createServer()
@@ -176,7 +173,7 @@ describe('BridgeServer', () => {
     expect(ws.readyState).toBe(WebSocket.CLOSED)
   })
 
-  it('refuses every RPC method except the two bridge-internal ones', async () => {
+  it('refuses every RPC method except the two GDrive-internal ones', async () => {
     const h = await startBridge()
     harnesses.push(h)
     const { ws, frames } = await connect(h.url)
@@ -189,91 +186,6 @@ describe('BridgeServer', () => {
     ws.close()
   })
 
-  it('injects followed-page snapshots without forwarding the internal RPC to the gateway', async () => {
-    const injectBrowserSnapshot = vi.fn()
-    const h = await startBridge({ injectBrowserSnapshot })
-    harnesses.push(h)
-    const { ws, frames } = await connect(h.url)
-    send(ws, { t: 'hello', token: TOKEN, caps: CAPS })
-    await waitFor(() => frames.some((frame) => frame.t === 'hello.ok'))
-
-    send(ws, {
-      t: 'rpc',
-      id: 'snapshot-1',
-      method: BRIDGE_INJECT_BROWSER_SNAPSHOT_METHOD,
-      payload: { sessionId: 'session-1', snapshot: 'Page: Other target' },
-    })
-    await waitFor(() => frames.some((frame) => frame.t === 'rpc.result' && frame.id === 'snapshot-1'))
-
-    expect(injectBrowserSnapshot).toHaveBeenCalledWith('session-1', 'Page: Other target')
-    expect(frames).toContainEqual({
-      t: 'rpc.result', id: 'snapshot-1', ok: true, result: { accepted: true },
-    })
-
-    send(ws, {
-      t: 'rpc',
-      id: 'snapshot-invalid',
-      method: BRIDGE_INJECT_BROWSER_SNAPSHOT_METHOD,
-      payload: { sessionId: '', snapshot: '' },
-    })
-    await waitFor(() => frames.some((frame) => frame.t === 'rpc.result' && frame.id === 'snapshot-invalid'))
-    expect(frames).toContainEqual(expect.objectContaining({
-      t: 'rpc.result', id: 'snapshot-invalid', ok: false, error: expect.objectContaining({ code: 'bad-request' }),
-    }))
-    ws.close()
-  })
-
-  it('purges sessions through the internal RPC without forwarding it to the gateway', async () => {
-    const purgeSession = vi.fn(async () => {})
-    const h = await startBridge({ purgeSession })
-    harnesses.push(h)
-    const { ws, frames } = await connect(h.url)
-    send(ws, { t: 'hello', token: TOKEN, caps: CAPS })
-    await waitFor(() => frames.some((frame) => frame.t === 'hello.ok'))
-
-    send(ws, {
-      t: 'rpc',
-      id: 'purge-1',
-      method: BRIDGE_SESSION_PURGE_METHOD,
-      payload: { sessionId: 'session-82222a77-aab5-4c0b-b33e-6376973ec93d' },
-    })
-    await waitFor(() => frames.some((frame) => frame.t === 'rpc.result' && frame.id === 'purge-1'))
-
-    expect(purgeSession).toHaveBeenCalledWith('session-82222a77-aab5-4c0b-b33e-6376973ec93d')
-    expect(frames).toContainEqual({
-      t: 'rpc.result', id: 'purge-1', ok: true, result: { purged: true },
-    })
-
-    send(ws, {
-      t: 'rpc',
-      id: 'purge-invalid',
-      method: BRIDGE_SESSION_PURGE_METHOD,
-      payload: { sessionId: '' },
-    })
-    await waitFor(() => frames.some((frame) => frame.t === 'rpc.result' && frame.id === 'purge-invalid'))
-    expect(frames).toContainEqual(expect.objectContaining({
-      t: 'rpc.result', id: 'purge-invalid', ok: false, error: expect.objectContaining({ code: 'bad-request' }),
-    }))
-
-    const failing = vi.fn(async () => { throw new SessionPurgeError('running', 'cancel it first') })
-    const failureBridge = await startBridge({ purgeSession: failing })
-    harnesses.push(failureBridge)
-    const failure = await connect(failureBridge.url)
-    send(failure.ws, { t: 'hello', token: TOKEN, caps: CAPS })
-    await waitFor(() => failure.frames.some((frame) => frame.t === 'hello.ok'))
-    send(failure.ws, {
-      t: 'rpc',
-      id: 'purge-running',
-      method: BRIDGE_SESSION_PURGE_METHOD,
-      payload: { sessionId: 'session-82222a77-aab5-4c0b-b33e-6376973ec93d' },
-    })
-    await waitFor(() => failure.frames.some((frame) => frame.t === 'rpc.result' && frame.id === 'purge-running'))
-    expect(failure.frames).toContainEqual(expect.objectContaining({
-      t: 'rpc.result', id: 'purge-running', ok: false, error: { code: 'running', message: 'cancel it first' },
-    }))
-    ws.close()
-    failure.ws.close()
-  })
 
   it('classifies loopback addresses for the hello gate', () => {
     expect(isLoopbackAddress('127.0.0.1')).toBe(true)

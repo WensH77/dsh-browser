@@ -147,6 +147,13 @@ button {
 .approvals__origins { display: block; word-break: break-all; }
 .approvals__actions { margin-top: 8px; display: flex; gap: 6px; flex-wrap: wrap; }
 
+/*.approvals emphasis*/
+.approvals { margin-bottom: 16px; padding: 10px; border: 1px solid rgba(217,119,6,.45); border-radius: 10px; background: rgba(217,119,6,.06); animation: approvals-in 260ms ease-out; }
+.approvals__card { border: 1px solid rgba(128,128,128,.3); border-radius: 9px; padding: 9px; margin-bottom: 8px; background: var(--bg); }
+.approvals__card:last-child { margin-bottom: 0; }
+@keyframes approvals-in { from { opacity: 0; transform: translateY(-3px); } to { opacity: 1; transform: none; } }
+.btn--primary { border-color: var(--accent); background: var(--accent); color: #fff; }
+.btn--primary:hover:not(:disabled) { background: #245ad1; color: #fff; }
 /*.ops start*/
 .ops { margin-bottom: 16px; }
 .ops__label { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin-bottom: 8px; }

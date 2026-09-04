@@ -470,11 +470,11 @@ if ($IsUpdate) {
 
 Write-Host ''
 Write-Pair "加载完成后：" "After loading the extension:"
-Write-Pair "• 点击工具栏中的 DeepSeek 鲸鱼图标，打开侧边栏" "Click the DeepSeek whale icon in the toolbar to open the side panel"
+Write-Pair "• 点击工具栏中的 DeepSeek 鲸鱼图标，打开助手窗（状态侧栏或浮窗，依设置）" "Click the DeepSeek whale icon in the toolbar to open the assistant window (status side panel or floating popup, per settings)"
 Write-Pair "• 扩展会自动发现本机 dsh，无需填写地址或 token" "The extension discovers local dsh automatically; no address or token is required"
 $QuotedRoot = "'" + $Root.Replace("'", "''") + "'"
 Write-Host ("• 启动固定版本：cd {0}; pnpm start" -f $QuotedRoot)
 Write-Host ("   Start the pinned version: cd {0}; pnpm start" -f $QuotedRoot)
-Write-Pair "• 0.1.2 发布后也可启动精确版本：npx @deepseek-ai/dsh@0.1.2 web" "Or, once published, start the exact supported version: npx @deepseek-ai/dsh@0.1.2 web"
+Write-Pair "• 也可启动精确版本：npx @deepseek-ai/dsh@0.1.2-rc.1 web" "Or start the exact supported version: npx @deepseek-ai/dsh@0.1.2-rc.1 web"
 Write-Host ''
 Write-Pair "如果用得顺手，欢迎在 GitHub 点个 Star 支持我们：https://github.com/Lum1104/dsh-browser" "If dsh-browser is useful to you, we'd appreciate a Star on GitHub: https://github.com/Lum1104/dsh-browser"

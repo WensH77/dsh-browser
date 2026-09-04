@@ -76,11 +76,6 @@ export class TabAffinityController {
     }
   }
 
-  /** Associate a session with its controlled tab. */
-  bindSession(sessionId: string, tab: AffinityTab): void {
-    this.sessionTabs.set(sessionId, { ...tab })
-  }
-
   sessionMap(): Record<string, AffinityTab> {
     const result: Record<string, AffinityTab> = {}
     for (const [sid, tab] of this.sessionTabs.entries()) {
@@ -119,45 +114,6 @@ export class TabAffinityController {
 
   focusedSession(): string | null {
     return this.focusedSessionId
-  }
-
-  /** Focus or select a session to align the visible controlled tab in the panel. */
-  focusSession(sessionId: string): boolean {
-    const previousFocusedSessionId = this.focusedSessionId
-    const previousControlled = this.controlled
-    const previousKept = this.keptActiveTabId
-    const previousLost = this.lost
-    const previousPinned = this.pinned
-    this.focusedSessionId = sessionId
-    const tab = this.sessionTabs.get(sessionId)
-    if (tab === undefined) {
-      this.controlled = null
-      this.keptActiveTabId = null
-      this.pinned = false
-      this.hasBound = true
-      this.lost = true
-    } else {
-      this.controlled = { ...tab }
-      this.hasBound = true
-      this.lost = false
-      this.keptActiveTabId = this.active !== null && this.active.tabId !== tab.tabId
-        ? this.active.tabId
-        : null
-      // A pin belongs to the tab it was made for, so it survives re-focusing the
-      // same binding (session resume replays the focused session) and is dropped
-      // only when focus actually moves the controlled tab. Identity here is the
-      // tab id alone, not sameTab(): that compares title and url for change
-      // detection, and a restored session snapshot routinely disagrees with the
-      // live tab on both after the page has navigated.
-      if (previousControlled?.tabId !== this.controlled.tabId) this.pinned = false
-    }
-    const changed = previousFocusedSessionId !== sessionId
-      || !sameTab(previousControlled, this.controlled)
-      || previousKept !== this.keptActiveTabId
-      || previousLost !== this.lost
-      || previousPinned !== this.pinned
-    if (changed) this.revision += 1
-    return changed
   }
 
   /** Observe the active tab after a user tab/window focus change. */
@@ -230,23 +186,6 @@ export class TabAffinityController {
     this.hasBound = true
     this.lost = false
     if (!sameTab(previous ?? null, tab)) this.revision += 1
-    return true
-  }
-
-  /** Explicitly rebind to the active tab for the named session. */
-  rebindActive(tab: AffinityTab, sessionId?: string): boolean {
-    const sid = sessionId?.trim()
-    this.active = { ...tab }
-    this.controlled = { ...tab }
-    this.keptActiveTabId = null
-    this.pinned = false
-    this.hasBound = true
-    this.lost = false
-    if (sid !== undefined && sid !== '') {
-      this.sessionTabs.set(sid, { ...tab })
-      this.focusedSessionId = sid
-    }
-    this.revision += 1
     return true
   }
 

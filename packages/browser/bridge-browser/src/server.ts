@@ -7,8 +7,8 @@
  * its own authentication: a bearer token presented in the `hello` frame within
  * HELLO_TIMEOUT_MS. The bridge is a pure tool channel: it carries no chat,
  * settings, credentials, or gateway passthrough. Two bridge-internal RPCs
- * remain (`bridge.injectBrowserSnapshot`, `bridge.session.purge`), serviced
- * directly by plugin dependencies; every other RPC method is refused.
+ * remain (`bridge.gdrive.moveIntoSession`, `bridge.openGDriveFolder`),
+ * serviced directly by plugin dependencies; every other RPC method is refused.
  *
  * One active connection at a time: a new authenticated socket replaces the
  * previous one (the old socket is closed and its in-flight tool calls settle
@@ -23,9 +23,7 @@ import type { Duplex } from 'node:stream'
 import { WebSocket, WebSocketServer } from 'ws'
 import {
   BRIDGE_GDRIVE_MOVE_METHOD,
-  BRIDGE_INJECT_BROWSER_SNAPSHOT_METHOD,
   BRIDGE_OPEN_GDRIVE_FOLDER_METHOD,
-  BRIDGE_SESSION_PURGE_METHOD,
   HELLO_TIMEOUT_MS,
   PING_INTERVAL_MS,
   parseBridgeFrame,
@@ -34,7 +32,6 @@ import {
   type ClientFrame,
   type ToolErrorCode,
 } from './protocol.ts'
-import { SessionPurgeError } from './session-purge.ts'
 import { verifyToken } from './token.ts'
 
 /** Loopback IPv4/IPv6 literals (IPv4-mapped included). Exported for tests and reuse. */
@@ -61,17 +58,10 @@ export interface BridgeServerDeps {
   toolTimeoutMs: number
   /** Capabilities to echo in `hello.ok` (negotiated snapshot budgets). */
   caps: BridgeCaps
-  /** Seed a followed-page snapshot into a live Agent session. */
-  injectBrowserSnapshot: (sessionId: string, snapshot: string) => void | Promise<void>
   /** Reveal the GDrive export root in the system file manager. */
   openGDriveFolder: () => void | Promise<void>
   /** Move a finished Google download into ~/.dsh/gdrive/<sessionId>/. */
   gdriveMoveIntoSession: (sourcePath: string, sessionId: string) => Promise<{ filePath: string }>
-  /**
-   * Permanently delete one session's durable storage. Callers archive the
-   * session through the gateway first; this only removes files.
-   */
-  purgeSession: (sessionId: string) => Promise<void>
   /**
    * Test seam: force the remote address seen by the hello loopback gate. The
    * sandbox cannot bind arbitrary loopback literals, so the non-loopback
@@ -311,16 +301,10 @@ export class BridgeServer {
       case 'tool.result':
         this.settleTool(frame.id, frame.ok, frame.ok ? frame.result : frame.error)
         break
-      case 'pong':
-      case 'hello':
-      case 'hello.ok':
-      case 'rpc.result':
-      case 'tool.call':
-      case 'tool.cancel':
-      case 'ping':
-      case 'error':
-        // Protocol violations and unsolicited server-side shapes are ignored;
-        // the extension is the only sender on this channel.
+      default:
+        // Client-only traffic the server must never act on after auth
+        // (hello/pong) and unsolicited server-side shapes are ignored; the
+        // extension is the only sender on this channel.
         break
     }
   }
@@ -335,30 +319,6 @@ export class BridgeServer {
     /* v8 ignore next -- replacement race: a frame can land between a socket
     replacement and the next promotion; the re-check keeps the handler total */
     if (conn === null) return
-    if (frame.method === BRIDGE_INJECT_BROWSER_SNAPSHOT_METHOD) {
-      const payload = browserSnapshotPayload(frame.payload)
-      if (payload === undefined) {
-        sendFrame(conn.ws, {
-          t: 'rpc.result',
-          id: frame.id,
-          ok: false,
-          error: { code: 'bad-request', message: 'sessionId and snapshot must be non-empty strings' },
-        })
-        return
-      }
-      try {
-        await this.deps.injectBrowserSnapshot(payload.sessionId, payload.snapshot)
-        sendFrame(conn.ws, { t: 'rpc.result', id: frame.id, ok: true, result: { accepted: true } })
-      } catch (error: unknown) {
-        sendFrame(conn.ws, {
-          t: 'rpc.result',
-          id: frame.id,
-          ok: false,
-          error: { code: 'internal', message: String(error) },
-        })
-      }
-      return
-    }
     if (frame.method === BRIDGE_GDRIVE_MOVE_METHOD) {
       const movePayload = gdriveMovePayload(frame.payload)
       if (movePayload === null) {
@@ -390,27 +350,6 @@ export class BridgeServer {
           t: 'rpc.result', id: frame.id, ok: false,
           error: { code: 'internal', message: error instanceof Error ? error.message : String(error) },
         })
-      }
-      return
-    }
-    if (frame.method === BRIDGE_SESSION_PURGE_METHOD) {
-      const sessionId = purgeSessionPayload(frame.payload)
-      if (sessionId === undefined) {
-        sendFrame(conn.ws, {
-          t: 'rpc.result',
-          id: frame.id,
-          ok: false,
-          error: { code: 'bad-request', message: 'sessionId must be a non-empty string' },
-        })
-        return
-      }
-      try {
-        await this.deps.purgeSession(sessionId)
-        sendFrame(conn.ws, { t: 'rpc.result', id: frame.id, ok: true, result: { purged: true } })
-      } catch (error: unknown) {
-        const code = error instanceof SessionPurgeError ? error.code : 'internal'
-        const message = error instanceof Error ? error.message : String(error)
-        sendFrame(conn.ws, { t: 'rpc.result', id: frame.id, ok: false, error: { code, message } })
       }
       return
     }
@@ -446,21 +385,6 @@ export class BridgeServer {
       pending.reject(new BridgeToolError('bridge-closed', 'the extension connection was replaced'))
     }
   }
-}
-
-function browserSnapshotPayload(payload: unknown): { sessionId: string; snapshot: string } | undefined {
-  if (typeof payload !== 'object' || payload === null || Array.isArray(payload)) return undefined
-  const { sessionId, snapshot } = payload as Record<string, unknown>
-  if (typeof sessionId !== 'string' || sessionId.trim() === '') return undefined
-  if (typeof snapshot !== 'string' || snapshot.trim() === '') return undefined
-  return { sessionId, snapshot }
-}
-
-function purgeSessionPayload(payload: unknown): string | undefined {
-  if (typeof payload !== 'object' || payload === null || Array.isArray(payload)) return undefined
-  const { sessionId } = payload as Record<string, unknown>
-  if (typeof sessionId !== 'string' || sessionId.trim() === '') return undefined
-  return sessionId
 }
 
 /**

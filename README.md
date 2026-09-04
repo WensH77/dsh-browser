@@ -4,14 +4,14 @@
 
 <img width="1701" height="897" alt="dsh Browser Control" src="https://github.com/user-attachments/assets/3b1f3a25-f962-4e02-a9ef-d23e0d01fc8e" />
 
-Connect [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) to the Chrome or Firefox tab you are already using. The model can read page content, click controls, fill forms, scroll, and navigate while preserving your login state, session, and cookies. A side panel or sidebar provides the conversation UI.
+Connect [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) to the Chrome or Firefox tab you are already using. The model can read page content, click controls, fill forms, scroll, and navigate while preserving your login state, session, and cookies. A status panel shows which page is currently being operated.
 
 `dsh` is DeepSeek AI's open-source, plugin-based agent harness. This repository provides a companion browser bridge plugin and Chrome/Firefox MV3 extension as one standalone pnpm workspace.
 
-Browser operation remains text-only: pages become structured text with a numbered inventory of interactive elements, and the model addresses those elements by number. dsh 0.1.2 multimodal chat is separate from that page channel—the side panel accepts PNG, JPEG, WebP, and GIF attachments when the host advertises image support, while browser tools still never capture screenshots.
+Browser operation remains text-only: pages become structured text with a numbered inventory of interactive elements, and the model addresses those elements by number. Multimodal chat with dsh lives in its own host client; the browser tools themselves never capture screenshots.
 
 > [!IMPORTANT]
-> The migration branch targets dsh 0.1.2 only; it does not carry a 0.1.1 compatibility path. The repository runtime pin will move atomically when the 0.1.2 packages are available on npm.
+> The migration branch targets dsh 0.1.2 only; it does not carry a 0.1.1 compatibility path. The runtime pin is currently `0.1.2-rc.1`; it moves to the stable `0.1.2` tag when that is published on npm.
 
 ## Quick install
 
@@ -57,8 +57,6 @@ The paired Playwright / extension duration ratio was **1.24** (95% CI **1.16–1
 | Navigate | `browser_navigate` / `browser_back` / `browser_forward` / `browser_reload` | Navigation inside the controlled tab, with login state preserved |
 | Read region | `browser_get_text` | Lazy-loaded or partial page text |
 | Wait for stability | `browser_wait` | Page-load and render-settle detection |
-| Send images | `session.prompt` / `session.attachment` | Host-capability-gated image drafts, image-only prompts, and durable history previews |
-| Quote a selection | side panel composer | Text you highlight in the page appears in the composer and is sent with your next message as fenced, attributed page content |
 
 ## Repository layout
 
@@ -73,10 +71,9 @@ scripts/install.ps1
 ## Why this design
 
 - **Your real browser, not a headless copy**: the model works in the page you already have open, retaining logins, sessions, and cookies.
-- **A text-first page interface**: numbered controls, stable IDs across snapshots, delta updates, and masked sensitive values make pages operable without screenshots; user-attached chat images use dsh's separate multimodal message path.
-- **Pointing instead of describing**: highlight the passage you mean and the side panel quotes it, so "explain this" needs no page tour. The quote is captured only while a panel is open, and nothing is sent until you send the message.
+- **A text-first page interface**: numbered controls, stable IDs across snapshots, delta updates, and masked sensitive values make pages operable without screenshots.
 - **A narrow privacy boundary**: passwords and payment-card values are always rendered as `••••` and never leave the page.
-- **A guarded bridge**: authenticated handshakes protect remote connections, privileged gateway methods reject non-loopback callers, and the extension binds tools to one user-controlled tab.
+- **A guarded bridge**: authenticated handshakes protect remote connections, the bridge services only browser tool frames and two bridge-internal RPCs, and the extension binds tools to one user-controlled tab.
 
 ## Detailed installation and usage
 
@@ -131,21 +128,21 @@ Start the managed installation with:
 cd ~/.dsh/dsh-browser && pnpm start
 ```
 
-From a source checkout, run `pnpm start` in the repository root. Once it is published, the exact supported public runtime is:
+From a source checkout, run `pnpm start` in the repository root. The exact supported public runtime is currently the pinned 0.1.2 pre-release:
 
 ```sh
-npx @deepseek-ai/dsh@0.1.2 web
+npx @deepseek-ai/dsh@0.1.2-rc.1 web
 ```
 
 Local Chrome use requires no configuration; Firefox requires the local bridge token described above. Open an `http://` or `https://` page, click the DeepSeek whale icon, and wait for **Connected**. Existing tabs are instrumented on the first action; protected browser pages and extension stores are not supported.
 
 ## Troubleshooting
 
-**Side panel stays "Not connected"**
+**Status panel stays "Not connected"**
 
 - Make sure dsh web is running locally (default `http://127.0.0.1:3080`).
 - Verify the bridge is loaded: open `http://127.0.0.1:3080/ext/bridge-config`. It should return JSON such as `{"wsUrl":"ws://127.0.0.1:3080/ext/bridge"}`. If it returns a web page instead of JSON, the running dsh predates the bridge registration — restart dsh and refresh the page; the extension reconnects on its own.
-- The extension probes ports 3080, 3081, 3090, and 14389 automatically. If dsh runs on another port — or you use a remote `--host 0.0.0.0` deployment — set the address (and bridge token) in the panel settings. Firefox always requires the token.
+- The extension probes ports 3080, 3081, 3090, and 14389 automatically. If dsh runs on another port — or you use a remote `--host 0.0.0.0` deployment — set the address (and bridge token) in the extension options. Firefox always requires the token.
 
 ## Development
 
@@ -175,8 +172,7 @@ Notes:
 - The bridge path sits outside the `/api` trust boundary and performs its own bearer-token authentication.
 - Local Chrome extension origins retain zero-configuration loopback access; Firefox origins are per-install UUIDs and must present the bearer token.
 - Privileged gateway methods such as `settings.*`, `credentials.*`, and `host.open*` reject non-loopback sources.
-- The browser-page pipeline is text-only and never captures screenshots; explicitly attached chat images use dsh's durable attachment service. Password and payment-card values never leave the page.
-- When work begins, the assistant binds to the active tab (at prompt submission, or at the first direct browser-tool call). If you switch tabs manually, later browser actions pause and the side panel asks whether the assistant should continue on the original tab or follow the new one. Choosing the original tab permits background operation; the extension never silently retargets or changes your visible tab. Closing the controlled tab also pauses tools until you explicitly select the current page.
-- Text you highlight is captured only while a side panel is open and page sharing is not `off`, and never from password or payment-card fields. It stays inside the extension until you send the message, is dropped when you dismiss it or its page navigates or closes, and reaches the model inside the same untrusted-content boundary as page snapshots — including its source title and URL, which the page also controls.
+- The browser-page pipeline is text-only and never captures screenshots. Password and payment-card values never leave the page.
+- When the assistant starts operating a page, it binds to the then-active tab at the first browser-tool call. If you switch tabs manually, later browser actions pause and the assistant asks whether it should continue on the original tab or follow the new one. Choosing the original tab permits background operation; the extension never silently retargets or changes your visible tab. Closing the controlled tab also pauses tools until the next call binds a page you explicitly choose.
 - Page-authored text is wrapped as untrusted input. The default `auto` mode reads only the controlled tab without an extra prompt; privacy-sensitive users can select `ask` for per-read confirmation or `off` to block reads entirely. In `ask` mode, the read dialog can allow one read or persistently switch back to `auto`; this can be reversed in Settings. Read page text is sent to the selected model.
-- Click, type, keypress, navigation, history, and reload calls fail closed until the user approves them. An origin may be trusted for the current side-panel session (cleared when the last panel closes or the service worker restarts), while permanent trust is managed explicitly in Settings. Explicit cross-origin `browser_navigate` calls and unknown history destinations always prompt again.
+- Click, type, keypress, navigation, history, and reload calls fail closed until the user approves them. An origin may be trusted for the current session, while permanent trust is managed explicitly in the extension options. Explicit cross-origin `browser_navigate` calls and unknown history destinations always prompt again.

@@ -38,10 +38,6 @@ describe('ApprovalCoordinator', () => {
       sessionId: 'session-1',
     }), 7)
 
-    coordinator.replay((request) => {
-      expect(request.sessionId).toBe('session-1')
-      return true
-    })
     coordinator.respond('12345678-1234-4234-8234-123456789abc', 'allow-once')
 
     await expect(pending).resolves.toEqual({ status: 'decision', decision: 'allow-once' })
