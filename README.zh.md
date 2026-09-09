@@ -11,7 +11,7 @@
 浏览器操作仍采用纯文本设计：页面会转换为结构化文本和带编号的交互元素清单，模型通过编号定位元素。与 dsh 的多模态对话走宿主客户端自己的通道；浏览器工具本身仍不会截取页面截图。
 
 > [!IMPORTANT]
-> 当前迁移分支只面向 dsh 0.1.2，不包含 0.1.1 兼容路径。运行时 pin 目前为 `0.1.2-rc.1`；0.1.2 稳定版发布到 npm 后再切到正式 tag。
+> 当前迁移分支的运行时 pin 为 `0.1.5-alpha.1`（2026-09-09 从 `0.1.2-rc.1` 升级，详见 [升级记录](docs/dsh-0.1.5-alpha-upgrade.md)）；0.1.5 稳定版发布到 npm 后再切到正式 tag。
 
 ## 快速安装
 
@@ -128,10 +128,10 @@ pnpm --filter dsh-browser-extension run build:firefox
 cd ~/.dsh/dsh-browser && pnpm start
 ```
 
-使用源码 checkout 时，请在仓库根目录运行 `pnpm start`。当前受支持的精确公开版本为钉定的 0.1.2 预发布版：
+使用源码 checkout 时，请在仓库根目录运行 `pnpm start`。当前受支持的精确公开版本为钉定的 0.1.5 预发布版：
 
 ```sh
-npx @deepseek-ai/dsh@0.1.2-rc.1 web
+npx @deepseek-ai/dsh@0.1.5-alpha.1 web
 ```
 
 Chrome 本机使用无需配置；Firefox 需要填写上述本地桥 token。打开任意 `http://` 或 `https://` 页面，点击 DeepSeek 鲸鱼图标，等待状态面板显示**已连接**。已有标签页会在第一次操作时自动加载；浏览器受保护页面和扩展商店不受支持。

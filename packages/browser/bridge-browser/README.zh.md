@@ -33,10 +33,10 @@ cd $HOME\.dsh\dsh-browser; pnpm start
 
 开发者也可以 clone 仓库，在 checkout 中依次运行 `./scripts/install.sh` 和 `pnpm start`。本地模式直接使用当前分支，不会下载或覆盖源码。两种安装模式都会注册同一个 profile bundle；构建工具只从选定的 workspace 解析，绝不读取父 checkout 或父目录的 `node_modules`。
 
-钉定的 0.1.2 预发布版运行时即可加载已注册的 bundle；不支持 0.1.2 之前的运行时：
+钉定的 0.1.5 预发布版运行时即可加载已注册的 bundle；不支持 0.1.5 之前的运行时：
 
 ```sh
-npx @deepseek-ai/dsh@0.1.2-rc.1 web
+npx @deepseek-ai/dsh@0.1.5-alpha.1 web
 ```
 
 安装器会把已解压扩展复制到 `~/.dsh/browser-extension` 并打开 `chrome://extensions`。在 Chrome 中加载这个稳定目录，然后使用助手窗（状态侧栏或浮窗，依设置）。扩展会自动发现回环连接，无需输入 token；非回环部署仍需要配置的 bearer token。
