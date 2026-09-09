@@ -79,10 +79,10 @@ pnpm --filter dsh-browser-extension run test
 
    如果使用 clone，请改为在仓库根目录运行 `pnpm start`。
 
-   或使用受支持的精确公开版本（钉定 0.1.2 预发布版）：
+   或使用受支持的精确公开版本（钉定 0.1.5 预发布版）：
 
    ```sh
-   npx @deepseek-ai/dsh@0.1.2-rc.1 web
+   npx @deepseek-ai/dsh@0.1.5-alpha.1 web
    ```
 
    两种命令都会从本机 `web` profile 加载同一个 bundle。默认端口为 3080；如被占用，可追加 `--port <port>`。
