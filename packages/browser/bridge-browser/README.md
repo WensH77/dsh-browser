@@ -36,7 +36,7 @@ Developers can instead clone the repository and run `./scripts/install.sh` follo
 The pinned 0.1.5 pre-release runtime loads the registered bundle; pre-0.1.2 runtimes are not supported:
 
 ```sh
-npx @deepseek-ai/dsh@0.1.5-alpha.1 web
+npx @deepseek-ai/dsh@0.1.5-rc.1 web
 ```
 
 The installer copies the unpacked extension to `~/.dsh/browser-extension` and opens `chrome://extensions`. Load that stable directory in Chrome and use the assistant window (status side panel or floating popup, per settings). Loopback connections are discovered automatically and require no token entry; non-loopback deployments still require the configured bearer token.
