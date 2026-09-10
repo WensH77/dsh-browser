@@ -14,6 +14,7 @@
 | 2026-09-02 | **O4**：未绑定会话首次 `browser_navigate` → 自动开新标签并绑定；设置/信任配置放 options 页；审批走 popup/状态窗。 |
 | 2026-09-02 | 版本线：运行时与依赖统一 pin 到 `0.1.2-rc.1`（0.1.2 稳定发布后再切正式 tag）。 |
 | 2026-09-09 | 版本线升级：运行时与依赖统一对齐 dsh `0.1.5-alpha.1`（当时运行 harness 已是 0.1.5-alpha.1；peer/devDeps/root CLI 与 lockfile 同升，见 [升级记录](dsh-0.1.5-alpha-upgrade.md)）。 |
+| 2026-09-10 | 版本线升级：运行时与依赖统一对齐 dsh `0.1.5-rc.1`（运行 harness 已切到 `latest` = 0.1.5-rc.1；peerDeps/devDeps/root CLI 与 lockfile 同升，见 [升级记录](dsh-0.1.5-rc-upgrade.md)）。 |
 
 ## 开放问题
 
@@ -23,4 +24,4 @@
 ## 参考
 
 - 实施范围与阶段划分：git 历史 `refactor/pure-tool-bridge` 提交说明。
-- 运行环境：dsh `0.1.5-alpha.1`（peer/devDeps/root CLI 统一此线，2026-09-09 升级）。
+- 运行环境：dsh `0.1.5-rc.1`（peer/devDeps/root CLI 统一此线，2026-09-10 升级）。

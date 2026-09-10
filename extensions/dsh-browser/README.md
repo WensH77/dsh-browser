@@ -82,7 +82,7 @@ The recommended zero-configuration command does not require Git or a local clone
    Or the exact supported public runtime (pinned 0.1.5 pre-release):
 
    ```sh
-   npx @deepseek-ai/dsh@0.1.5-alpha.1 web
+   npx @deepseek-ai/dsh@0.1.5-rc.1 web
    ```
 
    Both commands load the same bundle from the local `web` profile. Port 3080 is used by default; append `--port <port>` when it is occupied.

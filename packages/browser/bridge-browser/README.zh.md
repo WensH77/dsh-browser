@@ -36,7 +36,7 @@ cd $HOME\.dsh\dsh-browser; pnpm start
 钉定的 0.1.5 预发布版运行时即可加载已注册的 bundle；不支持 0.1.5 之前的运行时：
 
 ```sh
-npx @deepseek-ai/dsh@0.1.5-alpha.1 web
+npx @deepseek-ai/dsh@0.1.5-rc.1 web
 ```
 
 安装器会把已解压扩展复制到 `~/.dsh/browser-extension` 并打开 `chrome://extensions`。在 Chrome 中加载这个稳定目录，然后使用助手窗（状态侧栏或浮窗，依设置）。扩展会自动发现回环连接，无需输入 token；非回环部署仍需要配置的 bearer token。

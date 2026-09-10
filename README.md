@@ -11,7 +11,7 @@ Connect [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) to t
 Browser operation remains text-only: pages become structured text with a numbered inventory of interactive elements, and the model addresses those elements by number. Multimodal chat with dsh lives in its own host client; the browser tools themselves never capture screenshots.
 
 > [!IMPORTANT]
-> The migration branch's runtime pin is `0.1.5-alpha.1` (upgraded from `0.1.2-rc.1` on 2026-09-09; see the [upgrade note](docs/dsh-0.1.5-alpha-upgrade.md)); it moves to the stable `0.1.5` tag when that is published on npm.
+> The migration branch's runtime pin is `0.1.5-rc.1` (raised from `0.1.2-rc.1` to `0.1.5-alpha.1` on 2026-09-09, then to `0.1.5-rc.1` on 2026-09-10; see the [upgrade note](docs/dsh-0.1.5-rc-upgrade.md)); it moves to the stable `0.1.5` tag when that is published on npm.
 
 ## Quick install
 
@@ -131,7 +131,7 @@ cd ~/.dsh/dsh-browser && pnpm start
 From a source checkout, run `pnpm start` in the repository root. The exact supported public runtime is currently the pinned 0.1.5 pre-release:
 
 ```sh
-npx @deepseek-ai/dsh@0.1.5-alpha.1 web
+npx @deepseek-ai/dsh@0.1.5-rc.1 web
 ```
 
 Local Chrome use requires no configuration; Firefox requires the local bridge token described above. Open an `http://` or `https://` page, click the DeepSeek whale icon, and wait for **Connected**. Existing tabs are instrumented on the first action; protected browser pages and extension stores are not supported.
