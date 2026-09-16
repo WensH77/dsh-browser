@@ -2,9 +2,9 @@
 
 [English](README.md) | 中文
 
-dsh 的**纯浏览器工具桥**：在宿主 webserver 上挂载一个 **token 认证的 WebSocket 通道**（`/ext/bridge`），供 Chrome 扩展连接，并注册**纯文本**的 `browser_*` 工具集——经扩展在真实浏览器中读取页面、点击元素、填写表单、滚动与导航，登录态保留。桥**只承载工具帧**：聊天、设置、凭据、事件流都不再经过它，dsh 网关再怎么演进都不影响这份契约。聊天与会话属于标准 dsh 客户端（web GUI/CLI）；扩展侧只有状态视图与 options/审批弹窗。
+dsh 的**纯浏览器工具桥**：在宿主 webserver 上挂载一个 **token 认证的 WebSocket 通道**（`/ext/bridge`），供 Chrome 扩展连接，并注册 `browser_*` 工具集——经扩展在真实浏览器中读取页面、点击元素、填写表单、滚动与导航，登录态保留。桥**只承载工具帧**：聊天、设置、凭据、事件流都不再经过它，dsh 网关再怎么演进都不影响这份契约。聊天与会话属于标准 dsh 客户端（web GUI/CLI）；扩展侧只有状态视图与 options/审批弹窗。
 
-**纯文本设计**：页面快照仍是结构化文本（标题、正文、带编号的交互清单、敏感值打码的表单字段），所有浏览器动作按稳定编号寻址。DeepSeek 模型无视觉，所以这里没有任何截图。
+**文本为主、按需视觉**：页面快照仍是结构化文本（标题、正文、带编号的交互清单、敏感值打码的表单字段），所有浏览器动作按稳定编号寻址。`browser_snapshot` 会额外返回同一时刻的截图，`browser_capture` 按需只返回截图——仅当调用方的模型路由声明支持图片输入时才附上，且只作为内存中的图片附件：扩展从不把截图写入磁盘。
 
 ## 配置
 
@@ -58,6 +58,8 @@ npx @deepseek-ai/dsh@0.1.5-rc.1 web
 
 `tool.call` 携带稳定 id，扩展在其 `tool.result` 中回显；`expiresAt` 让过期调用以 `timeout` 结算。桥只是请求/响应通道——认证完成后不再有事件帧。
 
+两个半边的版本在 `hello`/`hello.ok` 里协商：`proto` 是握手版本（不发该字段的旧构建读作 1），`toolset` 是扩展的能力级别（缺失为 0）。宿主若无法服务更新的扩展，用关闭码 `4003` + 原因拒绝，扩展把原因原样显示；扩展声明的级别较低时，宿主**收窄工具面**（不注册 `browser_dom_query`/`browser_block`/`browser_headers`，且 `browser_click`/`browser_type` 的 schema 去掉 `selector`），而不是等到调用时才报参数错误。扩展在选项页与侧栏显示这处错配，并点名下一步（重启 dsh，或重载扩展）。
+
 ## 工具
 
 | 工具 | 用途 |
@@ -65,7 +67,7 @@ npx @deepseek-ai/dsh@0.1.5-rc.1 web
 | `browser_snapshot` | 结构化文本快照（标题/URL/正文/清单/表单）；`delta: true` 只返回变化。 |
 | `browser_click` / `browser_type` / `browser_press` | 按稳定编号操作清单元素。 |
 | `browser_scroll` / `browser_navigate` / `browser_back` / `browser_forward` / `browser_reload` | 页面移动。 |
-| `browser_get_text` / `browser_wait` | 读区域文本 / 稳定检测。 |
+| `browser_get_text` / `browser_wait` | 读区域文本 / 稳定检测。`find`（配 `context`）在整个范围内定位一段文字，按命中返回有界窗口，一次调用即可回答「这一段讲了什么」，无需写 JS 翻 DOM。 |
 
 ## 模型体验
 
@@ -84,5 +86,4 @@ npx @deepseek-ai/dsh@0.1.5-rc.1 web
 - 仅一个活动扩展连接（第二个窗口顶替第一个）。
 - 可访问的跨源 iframe 会进入快照，并通过稳定的 `(frame, index)` 地址执行操作；受保护或已销毁的 frame 会标记为不可访问，不影响整页快照。
 - token 手动轮换（改 `~/.dsh/ext-bridge-token` 或配置 `token`），无过期。
-- Playwright 驱动的扩展 e2e 会在缺少可用的 Chromium 可执行文件或构建完成的扩展包时自行跳过。
 - 审批由扩展 service worker 强制执行，而不是依赖模型自觉。未来接入 dsh 工具管线时可以把同一策略暴露给其它客户端。

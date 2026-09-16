@@ -34,11 +34,16 @@ const MAX_ITEM_NAME_CHARS = 80
 /**
  * Whether an element is visible to the user: not display/visibility/opacity
  * hidden and occupying layout space.
+ *
+ * Accepts every `Element`, SVG included: charts, maps, icon buttons and Google
+ * Slides' filmstrip thumbnails are SVG, and treating them as invisible hides
+ * controls the user can plainly see (and refuses selector clicks on them).
+ *
  * @param el - candidate element.
  * @returns true when the element renders.
  */
 export function isVisible(el: Element): boolean {
-  if (!(el instanceof HTMLElement)) return false
+  if (!(el instanceof Element)) return false
   const style = getComputedStyle(el)
   if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false
   const rect = el.getBoundingClientRect()
@@ -51,6 +56,16 @@ export function isVisible(el: Element): boolean {
  * @param el - element.
  * @returns true when any part is within the viewport.
  */
+/**
+ * Whether an element belongs to persistent page chrome (navigation, banners,
+ * footers) rather than the content the user is reading.
+ * @param el - element.
+ * @returns true for chrome landmarks.
+ */
+export function isChromeLandmark(el: Element): boolean {
+  return el.closest('nav, header, footer, aside, [role="navigation"], [role="banner"], [role="contentinfo"]') !== null
+}
+
 export function isInViewport(el: Element): boolean {
   const rect = el.getBoundingClientRect()
   return rect.bottom >= 0 && rect.top <= window.innerHeight && rect.right >= 0 && rect.left <= window.innerWidth
@@ -125,14 +140,56 @@ export function accessibleName(el: Element): string {
     if (buttonLike && el.value !== '') return truncate(clean(el.value), MAX_ITEM_NAME_CHARS).text
     if (el.placeholder !== '') return truncate(clean(el.placeholder), MAX_ITEM_NAME_CHARS).text
     if (el.alt !== '') return truncate(clean(el.alt), MAX_ITEM_NAME_CHARS).text
+    const inputTitle = hintAttribute(el)
+    if (inputTitle !== undefined) return inputTitle
     return truncate(clean(el.type), MAX_ITEM_NAME_CHARS).text
   }
+
+  // Icon-only controls are common in enterprise UI: they usually carry the
+  // human label in a tooltip attribute rather than in text.
+  const hinted = hintAttribute(el)
+  if (hinted !== undefined) return hinted
+  const iconName = iconNameFromClass(el)
+  if (iconName !== undefined) return iconName
 
   return el.tagName.toLowerCase()
 }
 
+/** First non-empty label carried by a tooltip-ish attribute. */
+function hintAttribute(el: Element): string | undefined {
+  for (const attribute of ['title', 'data-original-title', 'data-tooltip', 'data-title', 'aria-description']) {
+    const value = el.getAttribute(attribute)
+    if (value !== null && value.trim() !== '') return truncate(clean(value), MAX_ITEM_NAME_CHARS).text
+  }
+  return undefined
+}
+
+/**
+ * Derive a readable name from an icon class such as `icon-specialist-email`,
+ * used only when the element offers nothing better. It is a heuristic, not an
+ * accessible name, and it never overrides real text.
+ */
+function iconNameFromClass(el: Element): string | undefined {
+  const own = iconWords(el)
+  if (own !== undefined) return own
+  // The icon usually sits inside the control: <button><i class="icon-mail"></i></button>.
+  const carrier = el.querySelector('[class*="icon-"], [class*="icon_"], [class*="ico-"], [class*="glyph-"], [class*="fa-"]')
+  return carrier === null ? undefined : iconWords(carrier)
+}
+
+/** Read one icon class name off an element, if it has one. */
+function iconWords(el: Element): string | undefined {
+  // The attribute, not `className`: on SVG elements that property is an
+  // SVGAnimatedString, so icon-only SVG controls would lose their name.
+  const raw = el.getAttribute('class') ?? ''
+  const match = /(?:^|\s)(?:icon|ico|glyph|fa)[-_]([a-z0-9][a-z0-9-_]{1,30})/i.exec(raw)
+  if (match === null) return undefined
+  const words = match[1]!.replace(/[-_]+/g, ' ').trim()
+  return words === '' ? undefined : truncate(clean(words), MAX_ITEM_NAME_CHARS).text
+}
+
 /** CSS.escape with a fallback for environments that lack it (jsdom). */
-function cssEscape(value: string): string {
+export function cssEscape(value: string): string {
   if (typeof CSS !== 'undefined' && typeof CSS.escape === 'function') return CSS.escape(value)
   return value.replace(/[^a-zA-Z0-9_-]/g, (ch) => `\\${ch}`)
 }

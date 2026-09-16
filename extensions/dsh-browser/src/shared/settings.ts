@@ -28,6 +28,14 @@ export interface Settings {
   allowCrossDomainNavigation: boolean
   /** Origins that must never be operated (reads or actions). */
   blockedOrigins: string[]
+  /** Allow the harness to attach the debugger: screenshots, console, network,
+   * response overrides, and page evaluation. Off on first install; while off,
+   * those tools are not registered at all, so the model cannot see them. */
+  allowExtensionDebug: boolean
+  /** Let origin trust also cover `browser_eval` (running JavaScript in the page).
+   * Default off: JS execution prompts on every call, because a trusted origin
+   * for clicks is not automatically a trusted origin for arbitrary code. */
+  trustJsExecution: boolean
 }
 
 export const SETTINGS_DEFAULTS: Settings = {
@@ -39,6 +47,8 @@ export const SETTINGS_DEFAULTS: Settings = {
   statusMode: 'floating',
   allowCrossDomainNavigation: false,
   blockedOrigins: [],
+  allowExtensionDebug: false,
+  trustJsExecution: false,
 }
 
 export const SETTINGS_STORAGE_KEY = 'dshSettings'

@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, expect, it } from 'vitest'
-import { allocateFrameBudgets, sortTabFrames, type TabFrame } from '../src/background/frames.ts'
+import { allocateFrameBudgets, sameFrameDocument, sortTabFrames, type TabFrame } from '../src/background/frames.ts'
 
 function frames(count: number): TabFrame[] {
   return Array.from({ length: count }, (_, frameId) => ({
@@ -42,6 +42,42 @@ describe('allocateFrameBudgets', () => {
         expect(allocated.reduce((sum, entry) => sum + entry.maxChars, 0)).toBeLessThanOrEqual(budget.maxChars)
       }
     }
+  })
+})
+
+describe('sameFrameDocument', () => {
+  const frame = (over: Partial<TabFrame> = {}): TabFrame => ({
+    frameId: 0,
+    parentFrameId: -1,
+    url: 'https://app.example/page',
+    ...over,
+  })
+
+  it('compares document ids when both listings have one', () => {
+    expect(sameFrameDocument(
+      frame({ documentId: 'a', url: 'https://one/' }),
+      frame({ documentId: 'a', url: 'https://two/' }),
+    )).toBe(true)
+    expect(sameFrameDocument(frame({ documentId: 'a' }), frame({ documentId: 'b' }))).toBe(false)
+  })
+
+  it('falls back to the URL when a listing has no document id', () => {
+    // A frame listing may be url-only when the frame tree is briefly
+    // unavailable; comparing that against a document id used to look like a
+    // navigation and invalidated approvals the user had just granted.
+    expect(sameFrameDocument(
+      frame({ url: 'https://app.example/page' }),
+      frame({ documentId: 'a', url: 'https://app.example/page' }),
+    )).toBe(true)
+    expect(sameFrameDocument(
+      frame({ url: 'https://app.example/page' }),
+      frame({ documentId: 'a', url: 'https://app.example/other' }),
+    )).toBe(false)
+  })
+
+  it('treats a missing observation as a different document', () => {
+    expect(sameFrameDocument(undefined, frame({ documentId: 'a' }))).toBe(false)
+    expect(sameFrameDocument(frame({ documentId: 'a' }), undefined)).toBe(false)
   })
 })
 

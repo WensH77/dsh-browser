@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import WebSocket from 'ws'
 import { BridgeServer, BridgeToolError, isLoopbackAddress, messageToText, payloadCode, payloadMessage } from '../src/server.ts'
 import type { BridgeFrame } from '../src/protocol.ts'
+import { BRIDGE_PROTO, BRIDGE_TOOLSET, HANDSHAKE_MISMATCH_CLOSE_CODE } from '../src/protocol.ts'
 
 const TOKEN = 'deadbeefdeadbeefdeadbeefdeadbeef'
 
@@ -12,7 +13,7 @@ const EXT_ORIGIN = 'chrome-extension://test-extension-id'
 const FIREFOX_EXT_ORIGIN = 'moz-extension://per-install-uuid'
 
 /** Extension caps used by every hello in this suite. */
-const CAPS = { textOnly: true as const, snapshotMaxChars: 12_000, maxInteractiveItems: 60 }
+const CAPS = { debugger: true as const, snapshotMaxChars: 12_000, maxInteractiveItems: 60 }
 
 interface Harness {
   bridge: BridgeServer
@@ -24,7 +25,7 @@ async function startBridge(overrides: Partial<ConstructorParameters<typeof Bridg
   const bridge = new BridgeServer({
     token: TOKEN,
     toolTimeoutMs: 1_000,
-    caps: { textOnly: true, snapshotMaxChars: 12_000, maxInteractiveItems: 60 },
+    caps: { debugger: true, snapshotMaxChars: 12_000, maxInteractiveItems: 60 },
     ...overrides,
   })
   const server = createServer()
@@ -94,10 +95,43 @@ describe('BridgeServer', () => {
     const h = await startBridge()
     harnesses.push(h)
     const { ws, frames } = await connect(h.url)
-    send(ws, { t: 'hello', token: TOKEN, caps: { textOnly: true, snapshotMaxChars: 12000, maxInteractiveItems: 60 } })
+    send(ws, { t: 'hello', token: TOKEN, caps: { debugger: true, snapshotMaxChars: 12000, maxInteractiveItems: 60 } })
     await waitFor(() => frames.some((f) => f.t === 'hello.ok'))
-    expect(frames.find((f) => f.t === 'hello.ok')).toEqual({ t: 'hello.ok', caps: { textOnly: true, snapshotMaxChars: 12000, maxInteractiveItems: 60 } })
+    expect(frames.find((f) => f.t === 'hello.ok')).toEqual({ t: 'hello.ok', caps: { debugger: true, snapshotMaxChars: 12000, maxInteractiveItems: 60 } })
     ws.close()
+  })
+
+  it('reports the extension\'s capabilities and follows a build that declares none', async () => {
+    const h = await startBridge()
+    harnesses.push(h)
+    expect(h.bridge.clientDebugger()).toBe(false)
+
+    const { ws, frames } = await connect(h.url)
+    send(ws, { t: 'hello', token: TOKEN, caps: { proto: BRIDGE_PROTO, toolset: BRIDGE_TOOLSET, debugger: true, snapshotMaxChars: 12000, maxInteractiveItems: 60 } })
+    await waitFor(() => frames.some((f) => f.t === 'hello.ok'))
+    expect(h.bridge.clientDebugger()).toBe(true)
+
+    // A build from before the versioned handshake is still accepted: it reports
+    // no debug capability and reads as the legacy toolset.
+    const legacy = await connect(h.url)
+    send(legacy.ws, { t: 'hello', token: TOKEN, caps: { snapshotMaxChars: 12000, maxInteractiveItems: 60 } })
+    await waitFor(() => legacy.frames.some((f) => f.t === 'hello.ok'))
+    expect(h.bridge.clientDebugger()).toBe(false)
+  })
+
+  it('refuses an extension that speaks a newer protocol, with a reason it can show', async () => {
+    const h = await startBridge()
+    harnesses.push(h)
+    const { ws, done } = await connect(h.url)
+    const closed = new Promise<{ code: number; reason: string }>((resolve) => {
+      ws.on('close', (code, reason) => { resolve({ code, reason: reason.toString() }) })
+    })
+    send(ws, { t: 'hello', token: TOKEN, caps: { ...CAPS, proto: BRIDGE_PROTO + 1 } })
+    await done
+    const close = await closed
+    expect(close.code).toBe(HANDSHAKE_MISMATCH_CLOSE_CODE)
+    expect(close.reason).toContain('restart dsh')
+    expect(h.bridge.hasConnection()).toBe(false)
   })
 
   it('accepts loopback connections without a token when Origin is an extension (zero-config mode)', async () => {
@@ -177,7 +211,7 @@ describe('BridgeServer', () => {
     const h = await startBridge()
     harnesses.push(h)
     const { ws, frames } = await connect(h.url)
-    send(ws, { t: 'hello', token: TOKEN, caps: { textOnly: true, snapshotMaxChars: 12000, maxInteractiveItems: 60 } })
+    send(ws, { t: 'hello', token: TOKEN, caps: { debugger: true, snapshotMaxChars: 12000, maxInteractiveItems: 60 } })
     await waitFor(() => frames.some((f) => f.t === 'hello.ok'))
     send(ws, { t: 'rpc', id: 'rpc-1', method: 'session.list', payload: {} })
     await waitFor(() => frames.some((f) => f.t === 'rpc.result'))
@@ -199,7 +233,7 @@ describe('BridgeServer', () => {
     const h = await startBridge()
     harnesses.push(h)
     const { ws, frames } = await connect(h.url)
-    send(ws, { t: 'hello', token: TOKEN, caps: { textOnly: true, snapshotMaxChars: 12000, maxInteractiveItems: 60 } })
+    send(ws, { t: 'hello', token: TOKEN, caps: { debugger: true, snapshotMaxChars: 12000, maxInteractiveItems: 60 } })
     await waitFor(() => frames.some((f) => f.t === 'hello.ok'))
     const result = h.bridge.requestTool('browser_click', { index: 1 }, new AbortController().signal)
     await waitFor(() => frames.some((f) => f.t === 'tool.call'))
@@ -238,7 +272,7 @@ describe('BridgeServer', () => {
     const h = await startBridge()
     harnesses.push(h)
     const { ws, frames } = await connect(h.url)
-    send(ws, { t: 'hello', token: TOKEN, caps: { textOnly: true, snapshotMaxChars: 12000, maxInteractiveItems: 60 } })
+    send(ws, { t: 'hello', token: TOKEN, caps: { debugger: true, snapshotMaxChars: 12000, maxInteractiveItems: 60 } })
     await waitFor(() => frames.some((f) => f.t === 'hello.ok'))
     await expect(h.bridge.requestTool('browser_wait', {}, new AbortController().signal, 30))
       .rejects.toMatchObject({ code: 'timeout' })
@@ -252,7 +286,7 @@ describe('BridgeServer', () => {
     const h = await startBridge()
     harnesses.push(h)
     const { ws, frames } = await connect(h.url)
-    send(ws, { t: 'hello', token: TOKEN, caps: { textOnly: true, snapshotMaxChars: 12000, maxInteractiveItems: 60 } })
+    send(ws, { t: 'hello', token: TOKEN, caps: { debugger: true, snapshotMaxChars: 12000, maxInteractiveItems: 60 } })
     await waitFor(() => frames.some((f) => f.t === 'hello.ok'))
     const result = h.bridge.requestTool('browser_navigate', { url: 'https://x' }, new AbortController().signal)
     await waitFor(() => frames.some((f) => f.t === 'tool.call'))
@@ -267,7 +301,7 @@ describe('BridgeServer', () => {
     const h = await startBridge()
     harnesses.push(h)
     const first = await connect(h.url)
-    send(first.ws, { t: 'hello', token: TOKEN, caps: { textOnly: true, snapshotMaxChars: 12000, maxInteractiveItems: 60 } })
+    send(first.ws, { t: 'hello', token: TOKEN, caps: { debugger: true, snapshotMaxChars: 12000, maxInteractiveItems: 60 } })
     await waitFor(() => first.frames.some((f) => f.t === 'hello.ok'))
     const pending = h.bridge.requestTool('browser_click', {}, new AbortController().signal)
     // Attach the assertion eagerly: the replacement below settles it before the final await.
@@ -275,7 +309,7 @@ describe('BridgeServer', () => {
     await waitFor(() => first.frames.some((f) => f.t === 'tool.call'))
 
     const second = await connect(h.url)
-    send(second.ws, { t: 'hello', token: TOKEN, caps: { textOnly: true, snapshotMaxChars: 12000, maxInteractiveItems: 60 } })
+    send(second.ws, { t: 'hello', token: TOKEN, caps: { debugger: true, snapshotMaxChars: 12000, maxInteractiveItems: 60 } })
     await waitFor(() => second.frames.some((f) => f.t === 'hello.ok'))
 
     await pendingAssertion
@@ -287,7 +321,7 @@ describe('BridgeServer', () => {
     const h = await startBridge()
     harnesses.push(h)
     const { ws, frames } = await connect(h.url)
-    send(ws, { t: 'hello', token: TOKEN, caps: { textOnly: true, snapshotMaxChars: 12000, maxInteractiveItems: 60 } })
+    send(ws, { t: 'hello', token: TOKEN, caps: { debugger: true, snapshotMaxChars: 12000, maxInteractiveItems: 60 } })
     await waitFor(() => frames.some((f) => f.t === 'hello.ok'))
     const abort = new AbortController()
     const pending = h.bridge.requestTool('browser_click', {}, abort.signal)

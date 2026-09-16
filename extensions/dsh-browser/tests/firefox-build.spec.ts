@@ -34,6 +34,16 @@ describe('Firefox build contract', () => {
     expect(firefoxManifest.content_security_policy.extension_pages).toContain('https://raw.githubusercontent.com')
   })
 
+  it('keeps the Chrome-only debugger permission out of the Firefox build', async () => {
+    const [chromeManifest, firefoxManifest] = await Promise.all([
+      readJson<ExtensionManifest>('../manifest.json'),
+      readJson<ExtensionManifest>('../manifest.firefox.json'),
+    ])
+
+    expect(chromeManifest.permissions).toContain('debugger')
+    expect(firefoxManifest.permissions).not.toContain('debugger')
+  })
+
   it('uses a Firefox event page, sidebar, and AMO data-transmission declaration', async () => {
     const manifest = await readJson<ExtensionManifest>('../manifest.firefox.json')
 

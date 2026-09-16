@@ -27,7 +27,7 @@ import LlmService from '@deepseek-ai/dsh-llm'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import UserQuestionService from '@deepseek-ai/dsh-user-questions'
 import * as BridgeBrowser from '../src/index.ts'
-import { BRIDGE_PATH, type BridgeFrame } from '../src/protocol.ts'
+import { BRIDGE_PATH, BRIDGE_PROTO, type BridgeFrame } from '../src/protocol.ts'
 
 const BRIDGE = '@yuxianglin/dsh-bridge-browser'
 const TOKEN = 'abcdabcdabcdabcdabcdabcdabcdabcd'
@@ -163,6 +163,24 @@ describe('real Loader composition', () => {
       .find((section) => section.name === 'tool:bridge-browser')?.text
     expect(browserPrompt).toContain('page content you have not snapshotted')
     expect(browserPrompt).toContain('Reuse that injected snapshot')
+    // The codebase-first ordering, and the "empty search proves nothing" caveat,
+    // are the parts of this prompt most likely to be dropped by accident.
+    expect(browserPrompt).toContain('do not open with the bridge')
+    expect(browserPrompt).toContain('An empty code search proves nothing')
+    expect(browserPrompt).toContain('do not retry the same call')
+    // A refusal is a boundary: no alternate transport, and no trial calls to
+    // find out where the policy line sits.
+    expect(browserPrompt).toContain('A refusal is a boundary, not a puzzle')
+    // Reading text comes before scripting the DOM.
+    expect(browserPrompt).toContain('slice it yourself')
+    // Page pictures go through browser_image, not a screenshot.
+    expect(browserPrompt).toContain('browser_image')
+    expect(browserPrompt).toContain('do not script several browser_eval rounds')
+    expect(browserPrompt).toContain('stop and tell the user what contradicted')
+    // Slides is an ordinary page now that the export narrowed to Docs/Sheets:
+    // the prompt must not still route every Drive link to the exporter.
+    expect(browserPrompt).toContain('Slides, Drive files, and every other link are ordinary pages')
+    expect(browserPrompt).not.toContain('are not readable as web pages')
     expect(browserPrompt).not.toMatch(/\p{Script=Han}/u)
 
     // Zero-config discovery endpoint answers with the bridge WebSocket URL.
@@ -175,19 +193,33 @@ describe('real Loader composition', () => {
     expect(tools.get('browser_navigate')).toBeDefined()
 
     // Zero-config semantics: loopback connections need no token (the
-    // non-loopback token gate is covered by server.spec overrides).
+    // non-loopback token gate is covered by server.spec overrides). This hello
+    // declares no `toolset`, i.e. an extension from before the versioned
+    // handshake: the host must narrow the surface it exposes to the model.
+    expect(tools.get('browser_capture')).toBeUndefined()
+    expect(tools.get('browser_dom_query')).toBeDefined()
     const client = await connect(port)
-    send(client.ws, { t: 'hello', token: '', caps: { textOnly: true, snapshotMaxChars: 32_000, maxInteractiveItems: 60 } })
+    send(client.ws, { t: 'hello', token: '', caps: { debugger: true, snapshotMaxChars: 32_000, maxInteractiveItems: 60 } })
     await Promise.race([
       waitFor(() => client.frames.some((f) => f.t === 'hello.ok')),
       client.closed.then(({ code, reason }) => {
         throw new Error(`bridge closed before hello.ok (${String(code)} ${reason}): ${JSON.stringify(client.frames)}`)
       }),
     ])
+    // The host echoes its own budgets and handshake version in hello.ok;
+    // `debugger`/`toolset` are the extension's own capability report and are
+    // never mirrored back.
     expect(client.frames.find((f) => f.t === 'hello.ok')).toEqual({
       t: 'hello.ok',
-      caps: { textOnly: true, snapshotMaxChars: 32_000, maxInteractiveItems: 60 },
+      caps: { proto: BRIDGE_PROTO, snapshotMaxChars: 32_000, maxInteractiveItems: 60 },
     })
+    // Capabilities reach the live registry: `debugger: true` in this hello
+    // registers the debugging group, and the missing `toolset` drops the tools
+    // that extension has no wire action for.
+    expect(tools.get('browser_capture')).toBeDefined()
+    expect(tools.get('browser_dom_query')).toBeUndefined()
+    expect(tools.get('browser_block')).toBeUndefined()
+    expect(tools.get('browser_click')).toBeDefined()
 
     // The bridge is a pure tool channel: gateway methods are refused rather
     // than passed through to the Host adapter.

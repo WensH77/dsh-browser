@@ -1,6 +1,8 @@
 import { useEffect, useState, type ReactElement } from 'react'
 import { getUiLocale } from '../i18n.ts'
+import { opLabel, type OpCopy } from './op-label.ts'
 import { sendUiRequest, type UiState } from '../shared/messages.ts'
+import { noticeText } from '../shared/notice-copy.ts'
 import type { ApprovalDecision, ApprovalRequest } from '../security/approval.ts'
 
 const zh = {
@@ -29,6 +31,14 @@ const zh = {
   opNavigate: '导航到',
   opClick: '点击',
   opType: '输入',
+  opEval: '执行 JS',
+  opBlock: '阻断',
+  opHeaders: '改头',
+  opCapture: '截图',
+  opConsole: '读控制台',
+  opNetwork: '看网络',
+  opDialog: '回应弹窗',
+  opElement: '元素',
   opPress: '按键',
   opScroll: '滚动',
   opSnapshot: '读取页面',
@@ -70,6 +80,14 @@ const en = {
   opNavigate: 'Navigate to',
   opClick: 'Click',
   opType: 'Type',
+  opEval: 'Run JS',
+  opBlock: 'Block',
+  opHeaders: 'Headers',
+  opCapture: 'Capture',
+  opConsole: 'Console',
+  opNetwork: 'Network',
+  opDialog: 'Answer dialog',
+  opElement: 'element',
   opPress: 'Press',
   opScroll: 'Scroll',
   opSnapshot: 'Read page',
@@ -86,7 +104,8 @@ const en = {
   bound: 'Bound page',
 }
 
-const copy = getUiLocale() === 'zh' ? zh : en
+const locale = getUiLocale()
+const copy = locale === 'zh' ? zh : en
 
 function statusLabel(state: string): string {
   switch (state) {
@@ -94,34 +113,6 @@ function statusLabel(state: string): string {
     case 'connecting': return copy.connecting
     case 'reconnecting': return copy.reconnecting
     default: return copy.stopped
-  }
-}
-
-function opLabel(op: import('../shared/messages.ts').RecentOp): string {
-  const a = op.args
-  const url = typeof a.url === 'string' ? a.url : ''
-  const index = typeof a.index === 'number' ? a.index : undefined
-  const text = typeof a.text === 'string' ? a.text : ''
-  const ms = typeof a.ms === 'number' ? a.ms : undefined
-  const direction = typeof a.direction === 'string' ? a.direction : ''
-  const tabId = typeof a.tabId === 'number' ? a.tabId : undefined
-  const key = typeof a.key === 'string' ? a.key : ''
-  const trunc = (value: string, max = 96): string => value.length <= max ? value : `${value.slice(0, max - 1)}…`
-  switch (op.name) {
-    case 'browser_navigate': return `${copy.opNavigate} ${trunc(url)}`
-    case 'browser_click': return `${copy.opClick} [${index ?? '?'}]`
-    case 'browser_type': return `${copy.opType} ${text.length}${copy.opChars}`
-    case 'browser_press': return `${copy.opPress} ${key}`
-    case 'browser_scroll': return `${copy.opScroll} ${direction}`
-    case 'browser_wait': return `${copy.opWait}${ms !== undefined ? ` ${ms}ms` : ''}`
-    case 'browser_snapshot': return copy.opSnapshot
-    case 'browser_get_text': return copy.opGetText
-    case 'browser_back': return copy.opBack
-    case 'browser_forward': return copy.opForward
-    case 'browser_reload': return copy.opReload
-    case 'browser_list_tabs': return copy.opListTabs
-    case 'browser_bind_tab': return `${copy.opBindTab} ${tabId ?? ''}`.trim()
-    default: return op.name
   }
 }
 
@@ -133,7 +124,14 @@ function fmtClock(epochMs: number): string {
 
 function opTitle(op: import('../shared/messages.ts').RecentOp): string {
   const started = fmtClock(op.startedAt)
-  return op.endedAt === undefined ? `started ${started}` : `started ${started} · ended ${fmtClock(op.endedAt)}`
+  const span = op.endedAt === undefined ? `started ${started}` : `started ${started} · ended ${fmtClock(op.endedAt)}`
+  let args = ''
+  try {
+    args = JSON.stringify(op.args)
+  } catch {
+    args = '(unserializable arguments)'
+  }
+  return `${op.name}${op.label === undefined ? '' : ` · ${op.label}`}\n${span}\n${args}`
 }
 
 function opStateLabel(state: string): string | undefined {
@@ -188,8 +186,8 @@ export function App(): ReactElement {
               recentOps: [push.op, ...(prev.recentOps ?? []).filter((o) => o.id !== push.op.id)].slice(0, 30),
             })
       } else if (type === 'push.status') {
-        const push = message as { state: UiState['bridgeState']; caps: UiState['caps'] }
-        setUi((prev) => prev === null ? null : { ...prev, bridgeState: push.state, caps: push.caps })
+        const push = message as { state: UiState['bridgeState']; caps: UiState['caps']; notice: UiState['notice'] }
+        setUi((prev) => prev === null ? null : { ...prev, bridgeState: push.state, caps: push.caps, notice: push.notice })
       } else if (type === 'push.affinity') {
         // Affinity changes (bind/unbind/focus) also affect controlled and the
         // ops list; reload the full ui.state so the UI follows immediately.
@@ -225,6 +223,10 @@ export function App(): ReactElement {
           {copy.reconnect}
         </button>
       </header>
+
+      {ui?.notice != null && (
+        <p className="panel__notice" role="status">{noticeText(ui.notice, locale)}</p>
+      )}
 
       <main className="panel__body">
         {pending.length > 0 && (
@@ -264,11 +266,13 @@ export function App(): ReactElement {
                 const stateText = opStateLabel(op.state)
                 return (
                   <li className="ops__row" key={op.id} title={opTitle(op)}>
+                    <time className="ops__time">{fmtClock(op.startedAt)}</time>
                     <span className={`ops__dot ops__dot--${op.state}`} />
                     <span className="ops__content">
-                      <span className="ops__text">{opLabel(op)}</span>
+                      <span className="ops__text">{opLabel(op, copy as OpCopy)}</span>
                       <span className="ops__meta">
-                        <time>{fmtClock(op.startedAt)}</time>
+                        {/* The chip would just repeat a label that already fell back to the tool name. */}
+                        {opLabel(op, copy as OpCopy) !== op.name && <span className="ops__tool">{op.name}</span>}
                         {stateText !== undefined && <span className={`ops__state ops__state--${op.state}`}>{stateText}</span>}
                       </span>
                     </span>

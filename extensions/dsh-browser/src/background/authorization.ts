@@ -5,7 +5,17 @@ import type { TabFrame } from './frames.ts'
 import type { ApprovalPrompt } from '../security/approval.ts'
 import { getUiLocale, type UiLocale } from '../i18n.ts'
 
-const PAGE_READS = new Set(['browser_snapshot', 'browser_get_text'])
+const PAGE_READS = new Set([
+  'browser_snapshot',
+  'browser_get_text',
+  'browser_capture',
+  'browser_image',
+  'browser_console',
+  'browser_network',
+  'browser_dom_query',
+])
+/** Actions whose blast radius is not bounded by "one origin", so they never trust-skip. */
+const UNTRUSTABLE_ACTIONS = new Set(['browser_eval', 'browser_headers', 'browser_dialog'])
 const STATE_CHANGING_ACTIONS = new Set([
   'browser_click',
   'browser_type',
@@ -15,6 +25,25 @@ const STATE_CHANGING_ACTIONS = new Set([
   'browser_forward',
   'browser_reload',
 ])
+/**
+ * Background-answered downloads that spend the user's signed-in session on a
+ * remote origin. They are approved exactly like an action: origin-scoped,
+ * trustable, and skippable once that origin is trusted.
+ */
+const REMOTE_FETCH_ACTIONS = new Set(['gdrive.fetch'])
+
+/** Consent policy knobs the background mirrors from user settings. */
+export interface ActionTrustPolicy {
+  /** Whether origin trust also covers page-context JavaScript execution. */
+  trustJsExecution: boolean
+}
+
+let actionTrustPolicy: ActionTrustPolicy = { trustJsExecution: false }
+
+/** Apply the user's consent policy; called whenever settings load or change. */
+export function setActionTrustPolicy(policy: ActionTrustPolicy): void {
+  actionTrustPolicy = policy
+}
 
 /** Return an approval prompt, or undefined when this call needs no prompt. */
 export function approvalPromptForCall(
@@ -23,6 +52,36 @@ export function approvalPromptForCall(
   frames: TabFrame[],
   locale: UiLocale = getUiLocale(),
 ): ApprovalPrompt | undefined {
+  if (call.name === 'browser_network' && (call.args.mock !== undefined || call.args.mockClear === true)) {
+    return {
+      kind: 'action',
+      action: call.name,
+      summary: localized(locale, 'Replace or block a network response on the current page', '替换或阻断当前页面的某个网络响应'),
+      origins: uniqueOrigins(frames, frames),
+      canTrust: false,
+    }
+  }
+
+  if (REMOTE_FETCH_ACTIONS.has(call.name)) {
+    // Consent is about the file's origin: the user trusts a document host, not
+    // one particular file id. The summary keeps the displayed URL origin+path
+    // only, so share links never print their query-string tokens.
+    const url = typeof call.args.url === 'string' ? call.args.url : ''
+    const destination = originFromUrl(url)
+    const shown = displayUrl(url, locale)
+    return {
+      kind: 'action',
+      action: call.name,
+      summary: localized(
+        locale,
+        `Export ${shown} to the session folder using your signed-in browser session`,
+        `使用你已登录的浏览器会话把 ${shown} 导出到会话目录`,
+      ),
+      origins: destination === undefined ? [] : [destination],
+      canTrust: destination !== undefined,
+    }
+  }
+
   if (PAGE_READS.has(call.name)) {
     if (sharePageContent !== 'ask') return undefined
     const targetFrames = call.name === 'browser_snapshot'
@@ -33,9 +92,65 @@ export function approvalPromptForCall(
       action: call.name,
       summary: call.name === 'browser_snapshot'
         ? localized(locale, 'Read the current page and accessible iframes', '读取当前页面及可访问 iframe')
-        : localized(locale, 'Read text from the specified area of the current page', '读取当前页面的指定文本区域'),
+        : call.name === 'browser_capture'
+          ? localized(locale, 'Capture a screenshot of the current page', '截取当前页面截图')
+          : call.name === 'browser_image'
+            ? localized(locale, 'Read a picture from the current page', '读取当前页面里的一张图片')
+            : call.name === 'browser_dom_query'
+              ? localized(locale, 'Read elements matching a CSS selector on the current page', '按 CSS 选择器读取当前页面的元素')
+            : localized(locale, 'Read text from the specified area of the current page', '读取当前页面的指定文本区域'),
       origins: uniqueOrigins(targetFrames, frames),
       canTrust: false,
+    }
+  }
+
+  if (call.name === 'browser_block') {
+    const pattern = typeof call.args.pattern === 'string' ? call.args.pattern : ''
+    return {
+      kind: 'action',
+      action: call.name,
+      summary: localized(
+        locale,
+        `Block network requests matching ${safeInline(pattern)} on this tab`,
+        `在本标签页阻断匹配 ${safeInline(pattern)} 的网络请求`,
+      ),
+      origins: uniqueOrigins(frames, frames),
+      // Blocking is scoped to one tab and reversible; a trusted origin may skip it.
+      canTrust: true,
+    }
+  }
+
+  if (UNTRUSTABLE_ACTIONS.has(call.name)) {
+    // JavaScript execution only joins origin trust when the user opts in: a
+    // trusted click target is not automatically a trusted place to run code.
+    const trustable = call.name === 'browser_eval' && actionTrustPolicy.trustJsExecution
+    // `browser_eval` runs its expression in one frame, so that frame's origin is
+    // the whole boundary. Listing every frame in the tab instead made consent
+    // depend on auxiliary frames — Slides loads sandboxed ones — that come and go
+    // on their own, which invalidated grants the user had just given.
+    const targets = call.name === 'browser_eval'
+      ? frames.filter((frame) => frame.frameId === requestedFrame(call.args))
+      : frames
+    return {
+      kind: 'action',
+      action: call.name,
+      summary: call.name === 'browser_eval'
+        ? localized(locale, 'Run JavaScript in the current page context', '在当前页面的 JS 上下文里执行代码')
+        : call.name === 'browser_dialog'
+          ? localized(
+              locale,
+              `Answer the page's JavaScript dialog (${call.args.action === 'accept' ? 'accept' : 'dismiss'})`,
+              `回应页面的 JS 弹窗（${call.args.action === 'accept' ? '确认' : '取消'}）`,
+            )
+          : localized(
+            locale,
+            `Rewrite request/response headers for ${safeInline(typeof call.args.pattern === 'string' ? call.args.pattern : '')}`,
+            `改写匹配 ${safeInline(typeof call.args.pattern === 'string' ? call.args.pattern : '')} 的请求/响应头`,
+          ),
+      origins: uniqueOrigins(targets, frames),
+      // Header rewriting can exfiltrate or reshape what the page loads, so it is
+      // never trust-skipped; JS execution joins trust only by explicit opt-in.
+      canTrust: trustable,
     }
   }
 
@@ -108,14 +223,19 @@ function summarizeAction(call: ToolCall, locale: UiLocale): string {
     ? localized(locale, `, iframe ${call.args.frame}`, `，iframe ${call.args.frame}`)
     : ''
   const index = typeof call.args.index === 'number' ? call.args.index : '?'
+  const selector = typeof call.args.selector === 'string' && call.args.selector.trim() !== '' ? call.args.selector.trim() : undefined
   switch (call.name) {
-    case 'browser_click': return localized(locale, `Click element [${index}]${frame}`, `点击元素 [${index}]${frame}`)
+    case 'browser_click': return selector === undefined
+      ? localized(locale, `Click element [${index}]${frame}`, `点击元素 [${index}]${frame}`)
+      : localized(locale, `Click the element matching ${safeInline(selector)}`, `点击匹配 ${safeInline(selector)} 的元素`)
     case 'browser_type': {
       const length = typeof call.args.text === 'string' ? call.args.text.length : 0
+      const where = selector === undefined ? `element [${index}]` : `the field matching ${safeInline(selector)}`
+      const whereZh = selector === undefined ? `元素 [${index}]` : `匹配 ${safeInline(selector)} 的字段`
       return localized(
         locale,
-        `Enter ${length} characters in element [${index}]${frame} (the text is not shown in this dialog)`,
-        `向元素 [${index}] 输入 ${length} 个字符${frame}（文本内容不会显示在确认框）`,
+        `Enter ${length} characters in ${where}${frame} (the text is not shown in this dialog)`,
+        `向${whereZh}输入 ${length} 个字符${frame}（文本内容不会显示在确认框）`,
       )
     }
     case 'browser_press': return localized(

@@ -31,8 +31,10 @@ import {
   BRIDGE_PATH,
   type BridgeCaps,
 } from '@yuxianglin/dsh-bridge-browser/src/protocol.ts'
-import { BridgeClient } from './bridge.ts'
-import { dispatchToolCall, resetTabSnapshot, type ToolAnswer, type ToolCall } from './tools.ts'
+import { BridgeClient, type BridgeNotice } from './bridge.ts'
+import { bridgeNotice } from './bridge-notice.ts'
+import { approvalFailureAnswer, dispatchToolCall, resetTabSnapshot, type ToolAnswer, type ToolCall } from './tools.ts'
+import { approvalPromptForCall, setActionTrustPolicy } from './authorization.ts'
 import {
   isApprovalDecision,
   type ApprovalAuthorization,
@@ -51,6 +53,14 @@ import {
 } from './tab-affinity.ts'
 import { FocusedWindowTracker } from './focused-window.ts'
 import { ApprovalCoordinator, type ApprovalRequestResult } from './approval-coordinator.ts'
+import { unboundNavigateDestination as resolveUnboundNavigateDestination } from './navigate-consent.ts'
+import { detachDevtoolsSession, isSessionAttached, primeSession } from './devtools.ts'
+import { visionAvailable } from './capture.ts'
+import { debugToolRefusal } from './debug-policy.ts'
+import { affinityFailureAnswer } from './affinity-copy.ts'
+import { isExportableGdriveUrl, parseGdriveExportUrl } from './gdrive-url.ts'
+import { waitForTabCommit } from './tab-commit.ts'
+import { clearTabRules } from './net-rules.ts'
 import {
   SETTINGS_DEFAULTS,
   SETTINGS_STORAGE_KEY,
@@ -124,6 +134,8 @@ type StoredTabAffinity =
 
 let settings: Settings = { ...SETTINGS_DEFAULTS }
 let caps: BridgeCaps | null = null
+/** Last handshake failure, cleared by the next successful handshake. */
+let handshakeNotice: BridgeNotice | null = null
 let bridge: BridgeClient | null = null
 const tabAffinity = new TabAffinityController()
 const focusedWindow = new FocusedWindowTracker()
@@ -189,6 +201,8 @@ function normalizeSettings(candidate: Settings): Settings {
     approvalNotifications: candidate.approvalNotifications !== false,
     statusMode,
     allowCrossDomainNavigation: candidate.allowCrossDomainNavigation === true,
+    allowExtensionDebug: candidate.allowExtensionDebug === true,
+    trustJsExecution: candidate.trustJsExecution === true,
     blockedOrigins: Array.isArray(candidate.blockedOrigins)
       ? [...new Set(candidate.blockedOrigins.map(normalizeTrustedOrigin).filter((entry): entry is string => entry !== undefined))].sort()
       : [],
@@ -207,12 +221,14 @@ async function loadSettings(): Promise<Settings> {
 
 async function persistSettings(next: Partial<Settings>): Promise<void> {
   settings = normalizeSettings({ ...settings, ...next })
+  setActionTrustPolicy({ trustJsExecution: settings.trustJsExecution })
   await chrome.storage.local.set({ [SETTINGS_STORAGE_KEY]: settings })
 }
 
 /** Settings load is shared by every lazy connection trigger. */
 const settingsReady = loadSettings().then((loaded) => {
   settings = loaded
+  setActionTrustPolicy({ trustJsExecution: loaded.trustJsExecution })
 })
 
 function armBridgeKeepalive(): void {
@@ -234,10 +250,20 @@ function controlledTabInfo(): ControlledTabInfo | null {
   }
 }
 
+/**
+ * Handshake problem to show the user, or null when both halves agree. A failed
+ * handshake is reported by the bridge client; an older or newer host that still
+ * talks to us is derived from the version it echoes in `hello.ok`.
+ */
+function currentBridgeNotice(): BridgeNotice | null {
+  return bridgeNotice(bridge?.state ?? 'stopped', caps, handshakeNotice)
+}
+
 function uiState(): UiState {
   return {
     bridgeState: bridge?.state ?? 'stopped',
     caps,
+    notice: currentBridgeNotice(),
     affinity: tabAffinity.snapshot(),
     controlled: controlledTabInfo(),
     pendingApprovals: [...pendingApprovals.values()],
@@ -282,13 +308,60 @@ function refreshBadge(): void {
 }
 
 function broadcastStatus(): void {
-  sendUiPush({ type: 'push.status', state: bridge?.state ?? 'stopped', caps })
+  sendUiPush({ type: 'push.status', state: bridge?.state ?? 'stopped', caps, notice: currentBridgeNotice() })
 }
 
 function broadcastTabAffinity(): void {
   sendUiPush({ type: 'push.affinity', state: tabAffinity.snapshot() })
   // Focus/bind changes switch which session's operations are shown.
   sendUiPush({ type: 'push.ops', ops: activeOps() })
+  queueDevtoolsPriming()
+}
+
+/** Bound tabs we already hold an eager debugging session for. */
+const primedTabs = new Set<number>()
+/** Upper bound on simultaneous eager sessions; one bound tab is the normal case. */
+const MAX_PRIMED_TABS = 3
+let primingQueue: Promise<void> = Promise.resolve()
+
+/**
+ * Attach the debugger to every bound tab as soon as it is bound, so console
+ * and network capture the page's own load rather than starting at the model's
+ * first read. Detaches tabs that stopped being bound, and everything when the
+ * user turns debugging off. Serialized and idempotent: affinity events are
+ * frequent, and priming must never overlap itself.
+ */
+function queueDevtoolsPriming(): void {
+  primingQueue = primingQueue.then(syncDevtoolsPriming, syncDevtoolsPriming)
+}
+
+async function syncDevtoolsPriming(): Promise<void> {
+  await affinityReady
+  const wanted = new Set<number>()
+  if (settings.allowExtensionDebug && visionAvailable()) {
+    for (const tab of Object.values(tabAffinity.sessionMap())) {
+      wanted.add(tab.tabId)
+      if (wanted.size >= MAX_PRIMED_TABS) break
+    }
+  }
+  for (const tabId of [...primedTabs]) {
+    if (wanted.has(tabId)) continue
+    primedTabs.delete(tabId)
+    await detachDevtoolsSession(tabId).catch(() => undefined)
+  }
+  for (const tabId of wanted) {
+    // The user can dismiss the debugging notice, which detaches us; a stale
+    // entry must not stop us from priming that tab again.
+    if (primedTabs.has(tabId) && isSessionAttached(tabId)) continue
+    primedTabs.delete(tabId)
+    try {
+      await primeSession(tabId)
+      primedTabs.add(tabId)
+    } catch {
+      // Best effort: DevTools holds that tab, it is a protected page, or this
+      // build has no chrome.debugger. The lazy path reports it if the model asks.
+    }
+  }
 }
 
 const APPROVAL_NOTIFICATION_PREFIX = 'dsh-browser-approval:'
@@ -513,7 +586,7 @@ async function ensureInitialTabBinding(sessionId?: string): Promise<boolean> {
     if (summary === null) return false
     // Never hand the dsh web page itself to a session: the user chats there.
     // For a URL-less first call the user should switch to the target page (or
-    // let browser_navigate open a fresh tab via bindNavigateTab).
+    // let browser_navigate open a fresh, separately approved tab).
     if (isDshPageUrl(summary.url)) return false
     if (tabAffinity.bindInitial(summary, sessionId)) {
       keepTabAlive(summary.tabId)
@@ -526,58 +599,37 @@ async function ensureInitialTabBinding(sessionId?: string): Promise<boolean> {
   }
 }
 
-function affinityFailure(kind: 'handoff' | 'lost' | 'missing'): ToolAnswer {
-  if (kind === 'handoff') {
-    return {
-      ok: false,
-      error: { code: 'action-failed', message: 'The user switched tabs, so browser operations are paused. Switch back to the controlled page and retry.' },
-    }
-  }
-  if (kind === 'lost') {
-    return {
-      ok: false,
-      error: { code: 'content-unavailable', message: 'The controlled tab was closed. Open the target page and retry.' },
-    }
-  }
-  return {
-    ok: false,
-    error: {
-      code: 'no-active-tab',
-      message: 'No bindable page is available: switch to the target tab, or ask the agent to open a URL first.',
-    },
-  }
-}
 
 /** Resolve one stable tab target without allowing a manual switch to drift it. */
 async function resolveToolTab(sessionId?: string): Promise<Pick<chrome.tabs.Tab, 'id' | 'url' | 'windowId'> | ToolAnswer> {
   await affinityReady
   for (let attempt = 0; attempt < 3; attempt += 1) {
     const resolution = tabAffinity.resolveTarget(sessionId)
-    if (resolution.kind === 'handoff') return affinityFailure('handoff')
+    if (resolution.kind === 'handoff') return affinityFailureAnswer('handoff')
     if (resolution.kind === 'lost') {
       // A session-scoped call with no binding yet auto-binds the page the
       // user is currently viewing (pure-tool bridge has no chat prompt to
       // bind on). A previously bound tab that was closed re-binds on the
       // next call; failing that, report the tab as unavailable.
       if (sessionId !== undefined && sessionId.trim() !== '') {
-        if (!await ensureInitialTabBinding(sessionId)) return affinityFailure('missing')
+        if (!await ensureInitialTabBinding(sessionId)) return affinityFailureAnswer('missing')
         continue
       }
-      return affinityFailure('lost')
+      return affinityFailureAnswer('lost')
     }
     if (resolution.kind === 'initial') {
-      if (!await ensureInitialTabBinding(sessionId)) return affinityFailure('missing')
+      if (!await ensureInitialTabBinding(sessionId)) return affinityFailureAnswer('missing')
       continue
     }
     try {
       const tab = await chrome.tabs.get(resolution.tab.tabId)
       const summary = summarizeTab(tab)
-      if (summary === null) return affinityFailure('missing')
+      if (summary === null) return affinityFailureAnswer('missing')
       keepTabAlive(summary.tabId)
       if (tabAffinity.observeTab(summary)) broadcastTabAffinity()
       const current = tabAffinity.resolveTarget(sessionId)
-      if (current.kind === 'handoff') return affinityFailure('handoff')
-      if (current.kind === 'lost') return affinityFailure('lost')
+      if (current.kind === 'handoff') return affinityFailureAnswer('handoff')
+      if (current.kind === 'lost') return affinityFailureAnswer('lost')
       if (current.kind === 'target' && current.tab.tabId === summary.tabId) return tab
     } catch {
       const affectedSessions = tabAffinity.sessionIdsForTab(resolution.tab.tabId)
@@ -586,10 +638,10 @@ async function resolveToolTab(sessionId?: string): Promise<Pick<chrome.tabs.Tab,
         persistTabAffinity()
         broadcastTabAffinity()
       }
-      return affinityFailure('lost')
+      return affinityFailureAnswer('lost')
     }
   }
-  return affinityFailure('handoff')
+  return affinityFailureAnswer('handoff')
 }
 
 async function authorizeToolCall(
@@ -625,6 +677,61 @@ async function authorizeToolCall(
   return decision === 'allow-once' ? 'approved' : 'denied'
 }
 
+/** Window an approval may anchor to when no controlled tab exists yet. */
+async function approvalAnchorWindowId(): Promise<number> {
+  try {
+    const window = await chrome.windows.getLastFocused()
+    if (window.id !== undefined) return window.id
+  } catch {
+    // Fall through to Chrome's own current-window sentinel.
+  }
+  return chrome.windows.WINDOW_ID_CURRENT
+}
+
+/**
+ * Consent + open for an unbound session's first navigate.
+ *
+ * The destination is approved first and the tab is created only after approval,
+ * so a denied or unanswered call issues no request at all. Returns undefined
+ * when the call is not that case, leaving the bound-tab path to handle it.
+ *
+ * @param call - the tool call under dispatch.
+ * @param authorize - approval bridge supplied by the caller (UI + trust policy).
+ * @returns the settled answer when this path handled the call, else undefined.
+ */
+async function authorizeUnboundNavigate(
+  call: ToolCall,
+  authorize: (prompt: ApprovalPrompt) => Promise<ApprovalAuthorization>,
+): Promise<ToolAnswer | undefined> {
+  const destination = unboundNavigateDestination(call)
+  if (destination === undefined) return undefined
+  const sessionId = call.sessionId
+  if (sessionId === undefined || sessionId.trim() === '') return undefined
+  const policyFailure = destinationPolicyFailure(destination.href)
+  if (policyFailure !== undefined) return policyFailure
+  const prompt = approvalPromptForCall(call, settings.sharePageContent, [])
+  if (prompt === undefined) return undefined
+  const authorization = await authorize(prompt)
+  if (authorization !== 'approved') return approvalFailureAnswer(prompt, authorization)
+  const opened = await openBoundTab(sessionId, destination)
+  if (!opened) {
+    return {
+      ok: false,
+      error: {
+        code: 'no-active-tab',
+        message: `Approved navigation to ${destination.href}, but the new tab could not be opened or bound. Retry the call.`,
+      },
+    }
+  }
+  return {
+    ok: true,
+    result: {
+      text: `Navigating to ${destination.href} in a new tab. The new tab has started loading; `
+        + 'call browser_snapshot (or browser_wait) to read it once it has rendered.',
+    },
+  }
+}
+
 /** 把协商的快照预算下发到受控页（尚未绑定时使用活动页）。 */
 async function pushBudgetToControlledTab(negotiated: BridgeCaps): Promise<void> {
   await affinityReady
@@ -651,22 +758,36 @@ async function pushBudgetToControlledTab(negotiated: BridgeCaps): Promise<void> 
  * whatever page happens to be active — in particular the dsh web chat page.
  * The session is bound to the fresh tab, so later calls operate it even in
  * the background.
+ *
+ * Consent ordering: the destination is approved BEFORE the tab exists. The
+ * earlier shape created the tab first, which meant a denied or unanswered
+ * navigate still loaded the URL — a real request the user never authorized.
  */
-async function bindNavigateTab(call: ToolCall): Promise<boolean> {
+
+/** The http(s) destination of an unbound-session navigate, or undefined when this is not that case. */
+function unboundNavigateDestination(call: ToolCall): URL | undefined {
   const sessionId = call.sessionId
-  if (sessionId === undefined || sessionId.trim() === '' || call.name !== 'browser_navigate') return false
-  const bound = tabAffinity.getSessionTab(sessionId)
-  if (bound !== undefined && !isDshPageUrl(bound.url)) return false
-  const url = typeof call.args?.url === 'string' ? call.args.url : ''
-  let target: URL
-  try {
-    target = new URL(url)
-  } catch {
-    return false
-  }
-  if (target.protocol !== 'http:' && target.protocol !== 'https:') return false
-  const tab = await chrome.tabs.create({ url: target.href, active: true })
-  const summary = summarizeTab(tab)
+  const bound = sessionId === undefined ? undefined : tabAffinity.getSessionTab(sessionId)
+  return resolveUnboundNavigateDestination(
+    {
+      name: call.name,
+      ...sessionId === undefined ? {} : { sessionId },
+      args: call.args,
+      ...bound === undefined ? {} : { boundUrl: bound.url },
+    },
+    isDshPageUrl,
+  )
+}
+
+/** Open the destination in a fresh tab and bind the session to it. */
+async function openBoundTab(sessionId: string, destination: URL): Promise<boolean> {
+  const created = await chrome.tabs.create({ url: destination.href, active: true })
+  // `create` resolves before the destination commits: binding that snapshot
+  // leaves the session pointing at an empty URL, and the next tool call fails
+  // with "this page does not support browser operations". Wait for the commit,
+  // falling back to the create-time snapshot if the tab is slow or closed.
+  const committed = created.id === undefined ? undefined : await waitForTabCommit(created.id)
+  const summary = summarizeTab(committed ?? created)
   if (summary === null) return false
   await affinityReady
   if (tabAffinity.hasBinding(sessionId)) return true
@@ -700,6 +821,15 @@ function recordOpStart(call: ToolCall): void {
   if (opVisible(op)) sendUiPush({ type: 'push.op', op })
 }
 
+/** Attach what the page resolved for an operation, so the feed can name it. */
+function labelOp(id: string, label: string): void {
+  const index = recentOps.findIndex((op) => op.id === id)
+  if (index === -1) return
+  const op = { ...recentOps[index]!, label }
+  recentOps = [op, ...recentOps.filter((o) => o.id !== id)].slice(0, RECENT_OPS_MAX)
+  if (opVisible(op)) sendUiPush({ type: 'push.op', op })
+}
+
 function settleOp(id: string, state: RecentOp['state']): void {
   const index = recentOps.findIndex((op) => op.id === id)
   if (index === -1) return
@@ -727,24 +857,47 @@ function hostnameOf(url: string): string | undefined {
   }
 }
 
+/** Whether this URL is a Google Doc/Sheet that the export path owns. */
 function isDriveFileUrl(value: string): boolean {
-  return !('error' in parseGdriveUrl(value))
+  return isExportableGdriveUrl(value)
 }
 
 /** Settings-policy guard: blocked list, Drive-file routing, cross-host navigation. */
+/** Refuse an origin the user blocked, whatever operation is about to touch it. */
+function blockedOriginFailure(url: string): ToolAnswer | undefined {
+  const origin = originOfUrl(url)
+  if (origin !== undefined && originMatchesTrusted(origin, settings.blockedOrigins)) {
+    return { ok: false, error: { code: 'action-failed', message: `Operations on ${origin} are blocked in Settings (blocked list).` } }
+  }
+  return undefined
+}
+
+/**
+ * Destination-only navigation policy: blocked origins, and Google Docs/Sheets
+ * that this bridge exports rather than opens, are decided before any consent
+ * prompt or tab creation. Slides and Drive files are ordinary pages here.
+ */
+function destinationPolicyFailure(destinationUrl: string): ToolAnswer | undefined {
+  const blocked = blockedOriginFailure(destinationUrl)
+  if (blocked !== undefined) return blocked
+  if (isDriveFileUrl(destinationUrl)) {
+    return {
+      ok: false,
+      error: {
+        code: 'action-failed',
+        message: 'This is a Google Doc or Sheet, which this bridge exports instead of opening: read it with google_drive_export. '
+          + '(Slides and Drive files are ordinary pages — navigate to those and read them with the page tools.)',
+      },
+    }
+  }
+  return undefined
+}
+
 function operationGuard(call: ToolCall, tab: { url?: string }): ToolAnswer | undefined {
   if (call.name === 'browser_navigate') {
     const destinationUrl = typeof call.args?.url === 'string' ? call.args.url : ''
-    const destinationOrigin = originOfUrl(destinationUrl)
-    if (destinationOrigin !== undefined && originMatchesTrusted(destinationOrigin, settings.blockedOrigins)) {
-      return { ok: false, error: { code: 'action-failed', message: `Navigation to ${destinationOrigin} is blocked in Settings (blocked list).` } }
-    }
-    if (isDriveFileUrl(destinationUrl)) {
-      return {
-        ok: false,
-        error: { code: 'action-failed', message: 'This looks like a Google Drive file. Read it with google_drive_export instead of navigating to the page.' },
-      }
-    }
+    const destinationFailure = destinationPolicyFailure(destinationUrl)
+    if (destinationFailure !== undefined) return destinationFailure
     // Default policy: stay on the host of the currently bound page. Initial
     // navigation (new-tab binding) and explicit "bind to the page" are the
     // supported ways to switch; same domain with another host (e.g. another
@@ -771,7 +924,11 @@ function operationGuard(call: ToolCall, tab: { url?: string }): ToolAnswer | und
   if (isDriveFileUrl(pageUrl)) {
     return {
       ok: false,
-      error: { code: 'action-failed', message: 'This page is a Google Drive file. Read it with google_drive_export using its URL instead of page tools.' },
+      error: {
+        code: 'action-failed',
+        message: 'This page is a Google Doc or Sheet. Read it with google_drive_export using its URL instead of page tools. '
+          + '(Slides and Drive files are read with the page tools.)',
+      },
     }
   }
   return undefined
@@ -890,79 +1047,40 @@ function isBindableTabUrl(url: string | undefined): boolean {
   return url !== undefined && /^https?:/i.test(url) && !isDshPageUrl(url)
 }
 
-type GdriveKind = 'docs' | 'sheets' | 'slides' | 'drive'
-
-interface GdriveTarget {
-  kind: GdriveKind
-  id: string
-  exportUrl: string
-  binary: boolean
-}
-
-function parseGdriveUrl(value: string): GdriveTarget | { error: string } {
-  let url: URL
-  try { url = new URL(value) } catch { return { error: 'Invalid URL' } }
-  const host = url.hostname.toLowerCase()
-  if (host !== 'docs.google.com' && host !== 'drive.google.com' && host !== 'spreadsheets.google.com') {
-    return { error: 'Only google drive domains are supported' }
+/**
+ * Consent for a background-answered call runs through the same gate as a page
+ * action: trust (session or persistent) short-circuits it, and a decision,
+ * denial, timeout, or missing panel settles with the standard answer.
+ *
+ * @returns undefined when the call may proceed, else the settled answer.
+ */
+async function virtualToolGate(call: ToolCall, controller: AbortController): Promise<ToolAnswer | undefined> {
+  const url = typeof call.args?.url === 'string' ? call.args.url : ''
+  const blocked = blockedOriginFailure(url)
+  if (blocked !== undefined) return blocked
+  const prompt = approvalPromptForCall(call, settings.sharePageContent, [])
+  if (prompt === undefined) return undefined
+  settleOp(call.id, 'waiting')
+  const authorization = await authorizeToolCall(prompt, controller.signal, await approvalAnchorWindowId(), call.sessionId)
+  if (authorization === 'approved') {
+    settleOp(call.id, 'running')
+    return undefined
   }
-  const id = (pattern: RegExp): string | undefined => pattern.exec(url.pathname)?.[1]
-  const doc = id(/\/document\/d\/([^/?#]+)/)
-  if (doc !== undefined) return { kind: 'docs', id: doc, exportUrl: `https://docs.google.com/document/d/${doc}/export?format=md`, binary: false }
-  const sheet = id(/\/spreadsheets\/d\/([^/?#]+)/)
-  if (sheet !== undefined) return { kind: 'sheets', id: sheet, exportUrl: `https://docs.google.com/spreadsheets/d/${sheet}/export?format=xlsx`, binary: true }
-  const slide = id(/\/presentation\/d\/([^/?#]+)/)
-  if (slide !== undefined) return { kind: 'slides', id: slide, exportUrl: `https://docs.google.com/presentation/d/${slide}/export?format=pptx`, binary: true }
-  const drive = id(/\/file\/d\/([^/?#]+)/)
-  if (drive !== undefined) return { kind: 'drive', id: drive, exportUrl: `https://drive.google.com/uc?export=download&id=${drive}`, binary: true }
-  return { error: 'Could not find a file id in that Google Drive URL' }
+  return approvalFailureAnswer(prompt, authorization)
 }
 
-/** Ask the user once per origin before exporting their Drive content. */
-async function ensureGdriveConsent(url: string, signal: AbortSignal): Promise<{ ok: boolean; error?: string }> {
-  const origin = originOfUrl(url)
-  if (origin !== undefined && originMatchesTrusted(origin, settings.trustedActionOrigins)) return { ok: true }
-  const win = await chrome.windows.getLastFocused().catch(() => undefined)
-  const windowId = win?.id ?? 0
-  const result = await approvals.request(
-    {
-      kind: 'action',
-      action: 'gdrive.fetch',
-      summary: `Export content from Google Drive: ${url}`,
-      origins: origin === undefined ? [] : [origin],
-      canTrust: origin !== undefined,
-    },
-    signal,
-    windowId,
-    undefined,
-  )
-  if (signal.aborted) return { ok: false, error: 'The export request was cancelled' }
-  if (result.status !== 'decision') return { ok: false, error: `Export not approved (${result.status})` }
-  if (result.decision === 'allow-once' || result.decision === 'trust-origin' || result.decision === 'trust-session') {
-    if (origin !== undefined && result.decision === 'trust-origin') {
-      await persistSettings({ trustedActionOrigins: [...settings.trustedActionOrigins, origin] })
-    }
-    return { ok: true }
-  }
-  return { ok: false, error: 'The export was denied' }
-}
-
-/** Fetch one Drive export with the user's logged-in session. */
+/** Fetch one Drive export with the user's logged-in session (already approved by the caller). */
 async function gdriveFetch(call: ToolCall, signal: AbortSignal): Promise<ToolAnswer> {
   const url = typeof call.args?.url === 'string' ? call.args.url : ''
   if (url.trim() === '') {
     return { ok: false, error: { code: 'bad-args', message: 'gdrive.fetch requires a url argument' } }
   }
-  const consent = await ensureGdriveConsent(url, signal)
-  if (!consent.ok) {
-    return { ok: false, error: { code: 'action-failed', message: consent.error ?? 'Export was not approved' } }
-  }
-  const target = parseGdriveUrl(url)
+  const target = parseGdriveExportUrl(url)
   if ('error' in target) {
     return { ok: false, error: { code: 'bad-args', message: target.error } }
   }
   const requestedFormat = typeof call.args?.format === 'string' ? call.args.format : undefined
-  const ext = requestedFormat === 'html' ? 'html' : target.kind === 'docs' ? 'md' : target.kind === 'sheets' ? 'xlsx' : target.kind === 'slides' ? 'pptx' : 'bin'
+  const ext = requestedFormat === 'html' ? 'html' : target.kind === 'docs' ? 'md' : 'xlsx'
   const downloadUrl = target.kind === 'docs'
     ? `https://docs.google.com/document/d/${target.id}/export?format=${ext}`
     : target.exportUrl
@@ -1050,7 +1168,9 @@ function routeToolCall(call: ToolCall): void {
     void (async () => {
       let answer: ToolAnswer
       try {
-        answer = await handleVirtualTool(call, controller.signal)
+        // Gated virtual actions (Drive export) take consent before their
+        // download; trust short-circuits exactly as it does for page actions.
+        answer = await virtualToolGate(call, controller) ?? await handleVirtualTool(call, controller.signal)
       } catch (error: unknown) {
         answer = { ok: false, error: { code: 'internal', message: error instanceof Error ? error.message : String(error) } }
       }
@@ -1077,8 +1197,15 @@ function routeToolCall(call: ToolCall): void {
     return
   }
   void Promise.resolve()
-    .then(() => bindNavigateTab(call))
-    .then(() => resolveToolTab(call.sessionId))
+    // Consent comes before any request leaves the browser: an unapproved
+    // first navigate must not load its destination.
+    .then(() => authorizeUnboundNavigate(call, async (prompt) => {
+      settleOp(call.id, 'waiting')
+      const authorization = await authorizeToolCall(prompt, controller.signal, await approvalAnchorWindowId(), call.sessionId)
+      if (authorization === 'approved') settleOp(call.id, 'running')
+      return authorization
+    }))
+    .then((early) => early ?? debugToolRefusal(call.name, settings.allowExtensionDebug) ?? resolveToolTab(call.sessionId))
     .then((target) => 'ok' in target
     ? target
     : (operationGuard(call, target as { url?: string }) ?? dispatchToolCall(
@@ -1111,6 +1238,10 @@ function routeToolCall(call: ToolCall): void {
       const socket = bridge
       if (socket === null) return
       if (answer.ok) {
+        if (typeof answer.result === 'object' && answer.result !== null) {
+          const label = (answer.result as { label?: unknown }).label
+          if (typeof label === 'string' && label.trim() !== '') labelOp(call.id, label)
+        }
         settleOp(call.id, 'done')
         socket.send({ t: 'tool.result', id: call.id, ok: true, result: answer.result })
       } else {
@@ -1194,7 +1325,15 @@ async function startBridge(): Promise<void> {
         broadcastStatus()
         void pushBudgetToControlledTab(negotiated)
       },
-    }, probeBridge)
+      onNotice: (notice) => {
+        handshakeNotice = notice
+        broadcastStatus()
+      },
+    },
+    probeBridge,
+    // Read at handshake time, so flipping the setting reaches the host on the
+    // reconnect the settings handler triggers.
+    () => settings.allowExtensionDebug)
     bridge = client
   }
   bridge.start(url, settings.token)
@@ -1216,11 +1355,19 @@ chrome.runtime.onMessage.addListener((message: unknown, _sender, sendResponse) =
       const patch = (message as { patch?: unknown }).patch
       if (typeof patch !== 'object' || patch === null || Array.isArray(patch)) return
       void settingsReady.then(async () => {
-        const previousConnection = { bridgeUrl: settings.bridgeUrl, token: settings.token }
+        const previousConnection = {
+          bridgeUrl: settings.bridgeUrl,
+          token: settings.token,
+          allowExtensionDebug: settings.allowExtensionDebug,
+        }
         const next = await persistSettings(patch as Partial<Settings>)
         const connectionChanged = settings.bridgeUrl !== previousConnection.bridgeUrl
           || settings.token !== previousConnection.token
+          // The capability travels in `hello`, so a flip needs a fresh handshake.
+          || settings.allowExtensionDebug !== previousConnection.allowExtensionDebug
         if (connectionChanged) restartBridge()
+        // Turning debugging off must release the eager sessions it allowed.
+        queueDevtoolsPriming()
         sendResponse(next)
       })
       return true
@@ -1334,6 +1481,10 @@ chrome.tabs.onReplaced.addListener((addedTabId, removedTabId) => {
 })
 
 chrome.tabs.onRemoved.addListener((tabId) => {
+  // Debugging sessions and their rules belong to the tab; drop both with it.
+  primedTabs.delete(tabId)
+  void detachDevtoolsSession(tabId)
+  void clearTabRules(tabId).catch(() => undefined)
   void affinityReady.then(() => {
     const affectedSessions = tabAffinity.sessionIdsForTab(tabId)
     if (!tabAffinity.removeTab(tabId)) return

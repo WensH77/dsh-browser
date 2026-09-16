@@ -24,8 +24,10 @@ import { WebSocket, WebSocketServer } from 'ws'
 import {
   BRIDGE_GDRIVE_MOVE_METHOD,
   BRIDGE_OPEN_GDRIVE_FOLDER_METHOD,
+  HANDSHAKE_MISMATCH_CLOSE_CODE,
   HELLO_TIMEOUT_MS,
   PING_INTERVAL_MS,
+  handshakeRefusal,
   parseBridgeFrame,
   type BridgeFrame,
   type BridgeCaps,
@@ -72,6 +74,12 @@ export interface BridgeServerDeps {
   helloTimeoutMs?: number
   /** Server ping cadence; defaults to PING_INTERVAL_MS. */
   pingIntervalMs?: number
+  /**
+   * Called whenever the connected extension's capabilities change — on hello,
+   * on replacement, and on disconnect (undefined). The tool registry uses it to
+   * expose debugging tools only while a connection allows them.
+   */
+  onCapabilities?: (caps: BridgeCaps | undefined) => void
 }
 
 /** One in-flight tool call awaiting the extension's `tool.result`. */
@@ -114,6 +122,9 @@ export function messageToText(data: Buffer | ArrayBuffer | Buffer[]): string {
 export class BridgeServer {
   private readonly wss = new WebSocketServer({ noServer: true })
   private current: ReadyConnection | null = null
+
+  /** Capabilities the connected extension reported in its last `hello`. */
+  private clientCaps: BridgeCaps | undefined
   private readonly pendingTools = new Map<string, PendingTool>()
   private closed = false
 
@@ -266,9 +277,20 @@ export class BridgeServer {
           ws.close(4002, 'bad token')
           return
         }
+        // An extension built after this plugin cannot be served: it may rely on
+        // frame or argument shapes this build does not know. Refuse with a
+        // reason the extension surfaces verbatim, instead of accepting and
+        // failing later with an unreadable error.
+        const refusal = handshakeRefusal(frame.caps)
+        if (refusal !== undefined) {
+          clearTimeout(helloTimer)
+          helloTimer = undefined
+          ws.close(HANDSHAKE_MISMATCH_CLOSE_CODE, refusal)
+          return
+        }
         clearTimeout(helloTimer)
         helloTimer = undefined
-        this.promote(ws)
+        this.promote(ws, frame.caps)
         return
       }
       this.handleReadyFrame(frame)
@@ -283,14 +305,27 @@ export class BridgeServer {
   }
 
   /** Promote an authenticated socket to the single active slot. */
-  private promote(ws: WebSocket): void {
+  private promote(ws: WebSocket, clientCaps: BridgeCaps): void {
     this.replaceConnection()
     const ping = setInterval(() => { sendFrame(ws, { t: 'ping' }) }, this.deps.pingIntervalMs ?? PING_INTERVAL_MS)
     this.current = { ws, ping }
+    this.clientCaps = clientCaps
+    this.deps.onCapabilities?.(clientCaps)
     sendFrame(ws, { t: 'hello.ok', caps: this.deps.caps })
     ws.once('close', () => {
       clearInterval(ping)
     })
+  }
+
+  /**
+   * Whether the connected extension allows browser-debugging capabilities.
+   * False when nothing is connected, when the user left the setting off
+   * (the default), or when the build has no `chrome.debugger`.
+   *
+   * @returns true when debugging tools may be exposed and used.
+   */
+  clientDebugger(): boolean {
+    return this.clientCaps?.debugger === true
   }
 
   private handleReadyFrame(frame: BridgeFrame): void {
@@ -372,6 +407,9 @@ export class BridgeServer {
 
   /** Close the current connection (if any) and settle its in-flight calls. */
   private replaceConnection(): void {
+    const hadCaps = this.clientCaps !== undefined
+    this.clientCaps = undefined
+    if (hadCaps) this.deps.onCapabilities?.(undefined)
     const conn = this.current
     if (conn === null) return
     this.current = null

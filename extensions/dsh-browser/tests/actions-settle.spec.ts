@@ -95,7 +95,7 @@ describe('navigation action responses', () => {
     await expect(runAction('browser_click', { index: 1 }, {
       ids,
       budget: { maxItems: 20, maxForms: 10, maxChars: 2_000 },
-    })).resolves.toEqual({ text: expect.stringContaining('outside the controlled frame') })
+    })).resolves.toMatchObject({ text: expect.stringContaining('outside the controlled frame') })
 
     await vi.advanceTimersByTimeAsync(0)
     expect(link.click).toHaveBeenCalledOnce()

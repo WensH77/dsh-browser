@@ -14,7 +14,9 @@
     "webNavigation",
     "downloads",
     "alarms",
-    "notifications"
+    "notifications",
+    "debugger",
+    "declarativeNetRequestWithHostAccess"
   ],
   "host_permissions": [
     "http://*/*",
