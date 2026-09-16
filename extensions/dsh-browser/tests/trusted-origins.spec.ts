@@ -74,6 +74,13 @@ describe('actionCoveredByTrustedOrigins', () => {
     }), trusted)).toBe(true)
   })
 
+  it('covers a trusted document host for Drive exports', () => {
+    const exportPrompt = action({ action: 'gdrive.fetch', origins: ['https://docs.google.com'] })
+
+    expect(actionCoveredByTrustedOrigins(exportPrompt, ['https://docs.google.com'])).toBe(true)
+    expect(actionCoveredByTrustedOrigins(exportPrompt, ['https://drive.google.com'])).toBe(false)
+  })
+
   it('fails closed for history and invalid navigation with unknown destinations', () => {
     expect(actionCoveredByTrustedOrigins(action({
       action: 'browser_back',

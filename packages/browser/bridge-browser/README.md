@@ -2,9 +2,9 @@
 
 English | [中文](README.zh.md)
 
-The **pure browser-tool bridge** for dsh: mounts a token-authenticated WebSocket carrier (`/ext/bridge`) that the Chrome extension connects to, and registers the text-only `browser_*` tool set that reads and operates the user's active tab through the extension — click elements, fill forms, scroll, and navigate in the real browser, login state preserved. The bridge carries **only tool frames**: no chat, settings, credentials, or event streams pass through it, so dsh's gateway can keep evolving without touching this contract. Chat and sessions belong to standard dsh clients (web GUI / CLI); the extension side is a status view plus options/approval popups.
+The **pure browser-tool bridge** for dsh: mounts a token-authenticated WebSocket carrier (`/ext/bridge`) that the Chrome extension connects to, and registers the `browser_*` tool set that reads and operates the user's active tab through the extension — click elements, fill forms, scroll, and navigate in the real browser, login state preserved. The bridge carries **only tool frames**: no chat, settings, credentials, or event streams pass through it, so dsh's gateway can keep evolving without touching this contract. Chat and sessions belong to standard dsh clients (web GUI / CLI); the extension side is a status view plus options/approval popups.
 
-**Text-only by design**: page snapshots stay structured text (title, main content, numbered interactive inventory, and masked form fields), and every browser action uses stable inventory numbers. DeepSeek models have no vision, so nothing here is an image.
+**Text first, vision on request**: page snapshots stay structured text (title, main content, numbered interactive inventory, and masked form fields), and every browser action uses stable inventory numbers. `browser_snapshot` additionally returns a screenshot of the same moment and `browser_capture` returns one on demand — only when the calling model route declares image input, and only as an in-memory image attachment: the extension never writes a screenshot to disk.
 
 ## Config
 
@@ -58,18 +58,27 @@ Frames are JSON objects discriminated by `t`, defined in [`protocol.ts`](src/pro
 
 `tool.call` carries a stable id the extension echoes back on its `tool.result`; `expiresAt` lets a stale call settle as `timeout`. The bridge is a request/response channel only — once auth completes, no event frames flow.
 
+Both halves negotiate versions in `hello`/`hello.ok`: `proto` is the handshake version (a build that sends none reads as 1) and `toolset` is the extension's feature level (none = 0). A host that cannot serve a newer extension closes with code `4003` and a reason the extension shows verbatim; an extension that declares an older level gets a narrowed tool surface (no `browser_dom_query`/`browser_block`/`browser_headers`, and `browser_click`/`browser_type` without `selector`) instead of argument errors at call time. The extension shows the same skew in its options page and side panel, naming the fix (restart dsh, or reload the extension).
+
 ## Tools
 
 | Tool | Purpose |
 |---|---|
-| `browser_snapshot` | Structured text snapshot (title/URL/main/inventory/forms); `delta: true` returns only changes. |
-| `browser_click` / `browser_type` / `browser_press` | Operate inventory items by stable index. |
+| `browser_snapshot` | Structured text snapshot (title/URL/main/inventory/forms); `delta: true` returns only changes; pairs the text with a same-moment screenshot unless `visual: false`. |
+| `browser_capture` | Screenshot of the viewport (`fullPage: true` for the whole page) as an image block; kept in memory, never written to disk. |
+| `browser_click` / `browser_type` / `browser_press` | Operate inventory items by stable index; click and type also accept a CSS `selector` for controls the inventory cannot name (icon-only buttons). |
 | `browser_scroll` / `browser_navigate` / `browser_back` / `browser_forward` / `browser_reload` | Page movement. |
-| `browser_get_text` / `browser_wait` | Read regions / settle detection. |
+| `browser_get_text` / `browser_wait` | Read regions / settle detection. `find` (+ `context`) locates a phrase in the whole scope and returns a bounded window per match, so one call answers "what does this part say" without scripting the DOM. |
+| `browser_dom_query` | Narrow DOM read: fields of the elements a CSS selector matches, each with a verified unique selector. |
+| `browser_console` / `browser_network` | Console messages and uncaught errors; request list, one response body by id, and in-memory response overrides. |
+| `browser_dialog` | Accept or dismiss the page's JavaScript dialog — the escape hatch when a page is frozen behind an `alert`/`confirm`. |
+| `browser_eval` | Evaluate an expression in the page's own context (page CSP does not block it). |
+| `google_drive_export` | Export a Google Doc (`/document/d/…`) or Sheet (`/spreadsheets/d/…`) with the signed-in session; every other Google link is read in the browser instead. |
+| `browser_block` / `browser_headers` | Block matching requests, or rewrite request/response headers; session rules scoped to the controlled tab. |
 
 ## Model Experience
 
-- **Token effect**: one `browser_snapshot` (default 32k chars) costs roughly 8–10k tokens for typical English text; the exact count depends on language and tokenizer, and delta snapshots cost a fraction of that. The system-prompt section tells the model to snapshot on demand rather than hoard page text.
+- **Token effect**: one `browser_snapshot` (default 32k chars) costs roughly 8–10k tokens for typical English text, plus one image; the exact count depends on language and tokenizer, and delta snapshots cost a fraction of that. Pass `visual: false` on text-only follow-up reads, and prefer `browser_capture` over a full snapshot when only the appearance matters. The system-prompt section tells the model to snapshot on demand rather than hoard page text.
 - **KV-cache effect**: none beyond ordinary tool results; snapshots are not cached server-side.
 - **Latency**: each action awaits the extension's real-page execution plus settle detection (typically 0.2–2s; navigation up to 5s).
 - **Failure modes**: `bridge-closed` (extension not connected), `timeout`, `no-active-tab`, `content-unavailable` (page needs a refresh), `action-failed` (stale inventory index — the model should re-snapshot).
@@ -84,5 +93,4 @@ Frames are JSON objects discriminated by `t`, defined in [`protocol.ts`](src/pro
 - One active extension connection (a second window replaces the first).
 - Accessible cross-origin iframes are snapshotted and operated with stable `(frame, index)` addresses. Restricted or short-lived frames are reported as unavailable without failing the whole page snapshot.
 - Token rotation is manual (edit `~/.dsh/ext-bridge-token` or set `token` in config); no expiry.
-- The Playwright-driven extension e2e self-skips without a usable Chromium executable or a built extension bundle.
 - Approval is enforced in the extension service worker rather than delegated to model behavior. A future dsh tool-pipeline integration may surface the same policy in other clients.

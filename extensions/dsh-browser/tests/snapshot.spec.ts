@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { describe, expect, it, vi } from 'vitest'
 import { ElementIds } from '../src/content/ids.ts'
-import { buildSnapshot, renderSnapshot, type SnapshotBudget } from '../src/content/snapshot.ts'
+import { buildSnapshot, renderSnapshot, uniqueSelector, type SnapshotBudget } from '../src/content/snapshot.ts'
 
 const BUDGET: SnapshotBudget = { maxItems: 10, maxForms: 5, maxChars: 4_000 }
 
@@ -135,5 +135,130 @@ describe('buildSnapshot', () => {
     const view = buildSnapshot(ids, { region: '#content', budget: BUDGET }, null)
     expect(view.main).toContain('主体内容区')
     expect(view.main).not.toContain('侧边栏内容')
+  })
+})
+
+describe('inventory ranking', () => {
+  it('keeps content controls when chrome would exhaust the item budget', async () => {
+    document.body.innerHTML = [
+      '<nav>',
+      ...Array.from({ length: 8 }, (_, i) => `<a href="/nav-${i}">Nav ${i}</a>`),
+      '</nav>',
+      '<main><button>Email Specialists</button></main>',
+    ].join('')
+    document.querySelectorAll('a').forEach((link) => {
+      link.scrollIntoView = () => {}
+    })
+    const budget = { maxItems: 3, maxForms: 5, maxChars: 8_000 }
+
+    const view = buildSnapshot(new ElementIds(), { delta: false, budget }, null)
+    const names = view.items.map((item) => item.name)
+
+    expect(names).toContain('Email Specialists')
+  })
+})
+
+describe('omitted controls', () => {
+  it('lists dropped controls with a selector that actually resolves', () => {
+    document.body.innerHTML = [
+      '<main>',
+      '<button>One</button>',
+      '<button>Two</button>',
+      '<i class="icon-specialist-email" role="button" title="Email Specialists"></i>',
+      '</main>',
+    ].join('')
+    const ids = new ElementIds()
+
+    const view = buildSnapshot(ids, { budget: { maxItems: 2, maxForms: 5, maxChars: 8_000 } }, null)
+
+    expect(view.truncated.itemsDropped).toBeGreaterThan(0)
+    expect(view.omitted.length).toBeGreaterThan(0)
+    for (const entry of view.omitted) {
+      // Every advertised selector must be unique and resolve to a real element.
+      expect(document.querySelectorAll(entry.selector)).toHaveLength(1)
+    }
+    expect(view.omitted.some((entry) => entry.name === 'Email Specialists')).toBe(true)
+  })
+
+  it('says the inventory is capped, and points at selectors rather than only more text', () => {
+    document.body.innerHTML = ['<main>', ...Array.from({ length: 4 }, (_, i) => `<button>B${i}</button>`), '</main>'].join('')
+    const ids = new ElementIds()
+    const budget = { maxItems: 2, maxForms: 5, maxChars: 8_000 }
+
+    const text = renderSnapshot(buildSnapshot(ids, { budget }, null), false, 8_000)
+
+    expect(text).toContain('Omitted by the inventory cap')
+    expect(text).toContain('capped at 2 numbered items')
+    expect(text).toContain('selector:')
+  })
+})
+
+describe('uniqueSelector', () => {
+  it('addresses SVG controls, whose className is not a string', () => {
+    // Slides filmstrip thumbnails are <g> elements: reading `className` as a
+    // string drops every class, so no handle could be produced for them.
+    document.body.innerHTML = '<svg><g class="thumb"><text>9</text></g><g class="thumb"><text>10</text></g></svg>'
+    const second = document.querySelectorAll('g')[1]!
+
+    const selector = uniqueSelector(second)
+
+    expect(selector).toBeDefined()
+    expect(document.querySelectorAll(selector!)).toHaveLength(1)
+    expect(document.querySelector(selector!)).toBe(second)
+  })
+})
+
+describe('unchanged chrome', () => {
+  const budget = { maxItems: 20, maxForms: 10, maxChars: 8_000 }
+  const page = (extraNav: string): string => [
+    '<nav>',
+    '<a href="/dash">Dashboard</a>',
+    '<a href="/experts">Specialists</a>',
+    extraNav,
+    '</nav>',
+    '<main><button>Send profile</button></main>',
+  ].join('')
+
+  it('omits chrome that did not change, keeping its indices valid', () => {
+    document.body.innerHTML = page('')
+    const ids = new ElementIds()
+
+    const first = buildSnapshot(ids, { budget }, null)
+    expect(first.collapsedChrome).toBeUndefined()
+    const firstText = renderSnapshot(first, false, 8_000)
+    expect(firstText).toContain('Dashboard')
+
+    const second = buildSnapshot(ids, { budget }, first)
+    expect(second.collapsedChrome).toEqual({ count: 2, sinceVersion: first.version })
+    const secondText = renderSnapshot(second, false, 8_000)
+    expect(secondText).not.toContain('Dashboard')
+    expect(secondText).toContain('2 unchanged nav/header/footer items')
+    expect(secondText).toContain('browser_dom_query returns their selectors')
+    // Content is still listed in full.
+    expect(secondText).toContain('Send profile')
+    // Indices are unchanged, so an old index still addresses the same element.
+    expect(second.items.find((item) => item.name === 'Dashboard')?.index).toBe(first.items.find((item) => item.name === 'Dashboard')?.index)
+  })
+
+  it('sends chrome again as soon as any of it changes', () => {
+    document.body.innerHTML = page('')
+    const ids = new ElementIds()
+    const first = buildSnapshot(ids, { budget }, null)
+
+    document.body.innerHTML = page('<a href="/invoices">Invoices</a>')
+    const second = buildSnapshot(ids, { budget }, first)
+
+    expect(second.collapsedChrome).toBeUndefined()
+    expect(renderSnapshot(second, false, 8_000)).toContain('Invoices')
+  })
+
+  it('never collapses on the first snapshot of a document', () => {
+    document.body.innerHTML = page('')
+    const ids = new ElementIds()
+
+    const view = buildSnapshot(ids, { budget }, null)
+
+    expect(view.collapsedChrome).toBeUndefined()
+    expect(renderSnapshot(view, false, 8_000)).toContain('Interactive elements:')
   })
 })

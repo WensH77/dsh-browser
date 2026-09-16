@@ -28,6 +28,7 @@ import type { WebRoute, WebUpgradeRoute } from '@deepseek-ai/dsh-host-webserver'
 import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
 import { BridgeServer } from './server.ts'
 import { registerBrowserTools } from './tools.ts'
+import { BRIDGE_PROTO, BRIDGE_TOOLSET, declaredToolset, type BridgeCaps } from './protocol.ts'
 import {
   BRIDGE_CONFIG_PATH,
   BRIDGE_PATH,
@@ -130,9 +131,13 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   const tokenRes = await resolveToken(resolved.token)
 
   const gdriveRoot = dshHomePath('gdrive')
+  // Assigned by the tools effect below; the server calls it on every hello,
+  // replacement, and disconnect.
+  let capabilitiesSync: ((caps: BridgeCaps | undefined) => void) | undefined
   const server = new BridgeServer({
     token: tokenRes.token,
     toolTimeoutMs: resolved.toolTimeoutMs,
+    onCapabilities: (caps) => { capabilitiesSync?.(caps) },
     openGDriveFolder: async () => {
       await mkdir(gdriveRoot, { recursive: true })
       await openFolder(gdriveRoot)
@@ -152,7 +157,9 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
       return { filePath: target }
     },
     caps: {
-      textOnly: true,
+      // This host's handshake version: an extension built after this plugin
+      // reads the older number and tells the user to restart dsh.
+      proto: BRIDGE_PROTO,
       snapshotMaxChars: resolved.snapshotMaxChars,
       maxInteractiveItems: resolved.maxInteractiveItems,
     },
@@ -181,12 +188,32 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   ctx.effect(() => ctx.webServer.register(configRoute), 'bridge-browser: /ext/bridge-config route')
 
   ctx.effect(() => {
-    const disposers = registerBrowserTools(ctx, server, {
+    const tools = registerBrowserTools(ctx, server, {
       toolTimeoutMs: resolved.toolTimeoutMs,
       snapshotMaxChars: resolved.snapshotMaxChars,
       maxInteractiveItems: resolved.maxInteractiveItems,
     })
-    return () => { for (const dispose of disposers.values()) dispose() }
+    // The model only ever sees the debugging tools while the connected
+    // extension allows them (its own setting, off by default), and only the
+    // parameter shapes the connected extension implements. Until a hello
+    // arrives the full surface is registered; an older extension narrows it.
+    tools.setDebugToolsEnabled(server.clientDebugger())
+    capabilitiesSync = (caps) => {
+      tools.setDebugToolsEnabled(caps?.debugger === true)
+      if (caps === undefined) return
+      tools.setClientToolset(declaredToolset(caps))
+      // The user may be looking at the dsh log rather than the extension UI, and
+      // an extension old enough to need this has no way to report it itself.
+      if (declaredToolset(caps) < BRIDGE_TOOLSET) {
+        ctx.logger.warn(`browser bridge: the connected extension declares toolset ${declaredToolset(caps)} `
+          + `(plugin speaks ${BRIDGE_TOOLSET}): selector targets and the DOM/rule tools stay hidden — `
+          + 'reload the extension from chrome://extensions to get them back')
+      }
+    }
+    return () => {
+      capabilitiesSync = undefined
+      tools.dispose()
+    }
   }, 'bridge-browser: browser tools')
 
   // Optional system-prompt contribution: a one-line hint only — the model is
@@ -197,13 +224,38 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
       name: 'tool:bridge-browser',
       order: 107,
       text: 'A browser bridge may be connected. To read or operate the user\'s active browser page, call browser_snapshot '
-        + '(text-only; numbered items are the click/type targets), unless the current turn already includes a plugin-provided '
+        + '(numbered items are the click/type targets; it also returns a screenshot of the same moment unless you pass visual:false), '
+        + 'unless the current turn already includes a plugin-provided '
         + 'followed-page browser_snapshot. Reuse that injected snapshot and its indices directly. Never assume page content you have not snapshotted. '
+        + 'When an investigation arrives with a web page link, do not open with the bridge: search the local codebase first for how that page and its operations work, '
+        + 'so you have the operational and business context, and combine it with the background the task gives you to decide what actually needs verifying in the browser. '
+        + 'An empty code search proves nothing: page errors often come from server-side configuration (rules, feature flags, database rows) rather than code, '
+        + 'so follow up with browser_console / browser_network and read the page itself before concluding that the behaviour does not exist. '
+        + 'Call browser_capture when the question is visual — layout, styling, a canvas or chart, or whether something rendered — and pass '
+        + 'visual:false on browser_snapshot when you only need updated text. '
+        + 'When the question is about a picture the page embeds (a chart, diagram, or screenshot), address it with browser_dom_query and then call '
+        + 'browser_image on that element: it returns the picture itself at its original resolution and needs no screenshot, so it also works while DevTools '
+        + 'is open. Use browser_capture when the question is about how the page looks as rendered. '
+        + 'To answer "what does this page or section say", read the text once — browser_get_text, optionally with a selector, or with find + context to jump '
+        + 'straight to a phrase — and slice it yourself; do not script several browser_eval rounds to hunt through the DOM. Reach for browser_capture when the '
+        + 'question is about appearance or when the content is drawn into a canvas or image, and note that a capture needs that tab free of DevTools. '
+        + 'If a call hangs or the page stops responding, a JavaScript dialog is usually holding the renderer: answer it with browser_dialog. '
+        + 'When the page misbehaves, browser_console and browser_network read the tab\'s console and requests (Chrome builds), '
+        + 'browser_network mock replaces a response, browser_eval runs page-context JavaScript, and browser_block / browser_headers '
+        + 'block or rewrite matching requests in the controlled tab. '
         + 'When the user asks to bind this session to a specific open page (for example "bind to the page"), call browser_bind_interactive — '
         + 'it lists the pages, asks the user, and binds in one step. '
-        + 'Google Docs/Sheets/Slides/Drive file links are not readable as web pages: always call google_drive_export with the file URL '
-        + 'instead of browser_navigate or browser_snapshot. Never try to read such files through HTML views or page tools; trust the '
-        + 'export result. For spreadsheets: the tool downloads the workbook and asks which sheet to analyze; answer with a sheet name or "all". A browser action may wait for the user to confirm it in the assistant window; the call returns only after the decision. If an action seemingly changed nothing after confirmation, take a fresh browser_snapshot before concluding. Snapshot text is charged to the conversation context, so read economically: while a page is still loading use browser_wait instead of repeating browser_snapshot; use delta:true for consecutive reads of the same page, region to scope a read, and maxChars when only a bounded excerpt is needed.',
+        + 'When a browser tool reports that no page is bound, or that the controlled tab is gone, do not retry the same call: call browser_navigate with the '
+        + 'target URL (it opens a new tab and binds this session to it), or browser_bind_interactive to let the user choose among the pages already open. '
+        + 'A refused call is not a transient error — follow the route the refusal names instead of retrying variants of it. '
+        + 'A refusal is a boundary, not a puzzle: never look for another transport to reach the same content (curl, a reader proxy, an unauthenticated '
+        + 'export URL, or a different tool) — that circumvents the user\'s gate rather than solving the task. If two tools each name a route the other '
+        + 'refuses, or a refusal names a route that cannot work for this content, stop and tell the user what contradicted and what you need, instead of '
+        + 'probing the policy with trial calls. '
+        + 'Only Google Docs (/document/d/…) and Sheets (/spreadsheets/d/…) links are exported: call google_drive_export for those instead of '
+        + 'browser_navigate. Slides, Drive files, and every other link are ordinary pages — read them with the browser tools (browser_navigate to one, '
+        + 'then browser_snapshot, browser_capture, or browser_dom_query), and never try to read them through HTML views or page tools when they are one '
+        + 'of the two exported kinds. For spreadsheets: the tool downloads the workbook and asks which sheet to analyze; answer with a sheet name or "all". A browser action may wait for the user to confirm it in the assistant window; the call returns only after the decision. If an action seemingly changed nothing after confirmation, take a fresh browser_snapshot before concluding. Snapshot text is charged to the conversation context, so read economically: while a page is still loading use browser_wait instead of repeating browser_snapshot; use delta:true for consecutive reads of the same page, region to scope a read, and maxChars when only a bounded excerpt is needed.',
     }), 'bridge-browser: system prompt section')
   }
 

@@ -28,6 +28,19 @@ describe('isVisible', () => {
     document.body.appendChild(visible)
     expect(isVisible(visible)).toBe(true)
   })
+
+  it('sees SVG elements, not only HTML ones', () => {
+    // Google Slides filmstrip thumbnails, chart and map controls are SVG: the
+    // old `instanceof HTMLElement` guard reported every one of them as hidden,
+    // which both lied in browser_dom_query and refused selector clicks on them.
+    document.body.innerHTML = '<svg><g class="thumb"><text>10</text></g></svg>'
+    const group = document.querySelector('g')!
+    expect(group instanceof HTMLElement).toBe(false)
+    expect(isVisible(group)).toBe(true)
+
+    document.querySelector('g')!.setAttribute('style', 'visibility: hidden')
+    expect(isVisible(group)).toBe(false)
+  })
 })
 
 describe('accessibleName', () => {
@@ -103,5 +116,42 @@ describe('mainText', () => {
     expect(text).toContain('Delta 收纳盒')
     expect(text).toContain('Cedar 收纳盒')
     expect(text).not.toContain('导航垃圾')
+  })
+})
+
+describe('accessible names for icon-only controls', () => {
+  it('falls back to tooltip attributes when there is no text', () => {
+    document.body.innerHTML = [
+      '<button title="Email Specialists"><i class="icon-specialist-email"></i></button>',
+      '<button data-original-title="Call specialist"><span class="icon-phone"></span></button>',
+      '<input type="text" placeholder="Search" title="Type to search">',
+    ].join('')
+
+    const [titled, original, input] = [...document.querySelectorAll('button, input')]
+    expect(accessibleName(titled!)).toBe('Email Specialists')
+    expect(accessibleName(original!)).toBe('Call specialist')
+    // A real placeholder still beats the tooltip for a text field.
+    expect(accessibleName(input!)).toBe('Search')
+  })
+
+  it('derives a last-resort name from an icon class', () => {
+    document.body.innerHTML = '<button><i class="icon-specialist-email"></i></button>'
+
+    const button = document.querySelector('button')!
+    expect(accessibleName(button)).toBe('specialist email')
+  })
+
+  it('reads an icon class off an SVG element too', () => {
+    // `className` is an SVGAnimatedString on SVG, so the class has to be read
+    // as an attribute or icon-only SVG controls end up unnamed.
+    document.body.innerHTML = '<button><svg class="icon-specialist-phone"><text></text></svg></button>'
+
+    expect(accessibleName(document.querySelector('button')!)).toBe('specialist phone')
+  })
+
+  it('keeps real text ahead of every hint', () => {
+    document.body.innerHTML = '<button title="Send"><i class="icon-mail"></i> Send profile</button>'
+
+    expect(accessibleName(document.querySelector('button')!)).toBe('Send profile')
   })
 })

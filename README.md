@@ -8,7 +8,7 @@ Connect [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) to t
 
 `dsh` is DeepSeek AI's open-source, plugin-based agent harness. This repository provides a companion browser bridge plugin and Chrome/Firefox MV3 extension as one standalone pnpm workspace.
 
-Browser operation remains text-only: pages become structured text with a numbered inventory of interactive elements, and the model addresses those elements by number. Multimodal chat with dsh lives in its own host client; the browser tools themselves never capture screenshots.
+Pages become structured text with a numbered inventory of interactive elements, and the model addresses those elements by number. `browser_snapshot` pairs that text with a screenshot of the same moment, and `browser_capture` returns a screenshot on demand — both only for image-capable models, and both kept in memory: the extension never writes the image to disk, while a text-only route degrades to the text snapshot with a named reason.
 
 > [!IMPORTANT]
 > The migration branch's runtime pin is `0.1.5-rc.1` (raised from `0.1.2-rc.1` to `0.1.5-alpha.1` on 2026-09-09, then to `0.1.5-rc.1` on 2026-09-10; see the [upgrade note](docs/dsh-0.1.5-rc-upgrade.md)); it moves to the stable `0.1.5` tag when that is published on npm.
@@ -49,13 +49,19 @@ The paired Playwright / extension duration ratio was **1.24** (95% CI **1.16–1
 
 | Capability | Tool | Notes |
 |---|---|---|
-| Read page | `browser_snapshot` | Structured text snapshot: title, URL, main text, numbered controls, and masked form fields; `delta: true` returns only changes |
-| Click element | `browser_click` | Click links, buttons, checkboxes, and other controls by inventory number |
-| Fill forms | `browser_type` | React/Vue-compatible input; `replace` clears the field first |
+| Read page | `browser_snapshot` | Structured text snapshot: title, URL, main text, numbered controls, and masked form fields; `delta: true` returns only changes; carries a same-moment screenshot unless `visual: false` |
+| Capture the page | `browser_capture` | Screenshot of the viewport (or the whole page with `fullPage: true`) delivered as an image; never written to disk |
+| Read console and network | `browser_console` / `browser_network` | Console messages and uncaught errors with a cursor; request list with status and timing, one response body by id, and in-memory response overrides |
+| Answer a page dialog | `browser_dialog` | Accept or dismiss an `alert` / `confirm` / `prompt`; such a dialog freezes the page, so every other tool blocks until it is answered |
+| Run page JavaScript | `browser_eval` | Evaluate an expression in the page's own context; page CSP does not block it, and every call is approved on its own |
+| Block or rewrite requests | `browser_block` / `browser_headers` | Block matching requests, or rewrite request/response headers — scoped to the controlled tab and session-only |
+| Click element | `browser_click` | Click by inventory number, or by CSS selector when a control has no usable inventory entry (icon-only buttons) |
+| Fill forms | `browser_type` | React/Vue-compatible input by inventory number or CSS selector; `replace` clears the field first |
 | Press keys | `browser_press` | Keyboard events such as Enter, Tab, Escape, and arrow keys |
 | Scroll | `browser_scroll` | Viewport scrolling: up, down, top, and bottom |
 | Navigate | `browser_navigate` / `browser_back` / `browser_forward` / `browser_reload` | Navigation inside the controlled tab, with login state preserved |
 | Read region | `browser_get_text` | Lazy-loaded or partial page text |
+| Inspect elements | `browser_dom_query` | Read the fields you name off elements matching a CSS selector, each with a verified unique selector to act on |
 | Wait for stability | `browser_wait` | Page-load and render-settle detection |
 
 ## Repository layout
@@ -172,7 +178,7 @@ Notes:
 - The bridge path sits outside the `/api` trust boundary and performs its own bearer-token authentication.
 - Local Chrome extension origins retain zero-configuration loopback access; Firefox origins are per-install UUIDs and must present the bearer token.
 - Privileged gateway methods such as `settings.*`, `credentials.*`, and `host.open*` reject non-loopback sources.
-- The browser-page pipeline is text-only and never captures screenshots. Password and payment-card values never leave the page.
+- Page reads are text by default: `browser_snapshot` adds a screenshot unless the current model route declares no image input. Console, network, evaluation, blocking, and header rules use the extension's `debugger` and `declarativeNetRequestWithHostAccess` capabilities; screenshots use `debugger` (Chrome shows its usual debugging notice while a capture runs) and stay in memory — nothing is written to disk. Password and payment-card values never leave the page.
 - When the assistant starts operating a page, it binds to the then-active tab at the first browser-tool call. If you switch tabs manually, later browser actions pause and the assistant asks whether it should continue on the original tab or follow the new one. Choosing the original tab permits background operation; the extension never silently retargets or changes your visible tab. Closing the controlled tab also pauses tools until the next call binds a page you explicitly choose.
 - Page-authored text is wrapped as untrusted input. The default `auto` mode reads only the controlled tab without an extra prompt; privacy-sensitive users can select `ask` for per-read confirmation or `off` to block reads entirely. In `ask` mode, the read dialog can allow one read or persistently switch back to `auto`; this can be reversed in Settings. Read page text is sent to the selected model.
-- Click, type, keypress, navigation, history, and reload calls fail closed until the user approves them. An origin may be trusted for the current session, while permanent trust is managed explicitly in the extension options. Explicit cross-origin `browser_navigate` calls and unknown history destinations always prompt again.
+- Click, type, keypress, navigation, history, and reload calls fail closed until the user approves them. A session's first `browser_navigate` opens its new tab only after that approval, so a denied or unanswered call issues no request at all. Google Drive exports are approved the same way — scoped to the document host, and skipped once that origin is trusted. An origin may be trusted for the current session, while permanent trust is managed explicitly in the extension options. Explicit cross-origin `browser_navigate` calls and unknown history destinations always prompt again.

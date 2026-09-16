@@ -9,7 +9,7 @@
  */
 
 import type { BridgeCaps } from '@yuxianglin/dsh-bridge-browser/src/protocol.ts'
-import type { BridgeState } from '../background/bridge.ts'
+import type { BridgeNotice, BridgeState } from '../background/bridge.ts'
 import type { TabAffinityState } from '../background/tab-affinity.ts'
 import type { ApprovalDecision, ApprovalRequest } from '../security/approval.ts'
 import type { Settings } from './settings.ts'
@@ -26,6 +26,8 @@ export interface RecentOp {
   startedAt: number
   /** Epoch ms when the operation settled (done/error/cancelled). */
   endedAt?: number
+  /** Element the action actually resolved, reported by the page at execution time. */
+  label?: string
 }
 
 /** What the status side panel shows as the currently controlled page. */
@@ -40,6 +42,8 @@ export interface ControlledTabInfo {
 export interface UiState {
   bridgeState: BridgeState
   caps: BridgeCaps | null
+  /** Handshake problem to show the user, or null when the pair agrees. */
+  notice: BridgeNotice | null
   affinity: TabAffinityState
   controlled: ControlledTabInfo | null
   pendingApprovals: ApprovalRequest[]
@@ -60,7 +64,7 @@ export type UiRequest =
 
 /** Push broadcasts from the background to any open UI page. */
 export type UiPush =
-  | { type: 'push.status'; state: BridgeState; caps: BridgeCaps | null }
+  | { type: 'push.status'; state: BridgeState; caps: BridgeCaps | null; notice: BridgeNotice | null }
   | { type: 'push.affinity'; state: TabAffinityState }
   | { type: 'push.approval'; request: ApprovalRequest }
   | { type: 'push.approval-resolved'; id: string }

@@ -10,14 +10,30 @@
  * @module
  */
 
-import { pageText, truncate } from './extract.ts'
+import { accessibleName, isVisible, pageText, truncate } from './extract.ts'
 import type { ElementIds } from './ids.ts'
 import type { SnapshotBudget } from './snapshot.ts'
-import { buildSnapshot, renderSnapshot } from './snapshot.ts'
+import { buildSnapshot, renderSnapshot, uniqueSelector } from './snapshot.ts'
 
 /** A settled action result. */
+/** Where the page keeps a picture, for the background to fetch and hand to vision. */
+export interface PageImageSource {
+  /** Absolute URL (http/https/data) the background can read. */
+  url?: string
+  /** Inline raster the content script had to rasterize itself (a canvas). */
+  dataUrl?: string
+  kind: 'img' | 'canvas' | 'svg-image' | 'background'
+  width?: number
+  height?: number
+  alt?: string
+}
+
 export interface ActionResult {
   text: string
+  /** Accessible name of the element this action resolved, for the status feed. */
+  label?: string
+  /** Picture location reported by `browser_image`; never part of the model's text. */
+  imageSource?: PageImageSource
   /** Page-authored snapshot delta; the background must wrap it as untrusted. */
   pageContent?: string
   /** A same-frame document navigation was scheduled after this response. */
@@ -123,6 +139,43 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => { setTimeout(resolve, ms) })
 }
 
+/**
+ * Resolve the element a click/type call targets.
+ *
+ * `selector` exists so the model can act on what it can see — an icon button
+ * with no accessible name still has a CSS path — without falling back to
+ * running JavaScript, which bypasses approval, auditing, and settle detection.
+ *
+ * @param args - model arguments: `index` and/or `selector`.
+ * @param ids - the snapshot inventory.
+ * @returns the resolved element and how it was addressed.
+ */
+function targetOrThrow(args: Record<string, unknown>, ids: ElementIds): { element: Element; label: string } {
+  const selector = typeof args.selector === 'string' ? args.selector.trim() : ''
+  if (selector !== '') {
+    let matches: Element[]
+    try {
+      matches = [...document.querySelectorAll(selector)]
+    } catch {
+      throw new ActionError('bad-args', `selector is not valid CSS: ${selector}`)
+    }
+    const visible = matches.find((candidate) => isVisible(candidate))
+    const element = visible ?? matches[0]
+    if (element === undefined) {
+      throw new ActionError('action-failed', `No element in this frame matches selector "${selector}". Nothing was clicked — check the selector with browser_dom_query (it prints each match's verified unique selector) or browser_snapshot.`)
+    }
+    if (visible === undefined) {
+      throw new ActionError('action-failed', `The only element matching "${selector}" is not visible, so it was not clicked. Scroll it into view or use a visible match.`)
+    }
+    return { element, label: `selector "${selector}"` }
+  }
+  const index = optionalNumberArg(args, 'index')
+  if (index === undefined) {
+    throw new ActionError('bad-args', 'Provide either index (from browser_snapshot) or selector (CSS).')
+  }
+  return { element: elementOrThrow(ids, index), label: `[${index}]` }
+}
+
 function elementOrThrow(ids: ElementIds, index: number): Element {
   const el = ids.elementByIndex(index)
   if (el === undefined) {
@@ -188,6 +241,10 @@ export async function runAction(action: string, args: Record<string, unknown>, c
       return reloadAction()
     case 'browser_get_text':
       return getTextAction(args)
+    case 'browser_dom_query':
+      return domQueryAction(args)
+    case 'browser_image':
+      return imageSourceAction(args, ctx)
     case 'browser_wait':
       return waitAction(args, ctx)
     default:
@@ -214,19 +271,22 @@ function resetDeltaState(): void {
 }
 
 /** Attach the settled page change while retaining the full view as the next delta baseline. */
-function withPageDelta(text: string, ctx: ActionContext): ActionResult {
-  if (ctx.includePageDelta !== true || lastSnapshot === null) return { text }
+function withPageDelta(text: string, ctx: ActionContext, label?: string): ActionResult {
+  const named = label === undefined ? {} : { label }
+  if (ctx.includePageDelta !== true || lastSnapshot === null) return { text, ...named }
   const view = buildSnapshot(ctx.ids, { delta: true, budget: ctx.budget }, lastSnapshot)
   lastSnapshot = view
   return {
     text,
     pageContent: renderSnapshot(view, true, Math.min(ctx.budget.maxChars, ACTION_DELTA_MAX_CHARS)),
+    ...named,
   }
 }
 
 async function clickAction(args: Record<string, unknown>, ctx: ActionContext): Promise<ActionResult> {
-  const index = numberArg(args, 'index')
-  const el = elementOrThrow(ctx.ids, index)
+  const resolved = targetOrThrow(args, ctx.ids)
+  const el = resolved.element
+  const label = accessibleName(el)
   el.scrollIntoView({ block: 'center', behavior: 'instant' })
   if (el instanceof HTMLAnchorElement) {
     const target = el.target.trim().toLowerCase()
@@ -250,7 +310,8 @@ async function clickAction(args: Record<string, unknown>, ctx: ActionContext): P
       if (requiresNativeActivation) {
         setTimeout(() => { el.click() }, 0)
         return {
-          text: `Clicked link [${index}] using native browser activation. Call browser_snapshot to read the resulting state.`,
+          text: `Clicked link ${resolved.label} using native browser activation. Call browser_snapshot to read the resulting state.`,
+          label,
         }
       }
       // Dispatch the click handlers without its default navigation so a
@@ -262,7 +323,7 @@ async function clickAction(args: Record<string, unknown>, ctx: ActionContext): P
       }))
       if (!shouldNavigate) {
         await waitForPageSettled(ACTION_SETTLE)
-        return withPageDelta(`Clicked link [${index}].`, ctx)
+        return withPageDelta(`Clicked link ${resolved.label}.`, ctx, label)
       }
       const sameDocument = href.origin === location.origin
         && href.pathname === location.pathname
@@ -270,36 +331,55 @@ async function clickAction(args: Record<string, unknown>, ctx: ActionContext): P
       if (sameDocument) {
         if (href.hash !== location.hash) location.hash = href.hash
         await waitForPageSettled(ACTION_SETTLE)
-        return withPageDelta(`Clicked link [${index}].`, ctx)
+        return withPageDelta(`Clicked link ${resolved.label}.`, ctx, label)
       }
       // A cross-document navigation can unload this content script before an
       // awaited response. Answer first and navigate in the next task.
       setTimeout(() => { location.href = href.href }, 0)
       return {
-        text: `Clicked link [${index}]. Call browser_snapshot again after navigation settles.`,
+        text: `Clicked link ${resolved.label}. Call browser_snapshot again after navigation settles.`,
+        label,
         navigationPending: true,
       }
     }
     setTimeout(() => { el.click() }, 0)
-    return { text: `Clicked link [${index}]. The link may open outside the controlled frame.` }
+    return { text: `Clicked link ${resolved.label}. The link may open outside the controlled frame.`, label }
   }
   if (el instanceof HTMLButtonElement && el.disabled) {
-    throw new ActionError('action-failed', `Button [${index}] is disabled.`)
+    throw new ActionError('action-failed', `Button ${resolved.label} is disabled.`)
   }
-  ;(el as HTMLElement).click()
+  activateElement(el)
   await waitForPageSettled(ACTION_SETTLE)
-  return withPageDelta(`Clicked [${index}].`, ctx)
+  return withPageDelta(`Clicked ${resolved.label}.`, ctx, label)
+}
+
+/**
+ * Activate one element the way a user click would.
+ *
+ * `HTMLElement.click()` does not exist on SVG elements (Slides filmstrip
+ * thumbnails, chart and map controls), so those get a real bubbling
+ * `MouseEvent('click')` instead of a cast that throws at runtime.
+ *
+ * @param el - the resolved target element.
+ */
+function activateElement(el: Element): void {
+  if (el instanceof HTMLElement) {
+    el.click()
+    return
+  }
+  el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, composed: true }))
 }
 
 async function typeAction(args: Record<string, unknown>, ctx: ActionContext): Promise<ActionResult> {
-  const index = numberArg(args, 'index')
   const text = typeof args.text === 'string' ? args.text : ''
   if (text === '') throw new ActionError('bad-args', 'text must not be empty.')
   const replace = args.replace === true
-  const el = elementOrThrow(ctx.ids, index)
+  const resolved = targetOrThrow(args, ctx.ids)
+  const el = resolved.element
+  const label = accessibleName(el)
   const contentEditable = el instanceof HTMLElement && el.isContentEditable
   if (!(el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement || contentEditable)) {
-    throw new ActionError('action-failed', `Element [${index}] is not editable (${el.tagName.toLowerCase()}).`)
+    throw new ActionError('action-failed', `Element ${resolved.label} is not editable (${el.tagName.toLowerCase()}).`)
   }
   if (contentEditable) {
     if (replace) el.textContent = ''
@@ -310,7 +390,7 @@ async function typeAction(args: Record<string, unknown>, ctx: ActionContext): Pr
     setNativeValue(el, `${el.value}${text}`)
   }
   await waitForPageSettled(TYPE_SETTLE)
-  return withPageDelta(`Entered ${text.length} characters into [${index}].`, ctx)
+  return withPageDelta(`Entered ${text.length} characters into ${resolved.label}.`, ctx, label)
 }
 
 async function pressAction(args: Record<string, unknown>, ctx: ActionContext): Promise<ActionResult> {
@@ -347,6 +427,182 @@ async function scrollAction(args: Record<string, unknown>, ctx: ActionContext): 
   }
   await waitForPageSettled(SCROLL_SETTLE)
   return withPageDelta(`Scrolled ${direction}.`, ctx)
+}
+
+/** Element fields `browser_dom_query` may return, beyond tag/name/selector. */
+/**
+ * Field names `browser_dom_query` may report. `name` is the computed
+ * accessible name (always printed); `aria-label` is the literal attribute.
+ */
+const DOM_QUERY_FIELDS = new Set([
+  'href', 'src', 'alt', 'value', 'id', 'class', 'title', 'aria-label', 'role', 'name',
+  'type', 'checked', 'disabled', 'visible', 'text', 'placeholder',
+])
+
+/** Matches rendered per query, and the character ceiling for one answer. */
+const DOM_QUERY_MAX_MATCHES = 50
+const DOM_QUERY_MAX_CHARS = 8_000
+const DOM_QUERY_VALUE_CHARS = 80
+
+/**
+ * Read specific fields off the elements a CSS selector matches.
+ *
+ * This is the read-only, narrow counterpart to running JavaScript: it answers
+ * "what is this control, and what selector addresses it" without shipping a
+ * DOM excerpt, and its per-element `selector` feeds `browser_click` directly.
+ */
+function domQueryAction(args: Record<string, unknown>): ActionResult {
+  const selector = typeof args.selector === 'string' ? args.selector.trim() : ''
+  if (selector === '') throw new ActionError('bad-args', 'selector must not be empty.')
+  const requested = args.fields === undefined ? [] : args.fields
+  if (!Array.isArray(requested) || requested.some((field) => typeof field !== 'string')) {
+    throw new ActionError('bad-args', 'fields must be an array of field names.')
+  }
+  const fields = requested as string[]
+  const unknown = fields.filter((field) => !DOM_QUERY_FIELDS.has(field))
+  if (unknown.length > 0) {
+    throw new ActionError('bad-args', `Unknown field(s): ${unknown.join(', ')}. Allowed: ${[...DOM_QUERY_FIELDS].join(', ')}.`)
+  }
+  const limit = Math.min(
+    Math.max(typeof args.limit === 'number' && Number.isInteger(args.limit) ? args.limit : 20, 1),
+    DOM_QUERY_MAX_MATCHES,
+  )
+
+  let matches: Element[]
+  try {
+    matches = [...document.querySelectorAll(selector)]
+  } catch {
+    throw new ActionError('bad-args', `selector is not valid CSS: ${selector}`)
+  }
+  if (matches.length === 0) {
+    return { text: `dom query: 0 matches for "${selector}" in this frame.` }
+  }
+
+  const value = (element: Element, field: string): string | undefined => {
+    switch (field) {
+      case 'visible': return String(isVisible(element))
+      case 'text': return truncate(element.textContent ?? '', DOM_QUERY_VALUE_CHARS).text
+      // The accessible name is reported once, in the leading `name=` field.
+      case 'name': return undefined
+      case 'aria-label': {
+        // Name it as the attribute it is; the computed accessible name lives in
+        // `name=`, and callers must not build attribute selectors from it.
+        const attribute = element.getAttribute('aria-label')
+        return attribute === null ? undefined : truncate(attribute, DOM_QUERY_VALUE_CHARS).text
+      }
+      // Only checkable inputs have a meaningful checked state.
+      case 'checked': return element instanceof HTMLInputElement && (element.type === 'checkbox' || element.type === 'radio')
+        ? String(element.checked)
+        : undefined
+      case 'disabled': return 'disabled' in element ? String((element as HTMLInputElement).disabled) : undefined
+      case 'value': return element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement
+        ? truncate(element.value, DOM_QUERY_VALUE_CHARS).text
+        : undefined
+      default: {
+        const attribute = element.getAttribute(field)
+        return attribute === null ? undefined : truncate(attribute, DOM_QUERY_VALUE_CHARS).text
+      }
+    }
+  }
+
+  // Values may themselves contain quotes (a selector like input[name="x"]), so
+  // the wrapper escapes rather than nests them.
+  const quoted = (input: string): string => `"${input.replace(/"/g, '\\"')}"`
+  const lines: string[] = [`dom query: ${matches.length} match(es) for ${quoted(selector)} in this frame.`]
+  for (const [position, element] of matches.slice(0, limit).entries()) {
+    // `name=` is labelled: an unlabelled quoted string sat exactly where field
+    // values sit, and a model read it as an `aria-label` attribute it could
+    // build a selector from.
+    const parts = [`[${position + 1}] ${element.localName} name=${quoted(accessibleName(element))}`]
+    const unique = uniqueSelector(element)
+    if (unique !== undefined) parts.push(`selector=${quoted(unique)}`)
+    for (const field of fields) {
+      if (field === 'name') continue
+      const read = value(element, field)
+      if (read !== undefined && read !== '') parts.push(`${field}=${quoted(read)}`)
+    }
+    lines.push(parts.join(' '))
+  }
+  if (matches.length > limit) {
+    lines.push(`…(${matches.length - limit} further match(es) not shown; raise limit or narrow the selector)`)
+  }
+  return { text: truncate(lines.join('\n'), DOM_QUERY_MAX_CHARS).text }
+}
+
+/**
+ * Locate a picture and report where its bytes live.
+ *
+ * `browser_image` answers "what does this chart show" without a screenshot: the
+ * background reads the reported source (extension fetches carry the extension's
+ * host permissions, so a cross-origin picture needs no CORS header, and a
+ * `data:` URL is decoded as-is), which works with DevTools open and on a
+ * background tab. Only the raster's location travels here — never its bytes in
+ * the model's text.
+ */
+function imageSourceAction(args: Record<string, unknown>, ctx: ActionContext): ActionResult {
+  const resolved = targetOrThrow(args, ctx.ids)
+  const source = describeImageSource(resolved.element)
+  if (source === undefined) {
+    throw new ActionError(
+      'action-failed',
+      `${resolved.label} is not a picture: expected an <img>, a <canvas>, an SVG <image>, or an element with a CSS background image. `
+      + 'Call browser_dom_query for the element, or browser_capture for a screenshot of the page.',
+    )
+  }
+  const size = source.width === undefined || source.height === undefined ? '' : ` ${source.width}x${source.height} px`
+
+  return { text: `image source: ${source.kind}${size}`, label: resolved.label, imageSource: source }
+}
+
+/** Resolve the picture one element refers to, if it is one. */
+function describeImageSource(el: Element): PageImageSource | undefined {
+  if (el instanceof HTMLImageElement) {
+    const url = el.currentSrc !== '' ? el.currentSrc : el.src
+    if (url === '') return undefined
+    const known = el.naturalWidth > 0 && el.naturalHeight > 0
+    return {
+      url,
+      kind: 'img',
+      ...known ? { width: el.naturalWidth, height: el.naturalHeight } : {},
+      ...el.alt.trim() === '' ? {} : { alt: el.alt.trim().slice(0, 200) },
+    }
+  }
+  if (el instanceof HTMLCanvasElement) {
+    if (el.width === 0 || el.height === 0) return undefined
+    let dataUrl: string
+    try {
+      dataUrl = el.toDataURL('image/png')
+    } catch {
+      // A canvas painted from another origin has no exportable pixels.
+      throw new ActionError(
+        'action-failed',
+        'This canvas is tainted by cross-origin content, so the page cannot export it. Use browser_capture to screenshot it instead.',
+      )
+    }
+    return { dataUrl, kind: 'canvas', width: el.width, height: el.height }
+  }
+  if (typeof SVGImageElement !== 'undefined' && el instanceof SVGImageElement) {
+    const href = el.href.baseVal
+    return href === '' ? undefined : { url: absoluteUrl(href), kind: 'svg-image' }
+  }
+  const background = backgroundImageUrl(el)
+  return background === undefined ? undefined : { url: background, kind: 'background' }
+}
+
+function absoluteUrl(value: string): string {
+  try {
+    return new URL(value, location.href).href
+  } catch {
+    return value
+  }
+}
+
+/** Absolute URL from an element's CSS `background-image`, when it has one. */
+function backgroundImageUrl(el: Element): string | undefined {
+  const value = getComputedStyle(el).backgroundImage
+  const match = /^url\(\s*["']?([^"')]+)["']?\s*\)$/.exec(value.trim())
+  if (match === null || match[1] === undefined || match[1].trim() === '') return undefined
+  return absoluteUrl(match[1].trim())
 }
 
 async function navigateAction(args: Record<string, unknown>): Promise<ActionResult> {
@@ -403,8 +659,66 @@ async function getTextAction(args: Record<string, unknown>): Promise<ActionResul
   const selector = typeof args.selector === 'string' && args.selector !== '' ? args.selector : undefined
   const source = selector !== undefined ? document.querySelector(selector) : null
   const text = source !== null ? pageText(source) : selector !== undefined ? `No element matched selector: ${selector}` : pageText()
+  const scope = selector === undefined ? 'the whole page' : `selector "${selector}"`
+  const find = typeof args.find === 'string' ? args.find.trim() : ''
+  if (find !== '') return { text: findInText(text, find, scope, args) }
   const truncated = truncate(text, optionalCharsBudget(args, 8_000))
   return { text: truncated.text + (truncated.truncated > 0 ? `\n(Truncated ${truncated.truncated} characters.)` : '') }
+}
+
+/** Characters of context returned on each side of a text match. */
+const FIND_CONTEXT_DEFAULT = 300
+const FIND_CONTEXT_MAX = 2_000
+/** Matches reported in one search; the count is always reported in full. */
+const FIND_MATCH_LIMIT = 5
+
+/**
+ * Locate a phrase in the page text and return a bounded window around it.
+ *
+ * This exists so "what does this page/section say" never has to be answered by
+ * scripting DOM traversal: the search runs over the whole extracted text (not a
+ * truncated head), and the returned window stays small.
+ *
+ * @param text - the full text of the chosen scope.
+ * @param needle - phrase to find (literal, case-insensitive).
+ * @param scope - human label for where the text came from.
+ * @param args - tool arguments (`context`, `maxChars`).
+ * @returns the rendered match report.
+ */
+function findInText(text: string, needle: string, scope: string, args: Record<string, unknown>): string {
+  const lowerText = text.toLowerCase()
+  const lowerNeedle = needle.toLowerCase()
+  const context = typeof args.context === 'number' && Number.isInteger(args.context)
+    ? Math.min(Math.max(args.context, 0), FIND_CONTEXT_MAX)
+    : FIND_CONTEXT_DEFAULT
+
+  const offsets: number[] = []
+  for (let at = lowerText.indexOf(lowerNeedle); at !== -1; at = lowerText.indexOf(lowerNeedle, at + lowerNeedle.length)) {
+    offsets.push(at)
+    if (offsets.length >= FIND_MATCH_LIMIT) break
+  }
+  if (offsets.length === 0) {
+    return `text search: no match for "${needle}" in ${scope} (case-insensitive, ${text.length} characters searched).`
+  }
+
+  const budget = optionalCharsBudget(args, 8_000)
+  // Keep the match itself inside the budget: a wide context with a small
+  // maxChars must shrink the window, never cut the phrase out of it.
+  const perMatch = Math.max(120, Math.floor((budget - 120) / offsets.length))
+  const width = Math.min(context, Math.max(0, Math.floor((perMatch - needle.length) / 2)))
+  const exact = offsets.length === FIND_MATCH_LIMIT ? `${FIND_MATCH_LIMIT}+` : String(offsets.length)
+  const header = `text search: ${exact} match(es) for "${needle}" in ${scope} (case-insensitive, ±${width} chars of context).`
+  const blocks = offsets.map((offset, index) => {
+    const start = Math.max(0, offset - width)
+    const end = Math.min(text.length, offset + needle.length + width)
+    const window = text.slice(start, offset)
+      + `«${text.slice(offset, offset + needle.length)}»`
+      + text.slice(offset + needle.length, end)
+    return `[${index + 1}] chars ${start + 1}-${end} of ${text.length}\n${window}`
+  })
+  const truncated = truncate(`${header}\n${blocks.join('\n')}`, budget)
+  return truncated.text
+    + (truncated.truncated > 0 ? `\n(Truncated ${truncated.truncated} characters; raise maxChars or shorten the context.)` : '')
 }
 
 async function waitAction(args: Record<string, unknown>, ctx: ActionContext): Promise<ActionResult> {
@@ -418,6 +732,11 @@ function optionalCharsBudget(args: Record<string, unknown>, fallbackMax: number)
   const value = args.maxChars
   if (typeof value !== 'number' || !Number.isInteger(value)) return fallbackMax
   return Math.min(Math.max(value, 500), fallbackMax)
+}
+
+/** Read an optional numeric argument without throwing when it is absent. */
+function optionalNumberArg(args: Record<string, unknown>, name: string): number | undefined {
+  return args[name] === undefined ? undefined : numberArg(args, name)
 }
 
 function numberArg(args: Record<string, unknown>, name: string): number {
