@@ -1,8 +1,15 @@
 // @vitest-environment jsdom
 
-import { afterEach, describe, expect, it, vi } from 'vitest'
-import { BRIDGE_PROTO, BRIDGE_TOOLSET } from '@yuxianglin/dsh-bridge-browser/src/protocol.ts'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { BRIDGE_EXTENSION_IDS, BRIDGE_PROTO, BRIDGE_TOOLSET } from '@yuxianglin/dsh-bridge-browser/src/protocol.ts'
 import { BridgeClient, handshakeNotice, type BridgeNotice, type BridgeState } from '../src/background/bridge.ts'
+
+/** The extension reports its own ID; assert it against the pinned one. */
+const EXTENSION_ID = BRIDGE_EXTENSION_IDS[0]
+
+beforeEach(() => {
+  vi.stubGlobal('chrome', { runtime: { id: EXTENSION_ID } })
+})
 
 class FakeWebSocket extends EventTarget {
   static readonly CONNECTING = 0
@@ -64,6 +71,58 @@ describe('BridgeClient connection probe', () => {
     expect(probe).toHaveBeenCalledOnce()
     expect(FakeWebSocket.instances).toHaveLength(0)
     expect(states.at(-1)).toBe('reconnecting')
+    client.stop()
+  })
+
+  it('does not announce a stop when it restarts itself', async () => {
+    // `start` used to route through `stop()`, so every ordinary (re)start told
+    // the UI it had stopped and the log filled with lines that read like a fault.
+    vi.useFakeTimers()
+    vi.stubGlobal('WebSocket', FakeWebSocket)
+    const states: BridgeState[] = []
+    const client = new BridgeClient({
+      onStateChange: (state) => { states.push(state) },
+      onFrame: () => {},
+      onHelloOk: () => {},
+      onNotice: () => {},
+    }, async () => true)
+
+    client.start('ws://127.0.0.1:3080/ext/bridge', '')
+    await vi.advanceTimersByTimeAsync(0)
+    states.length = 0
+    client.start('ws://127.0.0.1:3080/ext/bridge', '')
+    await vi.advanceTimersByTimeAsync(0)
+
+    expect(states).not.toContain('stopped')
+    client.stop()
+    // Stopping on purpose is still reported.
+    expect(states).toContain('stopped')
+  })
+
+  it('re-arms a stalled loop on retry, and ignores retry when it is already running', async () => {
+    vi.useFakeTimers()
+    vi.stubGlobal('WebSocket', FakeWebSocket)
+    const probes: number[] = []
+    const client = new BridgeClient({
+      onStateChange: () => {},
+      onFrame: () => {},
+      onHelloOk: () => {},
+      onNotice: () => {},
+    }, async () => { probes.push(1); return false })
+
+    client.start('ws://127.0.0.1:3080/ext/bridge', '')
+    await vi.advanceTimersByTimeAsync(0)
+    const afterStart = probes.length
+    // Already running: retry must not stack a second loop.
+    client.retry()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(probes.length).toBe(afterStart)
+
+    // A stalled client (running === false) is woken by retry.
+    client.stop()
+    client.retry()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(probes.length).toBeGreaterThan(afterStart)
     client.stop()
   })
 
@@ -131,6 +190,8 @@ describe('BridgeClient handshake version', () => {
     expect(hello.t).toBe('hello')
     expect(hello.caps.proto).toBe(BRIDGE_PROTO)
     expect(hello.caps.toolset).toBe(BRIDGE_TOOLSET)
+    // The host pins this ID and checks the socket Origin against it.
+    expect(hello.caps.extensionId).toBe(EXTENSION_ID)
     expect(Object.keys(hello.caps)).not.toContain('textOnly')
     client.stop()
   })

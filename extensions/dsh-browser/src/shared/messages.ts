@@ -72,21 +72,50 @@ export type UiPush =
   | { type: 'push.ops'; ops: RecentOp[] }
   | { type: 'push.ops-cleared' }
 
-/** Fire a request and await its response value. */
+/** How long a UI request waits for the background before giving up. */
+const UI_REQUEST_TIMEOUT_MS = 5_000
+
+/**
+ * Fire a request and await its response value.
+ *
+ * Fails with a message that names the request and what happened, because the
+ * failure that matters here — the background did not answer — arrives from
+ * Chrome as "The message port closed before a response was received", which
+ * says nothing about which request died or whose side stalled. A request that
+ * never settles is worse still: the UI would wait forever with no error at all.
+ *
+ * @param message - the request to deliver.
+ * @returns the response value, or undefined for a request nobody handles.
+ */
 export function sendUiRequest(message: UiRequest): Promise<unknown> {
   return new Promise((resolve, reject) => {
+    let settled = false
+    const finish = (act: () => void): void => {
+      if (settled) return
+      settled = true
+      act()
+    }
+    const timer = setTimeout(() => {
+      finish(() => reject(new Error(`The background did not answer "${message.type}" within ${UI_REQUEST_TIMEOUT_MS}ms.`)))
+    }, UI_REQUEST_TIMEOUT_MS)
     try {
       if (typeof chrome === 'undefined' || chrome.runtime === undefined) {
+        clearTimeout(timer)
         resolve(undefined)
         return
       }
       chrome.runtime.sendMessage(message, (response: unknown) => {
         const error = chrome.runtime.lastError
-        if (error !== undefined) reject(new Error(error.message))
-        else resolve(response)
+        clearTimeout(timer)
+        if (error !== undefined) {
+          finish(() => reject(new Error(`"${message.type}" failed: ${error.message}`)))
+        } else {
+          finish(() => { resolve(response) })
+        }
       })
     } catch (error: unknown) {
-      reject(error)
+      clearTimeout(timer)
+      finish(() => { reject(error instanceof Error ? error : new Error(String(error))) })
     }
   })
 }

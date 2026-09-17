@@ -60,14 +60,25 @@ npx @deepseek-ai/dsh@0.1.5-rc.1 web
 
 两个半边的版本在 `hello`/`hello.ok` 里协商：`proto` 是握手版本（不发该字段的旧构建读作 1），`toolset` 是扩展的能力级别（缺失为 0）。宿主若无法服务更新的扩展，用关闭码 `4003` + 原因拒绝，扩展把原因原样显示；扩展声明的级别较低时，宿主**收窄工具面**（不注册 `browser_dom_query`/`browser_block`/`browser_headers`，且 `browser_click`/`browser_type` 的 schema 去掉 `selector`），而不是等到调用时才报参数错误。扩展在选项页与侧栏显示这处错配，并点名下一步（重启 dsh，或重载扩展）。
 
+回环连接可以免 bearer token，但只对一个扩展生效：`Origin` 里的 ID 必须在 `BRIDGE_EXTENSION_IDS` 里，且扩展自报的 `caps.extensionId` 要与它一致。其它任何 `chrome-extension://` origin 都以 `4002` 拒绝——`Origin` 只是个请求头，若照原样接受前缀，用户装的**每一个**扩展都能抢占唯一的工具槽位并读到模型的工具调用。固定的这个 ID 由扩展 manifest 里的公钥推出（`scripts/extension-id.mjs`，另有测试断言两者一致），因此跨安装稳定。这不是密码学意义上的身份证明：知道该 ID 的本机进程仍可伪造该头，所以非回环连接一律要求 token。
+
 ## 工具
 
 | 工具 | 用途 |
 |---|---|
-| `browser_snapshot` | 结构化文本快照（标题/URL/正文/清单/表单）；`delta: true` 只返回变化。 |
-| `browser_click` / `browser_type` / `browser_press` | 按稳定编号操作清单元素。 |
+| `browser_snapshot` | 结构化文本快照（标题/URL/正文/清单/表单）；`delta: true` 只返回变化；除 `visual: false` 外都配一张同刻截图。 |
+| `browser_capture` | 视口截图（`fullPage: true` 为整页），作为 image block 返回；仅内存、不落盘。 |
+| `browser_image` | 按引用取回页面里的一张图片（`<img>` / `<canvas>` / SVG `<image>` / CSS background），原分辨率返回，不需要 `chrome.debugger`——DevTools 开着或标签页在后台都能用。 |
+| `browser_click` / `browser_type` / `browser_press` | 按稳定编号操作清单元素；click 与 type 也接受 CSS `selector`，用于清单叫不出名字的控件（纯图标按钮）。 |
 | `browser_scroll` / `browser_navigate` / `browser_back` / `browser_forward` / `browser_reload` | 页面移动。 |
 | `browser_get_text` / `browser_wait` | 读区域文本 / 稳定检测。`find`（配 `context`）在整个范围内定位一段文字，按命中返回有界窗口，一次调用即可回答「这一段讲了什么」，无需写 JS 翻 DOM。 |
+| `browser_dom_query` | 窄查询：按 CSS 选择器读指定字段，每个匹配都带一个经校验唯一的选择器。 |
+| `browser_console` / `browser_network` | 控制台消息与未捕获错误；请求列表、按 id 取一个响应体、内存内响应替换。 |
+| `browser_dialog` | 回应页面的 JS 弹窗——页面被 `alert`/`confirm` 冻住时的唯一出路。 |
+| `browser_eval` | 在页面自身上下文求值（不受页面 CSP 限制）。 |
+| `browser_block` / `browser_headers` | 阻断匹配请求，或改写请求/响应头；session 规则，只作用于受控标签页。 |
+| `browser_bind_interactive` | 列出可绑定的页面、用标准提问让用户选一个，并绑定本会话——模型只需调这一个工具。 |
+| `google_drive_export` | 用已登录会话导出 Google Doc（`/document/d/…`）或 Sheet（`/spreadsheets/d/…`）；其余 Google 链接改用浏览器读。 |
 
 ## 模型体验
 

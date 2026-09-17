@@ -11,6 +11,13 @@
  * need no CORS header: extension fetches carry the extension's host permissions
  * (and its cookies, for a picture behind the page's own session).
  *
+ * Fetching is limited to the public web. A page controls the URL in its own
+ * markup, so without that limit it could point an `<img>` at a loopback or
+ * private-network address and have the extension — which is outside the page's
+ * origin and CORS — read it back with the user's cookies. Same-origin limits
+ * would break the ordinary case of a picture on a CDN or a second document
+ * host, so the bound is the address range, not the page's origin.
+ *
  * @module
  */
 
@@ -66,13 +73,62 @@ function base64ToBytes(base64: string): Uint8Array {
 }
 
 /** Guess a media type from a URL when the response carries none. */
-function mediaTypeFromUrl(url: string): string {
-  const path = url.split(/[?#]/)[0] ?? ''
+function mediaTypeFromUrl(url: string): string {  const path = url.split(/[?#]/)[0] ?? ''
   if (/\.png$/i.test(path)) return 'image/png'
   if (/\.jpe?g$/i.test(path)) return 'image/jpeg'
   if (/\.webp$/i.test(path)) return 'image/webp'
   if (/\.gif$/i.test(path)) return 'image/gif'
   return ''
+}
+
+/**
+ * Refuse a picture URL that resolves to a loopback, private, link-local, or
+ * otherwise reserved host.
+ *
+ * The page chooses this URL, so without the check an `<img src="http://127.0.0.1:…">`
+ * or `http://192.168.x.x/…` becomes a request the extension makes with its own
+ * host permissions (no CORS, cookies included), and the answer comes back to
+ * the model — a blind SSRF oracle at minimum, an authenticated read at worst.
+ *
+ * @param raw - the absolute http(s) URL the page reported.
+ * @throws PageImageError when the host is not a public address.
+ */
+function assertPublicImageUrl(raw: string): void {
+  let host: string
+  try {
+    host = new URL(raw).hostname.toLowerCase().replace(/^\[|\]$/g, '')
+  } catch {
+    throw new PageImageError('action-failed', 'That picture URL could not be parsed.')
+  }
+  if (isRestrictedHost(host)) {
+    throw new PageImageError(
+      'action-failed',
+      `That picture is served from a non-public address (${host}), which the extension will not fetch. `
+      + 'Use browser_capture to screenshot it instead.',
+    )
+  }
+}
+
+/** Whether a hostname names something other than the public web. */
+function isRestrictedHost(host: string): boolean {
+  if (host === '' || host === 'localhost' || host.endsWith('.localhost')) return true
+  if (host.endsWith('.local') || host.endsWith('.internal') || host.endsWith('.home.arpa')) return true
+  if (host === 'metadata.google.internal') return true
+  if (host.includes(':')) return true                                    // IPv6: any form is out of scope here
+  if (!/^\d+\.\d+\.\d+\.\d+$/.test(host)) return false                   // a name, not a literal address
+  const octets = host.split('.').map(Number)
+  if (octets.some((octet) => !Number.isInteger(octet) || octet < 0 || octet > 255)) return true
+  const [a = 0, b = 0] = octets
+  return a === 0                                                            // this-network
+    || a === 10                                                             // private
+    || a === 127                                                            // loopback
+    || (a === 169 && b === 254)                                             // link-local, incl. cloud metadata
+    || (a === 172 && b >= 16 && b <= 31)                                    // private
+    || (a === 192 && b === 168)                                             // private
+    || (a === 192 && b === 0)                                               // IETF protocol assignments
+    || (a === 100 && b >= 64 && b <= 127)                                   // carrier-grade NAT
+    || (a === 198 && (b === 18 || b === 19))                                // benchmarking
+    || a >= 224                                                             // multicast and reserved
 }
 
 /** Read the bytes a source points at, without re-encoding. */
@@ -90,6 +146,7 @@ async function readSourceBytes(source: PageImageSource): Promise<{ bytes: Uint8A
     }
   }
   if (/^https?:/i.test(raw)) {
+    assertPublicImageUrl(raw)
     let response: Response
     try {
       // `include` keeps a picture behind the page's own login readable; reading

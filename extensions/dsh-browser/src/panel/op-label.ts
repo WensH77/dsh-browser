@@ -10,6 +10,7 @@
  * @module
  */
 
+import { shorten } from '../shared/text.ts'
 import type { RecentOp } from '../shared/messages.ts'
 
 /** Strings one label needs; supplied by the panel so this stays locale-free. */
@@ -42,8 +43,7 @@ export interface OpCopy {
 const SOURCE_MAX = 48
 
 function short(value: string, max: number = SOURCE_MAX): string {
-  const flat = value.replace(/\s+/g, ' ').trim()
-  return flat.length <= max ? flat : `${flat.slice(0, max - 1)}…`
+  return shorten(value, max)
 }
 
 function hostOf(url: string): string {
@@ -97,14 +97,27 @@ export function opLabel(op: RecentOp, copy: OpCopy): string {
     }
     case 'browser_snapshot': return copy.opSnapshot
     case 'browser_capture': return copy.opCapture
-    case 'browser_get_text': return copy.opGetText
+    case 'browser_get_text': {
+      // The search term and the region are what tell one read from another; the
+      // label used to be the same two words every time.
+      const scope = stringArg(op, 'selector')
+      const find = stringArg(op, 'find')
+      const parts = [find === '' ? '' : `"${short(find, 24)}"`, scope === '' ? '' : short(scope, 24)].filter((p) => p !== '')
+      return parts.length === 0 ? copy.opGetText : `${copy.opGetText} ${parts.join(' · ')}`
+    }
     case 'browser_console': return copy.opConsole
     case 'browser_network': {
       if (op.args.mock !== undefined || op.args.mockClear === true) return copy.opNetwork
       const requestId = stringArg(op, 'requestId')
-      return requestId === '' ? copy.opNetwork : `${copy.opNetwork} (${short(requestId, 16)})`
+      if (requestId !== '') return `${copy.opNetwork} (${short(requestId, 16)})`
+      // A filtered list is a different question from an unfiltered one; without
+      // the filter every entry read as a bare "Network".
+      const filter = stringArg(op, 'url')
+      const type = stringArg(op, 'resourceType')
+      const parts = [filter === '' ? '' : short(filter, 28), type === '' ? '' : type].filter((p) => p !== '')
+      return parts.length === 0 ? copy.opNetwork : `${copy.opNetwork} ${parts.join(' · ')}`
     }
-    case 'browser_eval': return `${copy.opEval} ${short(stringArg(op, 'expression'))}`
+    case 'browser_eval': return copy.opEval
     case 'browser_dialog': return `${copy.opDialog} ${stringArg(op, 'action')}`
     case 'browser_block': return `${copy.opBlock} ${short(stringArg(op, 'pattern'))}`
     case 'browser_headers': return `${copy.opHeaders} ${short(stringArg(op, 'pattern'))}`

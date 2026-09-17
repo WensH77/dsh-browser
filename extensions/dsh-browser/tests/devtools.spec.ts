@@ -276,4 +276,37 @@ describe('page evaluation', () => {
     expect(answer.ok).toBe(false)
     expect(harness.sendCommand).not.toHaveBeenCalled()
   })
+
+  it('keeps the nextCursor line when the budget cannot fit the page', async () => {
+    // A plain slice at the end used to cut the cursor off, leaving the model a
+    // page it could not page past and no sign that entries had been dropped.
+    await harness.devtools.readConsole(1, {}, 32_000)
+    for (let at = 0; at < 40; at += 1) {
+      harness.emit(1, 'Runtime.consoleAPICalled', { type: 'log', args: [{ value: `entry-${at}-${'x'.repeat(60)}` }] })
+    }
+
+    const page = await harness.devtools.readConsole(1, {}, 600)
+
+    expect(page.ok).toBe(true)
+    expect(page.result?.text).toMatch(/nextCursor: \d+/)
+    expect(page.result?.text).toContain('omitted')
+    expect(page.result!.text.length).toBeLessThanOrEqual(600)
+
+    // Even a budget too small for the summary still keeps the cursor: without
+    // it the model has no way to continue and no sign it was dropped.
+    const tiny = await harness.devtools.readConsole(1, {}, 90)
+    expect(tiny.result?.text).toMatch(/nextCursor: \d+/)
+  })
+
+  it('refuses a frame argument instead of letting approval and execution disagree', async () => {
+    // `Runtime.evaluate` runs in the main frame context, so a `frame` argument
+    // cannot move it. Approval reads `args.frame` to pick the origin it names,
+    // so honouring the argument only in approval would show the user one
+    // origin while the code ran in another.
+    const answer = await harness.devtools.evaluateInPage(1, { expression: 'document.cookie', frame: 3 }, 32_000)
+
+    expect(answer.ok).toBe(false)
+    expect(answer.error?.message).toContain('main frame')
+    expect(harness.sendCommand).not.toHaveBeenCalled()
+  })
 })

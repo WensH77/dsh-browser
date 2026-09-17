@@ -6,10 +6,39 @@ import {
   BROWSER_TOOL_NAMES,
   DEBUG_TOOL_NAMES,
   GOOGLE_DRIVE_TIMEOUT_MS,
+  MAX_WAIT_MS,
   TOOLSET_TOOL_NAMES,
+  clampWaitMs,
   registerBrowserTools,
 } from '../src/tools.ts'
-import { BRIDGE_TOOLSET, LEGACY_TOOLSET, TOOLSET_SELECTOR_TARGETS, TOOLSET_TEXT_FIND } from '../src/protocol.ts'
+import {
+  BRIDGE_TOOLSET, LEGACY_TOOLSET, TOOLSET_PAGE_IMAGE, TOOLSET_SELECTOR_TARGETS, TOOLSET_TEXT_FIND,
+} from '../src/protocol.ts'
+
+describe('clampWaitMs', () => {
+  it('bounds an explicit wait so it cannot outlive the tool call', () => {
+    // The page sleeps for whatever it is handed and cannot be interrupted, so
+    // an unbounded value would keep a timer alive long after the host gave up.
+    expect(clampWaitMs(1_500)).toBe(1_500)
+    expect(clampWaitMs(MAX_WAIT_MS)).toBe(MAX_WAIT_MS)
+    expect(clampWaitMs(MAX_WAIT_MS + 1)).toBe(MAX_WAIT_MS)
+    expect(clampWaitMs(31_536_000_000)).toBe(MAX_WAIT_MS)
+  })
+
+  it('treats a missing or unusable delay as no extra wait', () => {
+    expect(clampWaitMs(undefined)).toBe(0)
+    expect(clampWaitMs(null)).toBe(0)
+    expect(clampWaitMs('5000')).toBe(0)
+    expect(clampWaitMs(-1)).toBe(0)
+    expect(clampWaitMs(0)).toBe(0)
+    expect(clampWaitMs(Number.NaN)).toBe(0)
+    expect(clampWaitMs(Number.POSITIVE_INFINITY)).toBe(0)
+  })
+
+  it('floors a fractional delay rather than passing it on', () => {
+    expect(clampWaitMs(1_234.9)).toBe(1_234)
+  })
+})
 
 describe('registerBrowserTools', () => {
   function makeHarness(services: Record<string, unknown> = {}, debuggerAllowed = false) {
@@ -177,11 +206,19 @@ describe('registerBrowserTools', () => {
     expect(tools.names()).not.toContain('browser_image')
     expect(tools.names()).toContain('browser_dom_query')
 
-    // Level 3: the page-picture tool appears with its own schema.
-    tools.setClientToolset(BRIDGE_TOOLSET)
+    // Level 3: the page-picture tool appears with its own schema, and the
+    // pointer click stays hidden — its action is a wire case this level lacks.
+    tools.setClientToolset(TOOLSET_PAGE_IMAGE)
     expect(tools.names()).toContain('browser_image')
+    expect(tools.names()).not.toContain('browser_click_pointer')
     const imageTool = registered.find((r) => r.name === 'browser_image')!.definition
     expect(Object.keys(params(imageTool))).toEqual(expect.arrayContaining(['selector', 'index', 'frame']))
+
+    // Level 4 adds the pointer click, with the same targets as browser_click.
+    tools.setClientToolset(BRIDGE_TOOLSET)
+    expect(tools.names()).toContain('browser_click_pointer')
+    const pointerTool = registered.find((r) => r.name === 'browser_click_pointer')!.definition
+    expect(Object.keys(params(pointerTool))).toEqual(expect.arrayContaining(['index', 'selector']))
 
     // Level 0 has neither selector targets nor text search.
     tools.setClientToolset(LEGACY_TOOLSET)
@@ -339,7 +376,9 @@ describe('registerBrowserTools', () => {
       'not a url',
     ]) {
       const text = await run(url)
-      expect(text).toContain('only exports Google Docs')
+      // One wording for one fact: this text and the extension's own hint are
+      // the same constant, so assert the content the model actually needs.
+      expect(text).toContain('only handles Google Docs')
       expect(text).toContain('browser_navigate')
     }
     expect(requestTool).not.toHaveBeenCalled()

@@ -60,6 +60,8 @@ Frames are JSON objects discriminated by `t`, defined in [`protocol.ts`](src/pro
 
 Both halves negotiate versions in `hello`/`hello.ok`: `proto` is the handshake version (a build that sends none reads as 1) and `toolset` is the extension's feature level (none = 0). A host that cannot serve a newer extension closes with code `4003` and a reason the extension shows verbatim; an extension that declares an older level gets a narrowed tool surface (no `browser_dom_query`/`browser_block`/`browser_headers`, and `browser_click`/`browser_type` without `selector`) instead of argument errors at call time. The extension shows the same skew in its options page and side panel, naming the fix (restart dsh, or reload the extension).
 
+Loopback sockets may skip the bearer token, but only for one extension: the `Origin` must name an ID in `BRIDGE_EXTENSION_IDS`, and the extension's own `caps.extensionId` must match that same ID. Any other `chrome-extension://` origin is refused with `4002` — otherwise every other installed extension could take the single tool slot and read the model's tool calls, since `Origin` is only a header. The pinned ID is derived from the public key in the extension manifest (`scripts/extension-id.mjs`; a test asserts the two agree), so it stays stable across installs. This is not cryptographic proof of identity: a local process that knows the ID can still forge the header, which is why non-loopback connections always require the token.
+
 ## Tools
 
 | Tool | Purpose |
@@ -70,9 +72,11 @@ Both halves negotiate versions in `hello`/`hello.ok`: `proto` is the handshake v
 | `browser_scroll` / `browser_navigate` / `browser_back` / `browser_forward` / `browser_reload` | Page movement. |
 | `browser_get_text` / `browser_wait` | Read regions / settle detection. `find` (+ `context`) locates a phrase in the whole scope and returns a bounded window per match, so one call answers "what does this part say" without scripting the DOM. |
 | `browser_dom_query` | Narrow DOM read: fields of the elements a CSS selector matches, each with a verified unique selector. |
+| `browser_image` | A picture the page embeds (`<img>` / `<canvas>` / SVG `<image>` / CSS background) at its original resolution. Needs no `chrome.debugger`, so it works with DevTools open and on a background tab. |
 | `browser_console` / `browser_network` | Console messages and uncaught errors; request list, one response body by id, and in-memory response overrides. |
 | `browser_dialog` | Accept or dismiss the page's JavaScript dialog — the escape hatch when a page is frozen behind an `alert`/`confirm`. |
 | `browser_eval` | Evaluate an expression in the page's own context (page CSP does not block it). |
+| `browser_bind_interactive` | List the bindable pages, ask the user to pick one through the standard question flow, and bind this session to it — one tool for the whole interaction. |
 | `google_drive_export` | Export a Google Doc (`/document/d/…`) or Sheet (`/spreadsheets/d/…`) with the signed-in session; every other Google link is read in the browser instead. |
 | `browser_block` / `browser_headers` | Block matching requests, or rewrite request/response headers; session rules scoped to the controlled tab. |
 

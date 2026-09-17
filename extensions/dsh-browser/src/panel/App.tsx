@@ -32,16 +32,16 @@ const zh = {
   opClick: '点击',
   opType: '输入',
   opEval: '执行 JS',
-  opBlock: '阻断',
-  opHeaders: '改头',
-  opCapture: '截图',
-  opConsole: '读控制台',
-  opNetwork: '看网络',
-  opDialog: '回应弹窗',
+  opBlock: '阻断请求',
+  opHeaders: '改写请求头',
+  opCapture: '页面截图',
+  opConsole: '查看控制台',
+  opNetwork: '查看网络请求',
+  opDialog: '回应页面弹窗',
   opElement: '元素',
   opPress: '按键',
   opScroll: '滚动',
-  opSnapshot: '读取页面',
+  opSnapshot: '读取页面快照',
   opGetText: '读取文本',
   opWait: '等待',
   opBack: '后退',
@@ -81,16 +81,16 @@ const en = {
   opClick: 'Click',
   opType: 'Type',
   opEval: 'Run JS',
-  opBlock: 'Block',
-  opHeaders: 'Headers',
-  opCapture: 'Capture',
-  opConsole: 'Console',
-  opNetwork: 'Network',
-  opDialog: 'Answer dialog',
+  opBlock: 'Block requests',
+  opHeaders: 'Rewrite headers',
+  opCapture: 'Screenshot page',
+  opConsole: 'View console',
+  opNetwork: 'View network requests',
+  opDialog: 'Answer page dialog',
   opElement: 'element',
   opPress: 'Press',
   opScroll: 'Scroll',
-  opSnapshot: 'Read page',
+  opSnapshot: 'Read page snapshot',
   opGetText: 'Read text',
   opWait: 'Wait',
   opBack: 'Go back',
@@ -132,6 +132,22 @@ function opTitle(op: import('../shared/messages.ts').RecentOp): string {
     args = '(unserializable arguments)'
   }
   return `${op.name}${op.label === undefined ? '' : ` · ${op.label}`}\n${span}\n${args}`
+}
+
+/**
+ * The code an operation ran, when it ran code.
+ *
+ * `browser_eval` carries a whole expression. Crammed onto one line after its
+ * label it was cut to the first few characters with no sign that anything was
+ * missing — `执行 JS (() => { const f = document.forms.mainform; i…` — so the
+ * feed could not be scanned and the code could not be read. It gets its own
+ * line, wrapping, and the full text; the row's tooltip still carries every
+ * argument as JSON.
+ */
+function opCode(op: import('../shared/messages.ts').RecentOp): string | undefined {
+  if (op.name !== 'browser_eval') return undefined
+  const expression = op.args?.expression
+  return typeof expression === 'string' && expression.trim() !== '' ? expression.trim() : undefined
 }
 
 function opStateLabel(state: string): string | undefined {
@@ -262,14 +278,21 @@ export function App(): ReactElement {
           <section className="ops">
             <div className="ops__label">{copy.operations}</div>
             <ol className="ops__list">
-              {[...(ui?.recentOps ?? [])].slice(0, 15).reverse().map((op) => {
+              {/* Newest first, and no `reverse()`: the store already keeps the
+                  newest operation at index 0. Reversing put the newest at the
+                  BOTTOM of the list, so with a long feed the entry that just
+                  happened landed below the fold and the only way to find it was
+                  to scroll -- while the oldest entry sat at the top. */}
+              {[...(ui?.recentOps ?? [])].slice(0, 15).map((op) => {
                 const stateText = opStateLabel(op.state)
+                const code = opCode(op)
                 return (
                   <li className="ops__row" key={op.id} title={opTitle(op)}>
                     <time className="ops__time">{fmtClock(op.startedAt)}</time>
                     <span className={`ops__dot ops__dot--${op.state}`} />
                     <span className="ops__content">
                       <span className="ops__text">{opLabel(op, copy as OpCopy)}</span>
+                      {code !== undefined && <code className="ops__code">{code}</code>}
                       <span className="ops__meta">
                         {/* The chip would just repeat a label that already fell back to the tool name. */}
                         {opLabel(op, copy as OpCopy) !== op.name && <span className="ops__tool">{op.name}</span>}

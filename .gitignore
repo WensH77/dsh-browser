@@ -6,3 +6,7 @@ node_modules/
 **/dist/
 **/dist-firefox/
 **/coverage/
+# Local mock-up and scratch directories, plus the Finder metadata that comes with them:
+# working files, not part of the project that gets distributed.
+mockups/
+.DS_Store

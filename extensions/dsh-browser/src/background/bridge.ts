@@ -12,6 +12,7 @@
 import type { BridgeCaps, ClientFrame, ServerFrame } from '@yuxianglin/dsh-bridge-browser/src/protocol.ts'
 import {
   BRIDGE_PROTO,
+  EXTENSION_UNVERIFIED_CLOSE_CODE,
   BRIDGE_TOOLSET,
   DEFAULT_SNAPSHOT_MAX_CHARS,
   HANDSHAKE_MISMATCH_CLOSE_CODE,
@@ -35,9 +36,14 @@ export interface BridgeNotice {
    * dsh build older than this extension); `host-older` — the handshake worked
    * but the plugin speaks an older protocol, so its tools and descriptions are
    * not in play yet; `host-newer` — the plugin is newer than this extension, so
-   * reloading the extension is what brings its tools into play.
+   * reloading the extension is what brings its tools into play; `extension-stale`
+   * — the host accepted the socket's origin but the `hello` could not corroborate
+   * it, which is what a build predating `caps.extensionId` hits, so this build is
+   * the thing to reload; `bridge-replaced` — another connection took the single
+   * bridge slot, so this one stopped on purpose and waits for a manual reconnect
+   * (the keepalive will not fight over the slot).
    */
-  kind: 'host-rejected' | 'host-silent' | 'host-older' | 'host-newer'
+  kind: 'host-rejected' | 'host-silent' | 'host-older' | 'host-newer' | 'extension-stale' | 'bridge-replaced'
   /** Verbatim detail from the host (close code/reason), when there is one. */
   detail?: string
 }
@@ -88,7 +94,11 @@ export class BridgeClient {
    * @param token - bearer token from settings.
    */
   start(url: string, token: string): void {
-    this.stop()
+    // Tear down any previous attempt WITHOUT announcing a stop. `start` used to
+    // route through `stop()`, which emits 'stopped' before 'connecting', so every
+    // ordinary (re)start told the UI it had stopped and filled the log with
+    // "stopped" lines that read like a fault.
+    this.teardown()
     this.url = url
     this.token = token
     this.running = true
@@ -97,13 +107,33 @@ export class BridgeClient {
     void this.loop(this.generation)
   }
 
-  /** Stop the loop and close the current socket. */
+  /**
+   * Re-arm a loop that has given up, without rebuilding the client.
+   *
+   * The keepalive wakes a stalled client this way; `start` would do it too, but
+   * it also resets the attempt counter and re-resolves nothing, so a dedicated
+   * entry point keeps the intent ("try again") separate from "connect to here".
+   */
+  retry(): void {
+    if (this.running) return
+    this.running = true
+    this.attempt = 0
+    this.generation += 1
+    void this.loop(this.generation)
+  }
+
+  /** Stop the loop, close the socket, and report the stop. */
   stop(): void {
+    this.teardown()
+    this.emitState('stopped')
+  }
+
+  /** Drop the current attempt silently; the caller decides what to report. */
+  private teardown(): void {
     this.running = false
     this.clearAckTimer()
     this.ws?.close()
     this.ws = null
-    this.emitState('stopped')
   }
 
   /** Whether a frame can be sent right now. */
@@ -143,6 +173,10 @@ export class BridgeClient {
         this.running = false
         this.clearAckTimer()
         this.ws = null
+        // Say why it stopped. Without this the UI shows a bare "disconnected"
+        // with no hint that a click on Reconnect is the only way back -- and
+        // the keepalive deliberately stays out of it.
+        this.sinks.onNotice({ kind: 'bridge-replaced', detail: event.reason })
         this.emitState('stopped')
       }, { once: true })
       this.emitState('connecting')
@@ -164,6 +198,13 @@ export class BridgeClient {
       // Authenticate: hello must be accepted before any other traffic. `proto`
       // and `toolset` let both halves detect a mismatched build instead of
       // failing later on an argument the other side never implemented.
+      // `extensionId` is this extension's own ID: the host pins it and checks
+      // the socket's Origin against it, so a socket that merely claims a
+      // `chrome-extension://` origin cannot take the tool slot on the
+      // no-token loopback path. Read defensively: no `chrome.runtime` (older
+      // test harness) means an empty string, which the protocol treats as
+      // "not reported" and the host rejects on that path.
+      const extensionId = chrome?.runtime?.id ?? ''
       socket.send(JSON.stringify({
         t: 'hello',
         token: this.token,
@@ -171,6 +212,7 @@ export class BridgeClient {
           proto: BRIDGE_PROTO,
           toolset: BRIDGE_TOOLSET,
           debugger: this.debugEnabled() && visionAvailable(),
+          ...extensionId === '' ? {} : { extensionId },
           snapshotMaxChars: DEFAULT_SNAPSHOT_MAX_CHARS,
           maxInteractiveItems: 60,
         },
@@ -285,6 +327,12 @@ export function handshakeNotice(
 ): BridgeNotice {
   if (refusal !== undefined && refusal.code === HANDSHAKE_MISMATCH_CLOSE_CODE) {
     return { kind: 'host-rejected', detail: refusal.reason }
+  }
+  // The host let the origin through but could not match it to the hello: a build
+  // from before `caps.extensionId` cannot pass that check, and the fix is here,
+  // not on the host -- which is why it must not read as "restart dsh".
+  if (refusal !== undefined && refusal.code === EXTENSION_UNVERIFIED_CLOSE_CODE) {
+    return { kind: 'extension-stale', detail: refusal.reason }
   }
   if (refusal !== undefined) {
     return { kind: 'host-silent', detail: `closed with ${refusal.code}${refusal.reason === '' ? '' : ` ${refusal.reason}`}` }

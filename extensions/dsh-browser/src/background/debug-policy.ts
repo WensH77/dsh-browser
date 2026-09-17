@@ -9,16 +9,17 @@
  * @module
  */
 
+import { DEBUG_TOOL_NAMES } from '@yuxianglin/dsh-bridge-browser/src/protocol.ts'
 import type { ToolAnswer } from './tools.ts'
 
-/** Tools that need `chrome.debugger`; mirrors the host's DEBUG_TOOL_NAMES. */
-export const DEBUG_TOOL_NAMES = new Set([
-  'browser_capture',
-  'browser_console',
-  'browser_network',
-  'browser_eval',
-  'browser_dialog',
-])
+/** Re-exported so callers and tests keep one import path for the list. */
+export { DEBUG_TOOL_NAMES }
+
+/**
+ * Tools that need `chrome.debugger`. The list itself lives in the shared wire
+ * contract so this half cannot drift from the host's registration.
+ */
+const DEBUG_TOOLS = new Set<string>(DEBUG_TOOL_NAMES)
 
 /**
  * Refuse a debugging tool while the user has the capability switched off.
@@ -28,7 +29,7 @@ export const DEBUG_TOOL_NAMES = new Set([
  * @returns a refusal to answer with, or undefined when the call may proceed.
  */
 export function debugToolRefusal(name: string, allowed: boolean): ToolAnswer | undefined {
-  if (allowed || !DEBUG_TOOL_NAMES.has(name)) return undefined
+  if (allowed || !DEBUG_TOOLS.has(name)) return undefined
   return {
     ok: false,
     error: {

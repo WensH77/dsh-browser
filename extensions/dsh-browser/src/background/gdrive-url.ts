@@ -24,13 +24,9 @@ export interface GdriveTarget {
   binary: boolean
 }
 
-/** Hosts that serve either exportable kind. */
-const EXPORT_HOSTS = new Set(['docs.google.com', 'spreadsheets.google.com', 'drive.google.com'])
+import { GDRIVE_UNSUPPORTED_HINT, gdriveExportKind } from '@yuxianglin/dsh-bridge-browser/src/protocol.ts'
 
-/** What to tell the model about a link this tool does not handle. */
-export const GDRIVE_UNSUPPORTED_HINT = 'google_drive_export only handles Google Docs (/document/d/…) and Sheets (/spreadsheets/d/…) links. '
-  + 'For Slides, Drive files, or any other link, read it in the browser instead: browser_navigate to it, then browser_snapshot, '
-  + 'browser_capture, or browser_dom_query.'
+export { GDRIVE_UNSUPPORTED_HINT }
 
 /**
  * Parse one Google link into an export target.
@@ -45,19 +41,14 @@ export function parseGdriveExportUrl(value: string): GdriveTarget | { error: str
   } catch {
     return { error: `That is not a valid URL. ${GDRIVE_UNSUPPORTED_HINT}` }
   }
-  if (!EXPORT_HOSTS.has(url.hostname.toLowerCase())) {
-    return { error: `Only Google Docs and Sheets links can be exported; this URL is on ${url.hostname || 'an unknown host'}. ${GDRIVE_UNSUPPORTED_HINT}` }
+  const kind = gdriveExportKind(value)
+  if (kind === undefined) {
+    return { error: `That link is not a Google Doc or Sheet this tool can export. ${GDRIVE_UNSUPPORTED_HINT}` }
   }
-  const id = (pattern: RegExp): string | undefined => pattern.exec(url.pathname)?.[1]
-  const doc = id(/\/document\/d\/([^/?#]+)/)
-  if (doc !== undefined) {
-    return { kind: 'docs', id: doc, exportUrl: `https://docs.google.com/document/d/${doc}/export?format=md`, binary: false }
-  }
-  const sheet = id(/\/spreadsheets\/d\/([^/?#]+)/)
-  if (sheet !== undefined) {
-    return { kind: 'sheets', id: sheet, exportUrl: `https://docs.google.com/spreadsheets/d/${sheet}/export?format=xlsx`, binary: true }
-  }
-  return { error: `That link is not a Google Doc or Sheet this tool can export. ${GDRIVE_UNSUPPORTED_HINT}` }
+  const id = (/\/(?:document|spreadsheets)\/d\/([^/?#]+)/.exec(url.pathname)?.[1]) ?? ''
+  return kind === 'docs'
+    ? { kind: 'docs', id, exportUrl: `https://docs.google.com/document/d/${id}/export?format=md`, binary: false }
+    : { kind: 'sheets', id, exportUrl: `https://docs.google.com/spreadsheets/d/${id}/export?format=xlsx`, binary: true }
 }
 
 /** Whether one URL is an exportable Google Doc or Sheet. */

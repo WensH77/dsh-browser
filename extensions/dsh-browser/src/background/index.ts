@@ -29,9 +29,11 @@ import {
   BRIDGE_GDRIVE_MOVE_METHOD,
   BRIDGE_OPEN_GDRIVE_FOLDER_METHOD,
   BRIDGE_PATH,
+  MAX_BINDABLE_TABS,
+  formatBindableTab,
   type BridgeCaps,
 } from '@yuxianglin/dsh-bridge-browser/src/protocol.ts'
-import { BridgeClient, type BridgeNotice } from './bridge.ts'
+import { BridgeClient, type BridgeNotice, type BridgeState } from './bridge.ts'
 import { bridgeNotice } from './bridge-notice.ts'
 import { approvalFailureAnswer, dispatchToolCall, resetTabSnapshot, type ToolAnswer, type ToolCall } from './tools.ts'
 import { approvalPromptForCall, setActionTrustPolicy } from './authorization.ts'
@@ -61,6 +63,7 @@ import { affinityFailureAnswer } from './affinity-copy.ts'
 import { isExportableGdriveUrl, parseGdriveExportUrl } from './gdrive-url.ts'
 import { waitForTabCommit } from './tab-commit.ts'
 import { clearTabRules } from './net-rules.ts'
+import { isExtensionPageSender } from '../shared/message-sender.ts'
 import {
   SETTINGS_DEFAULTS,
   SETTINGS_STORAGE_KEY,
@@ -916,10 +919,8 @@ function operationGuard(call: ToolCall, tab: { url?: string }): ToolAnswer | und
     return undefined
   }
   // Reads and actions on the current controlled page.
-  const origin = originOfUrl(tab.url ?? '')
-  if (origin !== undefined && originMatchesTrusted(origin, settings.blockedOrigins)) {
-    return { ok: false, error: { code: 'action-failed', message: `Operations on ${origin} are blocked in Settings (blocked list).` } }
-  }
+  const blockedBySettings = blockedOriginFailure(tab.url ?? '')
+  if (blockedBySettings !== undefined) return blockedBySettings
   const pageUrl = tab.url ?? ''
   if (isDriveFileUrl(pageUrl)) {
     return {
@@ -930,15 +931,6 @@ function operationGuard(call: ToolCall, tab: { url?: string }): ToolAnswer | und
           + '(Slides and Drive files are read with the page tools.)',
       },
     }
-  }
-  return undefined
-}
-
-/** Reject binding/operating a tab the blocked list forbids. */
-function tabPolicyBlocked(url: string | undefined): ToolAnswer | undefined {
-  const origin = originOfUrl(url ?? '')
-  if (origin !== undefined && originMatchesTrusted(origin, settings.blockedOrigins)) {
-    return { ok: false, error: { code: 'action-failed', message: `Operations on ${origin} are blocked in Settings (blocked list).` } }
   }
   return undefined
 }
@@ -974,6 +966,20 @@ function settleBridgeRpc(id: string, ok: boolean, result: unknown): void {
   else pending.reject(new Error(result instanceof Error ? result.message : String(result)))
 }
 
+/**
+ * Fail every internal RPC still waiting on the socket.
+ *
+ * Without this, a dropped connection left callers waiting out the 15-second
+ * timer and then reporting a *timeout* — a wrong reason for what actually
+ * happened, and 15 seconds of a button doing nothing.
+ */
+function settlePendingBridgeRpcs(reason: string): void {
+  if (pendingBridgeRpcs.size === 0) return
+  const waiting = [...pendingBridgeRpcs.values()]
+  pendingBridgeRpcs.clear()
+  for (const pending of waiting) pending.reject(new Error(reason))
+}
+
 interface PendingDownload {
   resolve: (filename: string) => void
   reject: (error: Error) => void
@@ -1007,25 +1013,36 @@ async function downloadToPath(url: string, filename: string, timeoutMs = 120_000
     conflictAction: 'uniquify',
     saveAs: false,
   })
+  // The promise is created -- and its settle callbacks are assigned -- before
+  // the first await. `onChanged` deletes the map entry and settles through
+  // these callbacks, so a download that completes while we are still seeding
+  // the filename must still settle the caller: assigning them later (as this
+  // used to) left the real resolve unset and the call hanging until the host
+  // timed out, with the entry and timer leaked.
+  let settleResolve: (filename: string) => void = () => {}
+  let settleReject: (error: Error) => void = () => {}
   const pending: PendingDownload = {
     filename: undefined,
-    resolve: () => {},
-    reject: () => {},
+    resolve: (value) => settleResolve(value),
+    reject: (error) => settleReject(error),
   }
+  const settled = new Promise<string>((resolve, reject) => {
+    settleResolve = resolve
+    settleReject = reject
+  })
   pendingDownloads.set(id, pending)
   // Seed the filename immediately from the download record when available.
   const found = await chrome.downloads.search({ id }).catch(() => [])
-  if (found.length > 0 && found[0]?.filename !== undefined) pending.filename = found[0].filename
-  return new Promise((resolve, reject) => {
-    pending.resolve = resolve
-    pending.reject = reject
-    setTimeout(() => {
-      if (pendingDownloads.get(id) === pending) {
-        pendingDownloads.delete(id)
-        reject(new Error('Download timed out'))
-      }
-    }, timeoutMs)
-  })
+  if (found.length > 0 && found[0]?.filename !== undefined && pending.filename === undefined) {
+    pending.filename = found[0].filename
+  }
+  const timer = setTimeout(() => {
+    if (pendingDownloads.get(id) === pending) {
+      pendingDownloads.delete(id)
+      settleReject(new Error('Download timed out'))
+    }
+  }, timeoutMs)
+  return settled.finally(() => { clearTimeout(timer) })
 }
 
 /**
@@ -1107,8 +1124,8 @@ async function handleVirtualTool(call: ToolCall, signal: AbortSignal): Promise<T
     const lines: string[] = []
     for (const tab of tabs) {
       if (tab.id === undefined || !isBindableTabUrl(tab.url)) continue
-      lines.push(`ID=${tab.id} | ${tab.title ?? ''} | ${tab.url}`)
-      if (lines.length >= 60) break
+      lines.push(formatBindableTab({ id: tab.id, title: tab.title ?? '', url: tab.url ?? '' }))
+      if (lines.length >= MAX_BINDABLE_TABS) break
     }
     if (signal.aborted) return { ok: false, error: { code: 'bridge-closed', message: 'Tool call was cancelled' } }
     const text = lines.length === 0
@@ -1133,7 +1150,7 @@ async function handleVirtualTool(call: ToolCall, signal: AbortSignal): Promise<T
     if (summary === null || !isBindableTabUrl(summary.url)) {
       return { ok: false, error: { code: 'no-active-tab', message: 'That tab is not a bindable web page' } }
     }
-    const policyBlocked = tabPolicyBlocked(summary.url)
+    const policyBlocked = blockedOriginFailure(summary.url)
     if (policyBlocked !== undefined) return policyBlocked
     await affinityReady
     if (signal.aborted) return { ok: false, error: { code: 'bridge-closed', message: 'Tool call was cancelled' } }
@@ -1307,11 +1324,23 @@ async function startBridge(): Promise<void> {
     // 非法 URL 原样交给 WebSocket 构造函数报错。
   }
   if (bridge === null) {
+    // What the UI was last told. `onStateChange` fires on every emit, including
+    // the ones a restart produces on its way back up; acting on each one logged
+    // a reconnect storm and threw away in-flight work for no reason.
+    let reportedState: BridgeState | 'initial' = 'initial'
     const client = new BridgeClient({
       onStateChange: (state) => {
-        if (state !== 'connected') {
-          console.warn('[dsh-browser] bridge state', state, '-> cancelling in-flight tool calls')
-          cancelAllToolCalls()
+        if (state !== reportedState) {
+          if (state === 'connected') {
+            console.info('[dsh-browser] bridge state', reportedState, '-> connected')
+          } else if (state !== 'connecting') {
+            // `connecting` is the ordinary first step of every attempt, including
+            // a restart's; only a state the user would notice is worth a warning.
+            console.warn(`[dsh-browser] bridge state ${state} -> cancelling in-flight tool calls`)
+            cancelAllToolCalls()
+            settlePendingBridgeRpcs(`Bridge RPC failed: the bridge is ${state}.`)
+          }
+          reportedState = state
         }
         broadcastStatus()
       },
@@ -1341,8 +1370,13 @@ async function startBridge(): Promise<void> {
 
 // ---- UI messages (status side panel / options / action popup) ----
 
-chrome.runtime.onMessage.addListener((message: unknown, _sender, sendResponse) => {
+chrome.runtime.onMessage.addListener((message: unknown, sender, sendResponse) => {
   if (typeof message !== 'object' || message === null) return
+  // Every request below is privileged: `settings.set` can repoint the bridge and
+  // rewrite the token, and `approval.response` is the user's consent. Only this
+  // extension's own pages may send them — a content script runs in a page's
+  // origin and must never be able to answer an approval or widen a setting.
+  if (!isExtensionPageSender(sender, `chrome-extension://${chrome.runtime.id}/`)) return
   const request = message as { type?: unknown }
   switch (request.type) {
     case 'ui.state':
@@ -1369,6 +1403,11 @@ chrome.runtime.onMessage.addListener((message: unknown, _sender, sendResponse) =
         // Turning debugging off must release the eager sessions it allowed.
         queueDevtoolsPriming()
         sendResponse(next)
+      }, (error: unknown) => {
+        // A save that cannot complete must still answer, or the settings page
+        // waits on a port that will never close cleanly.
+        console.warn('[dsh-browser] settings save failed', error)
+        sendResponse(settings)
       })
       return true
     }
@@ -1405,10 +1444,18 @@ chrome.runtime.onMessage.addListener((message: unknown, _sender, sendResponse) =
         () => sendResponse({ accepted: false }),
       )
       return true
-    case 'reconnect':
-      void settingsReady.then(() => { startBridge() })
-      sendResponse({ accepted: true })
-      return
+    case 'reconnect': {
+      // The answer depends on work that can fail; the UI must hear about that
+      // failure instead of waiting for a port that will never answer.
+      void settingsReady.then(() => startBridge()).then(
+        () => sendResponse({ accepted: true }),
+        (error: unknown) => {
+          console.warn('[dsh-browser] reconnect failed', error)
+          sendResponse({ accepted: false })
+        },
+      )
+      return true
+    }
     case 'open-options':
       void chrome.runtime.openOptionsPage().catch(() => {})
       sendResponse({ accepted: true })
@@ -1424,6 +1471,8 @@ function restartBridge(): void {
   bridge = null
   caps = null
   cancelAllToolCalls()
+  // A deliberate reconnect also invalidates anything waiting on the old socket.
+  settlePendingBridgeRpcs('Bridge RPC failed: the connection was restarted.')
   broadcastStatus()
   void startBridge()
 }
@@ -1508,12 +1557,18 @@ chrome.windows.onRemoved.addListener((windowId) => {
 
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name !== BRIDGE_KEEPALIVE_ALARM) return
-  // `stopped` is intentionally terminal until an explicit popup reconnect or
-  // a worker restart. In particular, code 4000 means another browser owns the
+  // `stopped` is intentionally terminal until an explicit popup reconnect or a
+  // worker restart. In particular, code 4000 means another browser owns the
   // single bridge slot and the keepalive must not reclaim it.
-  if (bridge === null || bridge.state === 'reconnecting') {
+  if (bridge === null) {
     void settingsReady.then(() => startBridge())
+    return
   }
+  // A client that exists but is not connected still needs the wake-up: the
+  // previous condition only rebuilt a client that was `null`, which is exactly
+  // the case that cannot happen after the first attempt — so this path was dead
+  // and a stalled client could never be revived.
+  if (bridge.state === 'reconnecting') bridge.retry()
 })
 
 // ---- Boot ----

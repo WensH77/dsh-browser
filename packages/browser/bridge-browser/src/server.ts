@@ -22,6 +22,8 @@ import type { IncomingMessage } from 'node:http'
 import type { Duplex } from 'node:stream'
 import { WebSocket, WebSocketServer } from 'ws'
 import {
+  BRIDGE_EXTENSION_IDS,
+  EXTENSION_UNVERIFIED_CLOSE_CODE,
   BRIDGE_GDRIVE_MOVE_METHOD,
   BRIDGE_OPEN_GDRIVE_FOLDER_METHOD,
   HANDSHAKE_MISMATCH_CLOSE_CODE,
@@ -39,6 +41,21 @@ import { verifyToken } from './token.ts'
 /** Loopback IPv4/IPv6 literals (IPv4-mapped included). Exported for tests and reuse. */
 export function isLoopbackAddress(address: string | undefined): boolean {
   return address === '127.0.0.1' || address === '::1' || address === '::ffff:127.0.0.1'
+}
+
+/**
+ * The extension ID an origin names, or undefined when it names none.
+ *
+ * A Chromium extension's origin is `chrome-extension://<id>` (or a
+ * `chrome-extension://<id>` prefix for its pages). Anything shorter than a full
+ * 32-character ID is not an identity — it would match every extension.
+ *
+ * @param origin - the `Origin` header on the upgrade request.
+ * @returns the bare extension ID, or undefined.
+ */
+export function extensionIdFromOrigin(origin: string): string | undefined {
+  const match = /^chrome-extension:\/\/([a-p]{32})(?:\/|$)/.exec(origin)
+  return match?.[1]
 }
 
 /** Error thrown by requestTool; the tool registry turns it into an isError result. */
@@ -264,17 +281,32 @@ export class BridgeServer {
         // extension auto-discovers the bridge and connects without setup).
         // WebSockets have no same-origin policy, so a malicious page could
         // open a cross-origin socket to 127.0.0.1 with a loopback remote —
-        // the loopback shortcut therefore requires a chrome-extension://
-        // Origin (only extension contexts can present one; pages cannot
-        // forge the header). Firefox moz-extension:// origins contain a
-        // per-install UUID rather than the manifest's stable Gecko ID, so
-        // they are not an identity boundary and must present the bearer token.
-        // Non-loopback remotes must also present the bearer token.
+        // hence the Origin requirement. But `Origin` alone is only a header:
+        // a local process can send any string, and every OTHER extension the
+        // user has installed can send its own genuine `chrome-extension://<id>`.
+        // So the ID itself is pinned to the extension this repo builds
+        // (BRIDGE_EXTENSION_IDS, derived from the manifest's public key), and
+        // the extension also reports its own `chrome.runtime.id` in `hello` —
+        // the two must agree. Firefox `moz-extension://` origins carry a
+        // per-install UUID and are not a stable identity boundary, so they must
+        // present the bearer token (this fork does not ship a Firefox build).
+        // Non-loopback remotes must present the bearer token as well.
         const loopbackNoToken = isLoopbackAddress(remoteAddress)
           && typeof origin === 'string'
-          && origin.startsWith('chrome-extension://')
+          && (BRIDGE_EXTENSION_IDS as readonly string[]).includes(extensionIdFromOrigin(origin) ?? '')
         if (!loopbackNoToken && !verifyToken(this.deps.token, frame.token)) {
           ws.close(4002, 'bad token')
+          return
+        }
+        // A connection admitted without a token must be the pinned extension,
+        // not something that guessed an accepted origin. `extensionId` arrived
+        // with `proto` 3; a build too old to send it cannot use the no-token
+        // path, which is what the token alternative above is for.
+        if (loopbackNoToken && frame.caps.extensionId !== extensionIdFromOrigin(origin ?? '')) {
+          // Its own code, not `4002`: the token was fine, the extension just
+          // cannot say which extension it is. A build older than protocol 3 has
+          // no `extensionId` in its hello, and reloading it is the fix.
+          ws.close(EXTENSION_UNVERIFIED_CLOSE_CODE, 'extension did not identify itself: reload it from chrome://extensions')
           return
         }
         // An extension built after this plugin cannot be served: it may rely on
@@ -361,10 +393,6 @@ export class BridgeServer {
         return
       }
       const { sourcePath, sessionId } = movePayload
-      if (sourcePath === '') {
-        sendFrame(conn.ws, { t: 'rpc.result', id: frame.id, ok: false, error: { code: 'bad-request', message: 'sourcePath and sessionId must be non-empty strings' } })
-        return
-      }
       try {
         const result = await this.deps.gdriveMoveIntoSession(sourcePath, sessionId)
         sendFrame(conn.ws, { t: 'rpc.result', id: frame.id, ok: true, result })

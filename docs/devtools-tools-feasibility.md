@@ -1,6 +1,6 @@
 # 调研：给 dsh-browser 追加 DevTools 类工具
 
-> 状态：**调研完成；其中「视觉」部分已实施**（2026-09-15，见 §0）。控制台 / 网络 / 执行 JS / 断点仍是待做项。范围：能否在现有 `dsh-browser`（host 插件 + Chrome/Firefox 扩展）里加「控制台 / 网络 / 执行 JS / 断点 / 截图」这类 DevTools 能力，以及分几步做、每步的硬约束。
+> 状态：**调研完成；§0 的能力已实施**（视觉 2026-09-15，控制台 / 网络 / 执行 JS / 弹窗 2026-09-16，见 §0）。仍未做：`Debugger` 域的**断点与单步**。范围：能否在现有 `dsh-browser`（host 插件 + Chrome/Firefox 扩展）里加「控制台 / 网络 / 执行 JS / 断点 / 截图」这类 DevTools 能力，以及分几步做、每步的硬约束。
 
 ## 0. 实施记录：视觉（截图）已落地
 
@@ -73,7 +73,7 @@
 真正的工作量不在新工具的 schema，而在四处现有约束：
 
 - **虚拟工具完全绕过审批**：`browser_list_tabs`/`browser_bind_tab`/`gdrive.fetch` 在 `handleVirtualTool` 分支直接返回，早于 `dispatchToolCall` 的 `authorize` 回调（`extensions/dsh-browser/src/background/index.ts:1049`）。DevTools 工具若由后台自己应答，必须补一条审批路径，否则等于给模型开了无审批的任意 JS 执行。
-- **授权策略是「不在名单里就不弹审批」**：`approvalPromptForCall` 只对 `PAGE_READS` / `STATE_CHANGING_ACTIONS` 两个集合返回 prompt（`src/background/authorization.ts:8-42`）。新增工具忘了归类就是静默放行。
+- **授权策略是「不在名单里就不弹审批」**：`approvalPromptForCall` 决定哪些调用需要弹窗，除 `PAGE_READS` / `STATE_CHANGING_ACTIONS` 两个集合外，还有 `UNTRUSTABLE_ACTIONS`（eval / headers / dialog）、`REMOTE_FETCH_ACTIONS`（gdrive.fetch）与 `browser_network` 的 mock 专判，共五组（见 `src/background/authorization.ts`）。新增工具忘了归类就是静默放行。
 - **能力必须协商**：Firefox 无 `chrome.debugger`。这条路径现在存在：`BridgeServerDeps.onCapabilities` 在握手/替换/断连时通知工具注册表，调试工具按 `caps.debugger` 注册或注销，工具面按 `caps.toolset` 裁剪。模型路由是否支持图片输入仍在宿主每次调用前解析。
 - **text-only 曾是显式产品决策**（原 `BridgeCaps.textOnly: true`，该字段已于 2026-09-16 随 `proto` 化删除），现已按 §0 改成「文本为主视图 + 按需视觉」：截图走 attachment + image block（DSH 支持，见 §6.3），并要求模型路由声明图片输入，否则回退纯文本。
 
@@ -183,7 +183,7 @@ tool result 支持 image block：`dsh-llm/lib/types/types.d.ts` 里 `ContentBloc
 - **每次审批，且不可信任**：`browser_eval` 等价于「在用户已登录的页面里执行任意代码」，不能进 trust-session / trustedActionOrigins 白名单，只允许 `allow-once`。
 - **console/network 是页面读取**，可复用现有 `sharePageContent` 策略；但**响应体**（路线 B）敏感度更高，建议单独一档、默认不进 `auto`。
 - **结果必须过 `wrapUntrustedContent`**：console 输出和响应体都是页面可控内容，是最典型的提示注入载体。
-- **黑名单与绑定同样生效**：`blockedOrigins`、tab-affinity（只操作绑定/控制的标签页）在虚拟工具分支也要检查，不能因为是后台实现就跳过 `tabPolicyBlocked`（`src/background/index.ts:781`）。
+- **黑名单与绑定同样生效**：`blockedOrigins`、tab-affinity（只操作绑定/控制的标签页）在虚拟工具分支也要检查，不能因为是后台实现就跳过 `blockedOriginFailure`（`src/background/index.ts`）。
 - **额度**：条目数、单条长度、响应体大小都要封顶（例如 300 条 / 单条 4KB / 正文 64KB），沿用现有快照预算思路。
 
 ## 8. 必须先跑的实验

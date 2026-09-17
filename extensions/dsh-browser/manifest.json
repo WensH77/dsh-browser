@@ -5,6 +5,7 @@
   "default_locale": "en",
   "version": "0.1.2",
   "minimum_chrome_version": "116",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA4hsI2SxXfomZcmtOgf5D2hyCaiqOYGCDzxhhNRsFv8b0gQykJaUXeldlGUfqad/cPvCVauYGOtMRSmLNsSH6SQY7ZN6rEEmFFpdvoQC6YB5DeJzM+gGdCGmfsjDe3zqs7EPURUlHXjkFQdWxUhKD8esiQWXT3ov7rZX3P5VMh6fG4Rrq25tDSdlJHmbJ91JhSS8eXI08wD59e66va4KEe/LFgUOiIHIF4Kr1zyLNhMvcnvnDnP5jAgR7qDGu9jdc4JHcmtKuPi6wcNnfrtOvVYRcfVyt7LYWeZjFfbC5MAhpFztimOLMinrBMOR43jDZBXk7G/z9qfGso/MABoT+HwIDAQAB",
   "permissions": [
     "sidePanel",
     "storage",

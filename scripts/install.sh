@@ -14,7 +14,7 @@ ARCHIVE_URL="https://github.com/$REPOSITORY/archive/refs/heads/${REMOTE_REF}.tar
 BOOTSTRAP_TMP=""
 
 print_step() {
-  printf '\n[%s/4] %s\n' "$1" "$2"
+  printf '\n[%s/5] %s\n' "$1" "$2"
   printf '      %s\n' "$3"
 }
 
@@ -331,7 +331,14 @@ fi
 print_step 3 "构建 Chrome 扩展" "Build the Chrome extension"
 (cd "$ROOT" && pnpm --filter dsh-browser-extension run build >/dev/null 2>&1)
 
-print_step 4 "准备扩展并打开 Chrome" "Prepare the extension and open Chrome"
+print_step 4 "安装技能（所有工作区可用）" "Install skills (available to every workspace)"
+# The skills ship in this repository but are read from the user skill root, so a session in
+# another project can use them: see scripts/install-skills.mjs. Failure here costs only the
+# skill, never the extension, so it does not abort the install.
+node "$ROOT/scripts/install-skills.mjs" ||
+  print_pair "技能安装失败（不影响扩展使用，可稍后重跑 scripts/install-skills.mjs）" "Skill install failed (the extension still works; rerun scripts/install-skills.mjs later)"
+
+print_step 5 "准备扩展并打开 Chrome" "Prepare the extension and open Chrome"
 ensure_chrome || true
 DIST_DIR="$DSH_HOME_DIR/browser-extension"
 if [ -f "$DIST_DIR/manifest.json" ]; then

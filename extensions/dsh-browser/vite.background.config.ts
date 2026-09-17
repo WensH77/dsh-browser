@@ -1,4 +1,4 @@
-import { browserTarget, copyManifest, outDir, targetBuild } from './vite.shared.ts'
+import { browserTarget, targetBuild } from './vite.shared.ts'
 
 /**
  * Background: Chrome loads an ES-module service worker (`"type": "module"`);
@@ -11,5 +11,3 @@ export default targetBuild(
   'background.js',
   true,
 )
-
-export { copyManifest, outDir }

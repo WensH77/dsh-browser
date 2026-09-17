@@ -32,6 +32,10 @@ export interface ToolResult {
 function onMessage(message: unknown, _sender: chrome.runtime.MessageSender, sendResponse: (response: ToolResult) => void): true | undefined {
   if (typeof message !== 'object' || message === null) return
   const msg = message as { type?: string }
+  // Any message that is not a DSH_* request is ignored, and must stay ignored:
+  // the background's UI pushes (status, approval details) reach every content
+  // script because `chrome.runtime.sendMessage` has no addressee, so this
+  // listener sees privileged UI traffic it must not act on or answer.
   if (msg.type === 'DSH_BUDGET') {
     const incoming = (message as { budget?: Partial<SnapshotBudget> }).budget
     if (incoming !== undefined) {

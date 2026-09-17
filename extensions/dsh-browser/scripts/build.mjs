@@ -20,12 +20,12 @@ if (process.argv.includes('--firefox')) {
 const configs = [
   'vite.background.config.ts',
   'vite.content.config.ts',
-  'vite.panel.config.ts',
-  'vite.options.config.ts',
+  // Both React pages in one build: separate builds each bundled their own React.
+  'vite.ui.config.ts',
 ]
 
 if (watch) {
-  // 四个 watcher 并行启动（串行时第一个永不停机，后面的永远不会启动）。
+  // 三个 watcher 并行启动（串行时第一个永不停机，后面的永远不会启动）。
   const children = configs.map((config) => spawn('vite', ['build', '--config', config, '--watch'], {
     cwd: root,
     stdio: 'inherit',

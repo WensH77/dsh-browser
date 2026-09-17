@@ -25,12 +25,6 @@ export interface AffinityTab {
 export type TabAffinityStatus = 'unbound' | 'following' | 'handoff' | 'background' | 'lost'
 export type TabAffinityDecision = 'keep' | 'follow' | 'keep-always' | 'ask-again'
 
-/** Narrow an untrusted panel message field to a decision. */
-export function isTabAffinityDecision(value: unknown): value is TabAffinityDecision {
-  return value === 'keep' || value === 'follow'
-    || value === 'keep-always' || value === 'ask-again'
-}
-
 /** Serializable state sent from the service worker to every side panel. */
 export interface TabAffinityState {
   revision: number
