@@ -1,13 +1,52 @@
+import { createHash } from 'node:crypto'
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import {
+  BRIDGE_EXTENSION_IDS,
   BRIDGE_PROTO,
   BRIDGE_TOOLSET,
+  EXTENSION_ID_PATTERN,
+  LEGACY_TOOLSET,
   declaredProto,
   declaredToolset,
+  formatBindableTab,
   handshakeRefusal,
   isServerFrame,
+  parseBindableTabs,
   parseBridgeFrame,
 } from '../src/protocol.ts'
+
+describe('bindable tab lines', () => {
+  // The extension renders these lines and the host parses them back. When the
+  // two drifted, the host silently produced an empty list and the model
+  // reported "no bindable pages are open" instead of a parse miss.
+  it('round-trips the lines the extension renders', () => {
+    const lines = [
+      formatBindableTab({ id: 5, title: 'Inbox — mail', url: 'https://mail.example/inbox' }),
+      formatBindableTab({ id: 9, title: '', url: 'https://example.com/' }),
+      formatBindableTab({ id: 11, url: 'https://no-title.example/' }),
+    ]
+
+    expect(parseBindableTabs(lines.join('\n'))).toEqual([
+      { id: 5, title: 'Inbox — mail', url: 'https://mail.example/inbox' },
+      { id: 9, title: '', url: 'https://example.com/' },
+      { id: 11, title: '', url: 'https://no-title.example/' },
+    ])
+  })
+
+  it('keeps entries whose title itself contains a separator', () => {
+    const line = formatBindableTab({ id: 3, title: 'a | b', url: 'https://example.com/x' })
+
+    expect(parseBindableTabs(line)).toEqual([{ id: 3, title: 'a | b', url: 'https://example.com/x' }])
+  })
+
+  it('ignores anything that is not a rendered line', () => {
+    expect(parseBindableTabs('No bindable web tabs are open (open a page first).')).toEqual([])
+    expect(parseBindableTabs(undefined)).toEqual([])
+    expect(parseBindableTabs('ID=x | t | u')).toEqual([])
+  })
+})
 
 describe('parseBridgeFrame', () => {
   it('parses a valid hello frame', () => {
@@ -20,6 +59,42 @@ describe('parseBridgeFrame', () => {
     expect(frame).toEqual({ t: 'hello', token: 'abc123', caps: { debugger: true, snapshotMaxChars: 12000, maxInteractiveItems: 60 } })
     expect(declaredProto(frame?.t === 'hello' ? frame.caps : undefined)).toBe(1)
     expect(declaredToolset(frame?.t === 'hello' ? frame.caps : undefined)).toBe(0)
+  })
+
+  it('accepts every level between the oldest and the current one', () => {
+    // A level below the current one is the skew the handshake exists to serve:
+    // the host narrows the surface to what that build implements. Requiring the
+    // current level dropped the frame as unparseable, which closed the socket
+    // with `1008` and made the degradation path unreachable.
+    const caps = { snapshotMaxChars: 500, maxInteractiveItems: 10, proto: BRIDGE_PROTO }
+    for (let level = LEGACY_TOOLSET; level <= BRIDGE_TOOLSET; level += 1) {
+      const frame = parseBridgeFrame(JSON.stringify({ t: 'hello', token: 'x', caps: { ...caps, toolset: level } }))
+      expect(frame?.t).toBe('hello')
+      expect(declaredToolset(frame?.t === 'hello' ? frame.caps : undefined)).toBe(level)
+    }
+  })
+
+  it('pins an extension id that the extension manifest actually derives', () => {
+    // The no-token loopback path accepts only this ID, so it has to be the ID
+    // Chrome gives the extension this repo builds. That ID comes from the
+    // manifest's public `key`; if the two ever drift, the extension can no
+    // longer connect at all -- which is why this is asserted rather than
+    // trusted. Chrome's derivation: SHA-256 of the key's SubjectPublicKeyInfo
+    // DER, first 16 bytes, each hex digit mapped onto `a`-`p`.
+    const manifestPath = resolve(import.meta.dirname, '../../../../extensions/dsh-browser/manifest.json')
+    const manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as { key?: string }
+    expect(typeof manifest.key).toBe('string')
+
+    const digest = createHash('sha256').update(Buffer.from(manifest.key!, 'base64')).digest().subarray(0, 16)
+    const derived = [...digest]
+      .map((byte) => byte.toString(16).padStart(2, '0'))
+      .join('')
+      .split('')
+      .map((digit) => String.fromCharCode(97 + Number.parseInt(digit, 16)))
+      .join('')
+
+    expect(derived).toBe(BRIDGE_EXTENSION_IDS[0])
+    expect(EXTENSION_ID_PATTERN.test(derived)).toBe(true)
   })
 
   it('drops a hello whose version fields are not usable integers', () => {

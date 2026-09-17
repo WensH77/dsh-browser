@@ -114,6 +114,52 @@ describe('fetchPageImage', () => {
   })
 })
 
+describe('fetchPageImage host bounds', () => {
+  // The page chooses the URL, so a private/loopback target would turn the
+  // extension (outside the page's origin, CORS-exempt, cookies included) into
+  // an internal-network reader for whatever the page points at.
+  const restricted = [
+    'http://127.0.0.1:8080/admin',
+    'http://localhost:3000/secret.png',
+    'http://192.168.1.1/admin.png',
+    'http://10.0.0.5/internal.png',
+    'http://172.16.4.4/x.png',
+    'http://169.254.169.254/latest/meta-data/',
+    'http://[::1]/x.png',
+    'http://metadata.google.internal/computeMetadata/v1/',
+    'http://printer.local/x.png',
+    'http://router.internal/x.png',
+    'http://0.0.0.0/x.png',
+    'http://100.64.0.1/x.png',
+    'http://240.0.0.1/x.png',
+  ]
+
+  it('refuses a picture served from a non-public address, before any fetch', async () => {
+    const fetchMock = vi.fn()
+    vi.stubGlobal('fetch', fetchMock)
+
+    for (const url of restricted) {
+      await expect(fetchPageImage({ kind: 'img', url }, LIMITS))
+        .rejects.toMatchObject({ code: 'action-failed', message: expect.stringContaining('non-public address') })
+    }
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('still fetches an ordinary public picture, including cross-origin', async () => {
+    stubRaster(800, 600)
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      blob: async () => ({ type: 'image/png', arrayBuffer: async () => Buffer.from('remote') }),
+    }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await fetchPageImage({ kind: 'img', url: 'https://cdn.other.example/a.png' }, LIMITS)
+
+    expect(fetchMock).toHaveBeenCalledWith('https://cdn.other.example/a.png', { credentials: 'include' })
+  })
+})
+
 describe('pageImageEnvelope', () => {
   it('reports kind, size, alt and a downscale', () => {
     const text = pageImageEnvelope(

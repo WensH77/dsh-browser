@@ -21,7 +21,7 @@ import { CaptureError, captureTab } from './capture.ts'
 import { PageImageError, fetchPageImage, pageImageEnvelope, parsePageImageSource } from './page-image.ts'
 import { clearMocks, evaluateInPage, handleDialog, installMock, parseMockRule, readConsole, readNetwork } from './devtools.ts'
 import { addBlockRule, addHeaderRule, clearTabRules, listTabRules, parseHeaderChanges } from './net-rules.ts'
-import { wrapUntrustedContent } from '../security/untrusted.ts'
+import { wrapUntrustedContent, wrapUntrustedResult } from '../security/untrusted.ts'
 import { approvalPromptForCall } from './authorization.ts'
 import { waitForNextDocumentReady } from './navigation.ts'
 import type { ApprovalAuthorization, ApprovalPrompt } from '../security/approval.ts'
@@ -145,6 +145,21 @@ function unavailable(message: string): ToolAnswer {
 
 function cancelled(): ToolAnswer {
   return { ok: false, error: { code: 'bridge-closed', message: 'The browser tool call was cancelled.' } }
+}
+
+/**
+ * One refusal per fact, for every frame-related refusal in this module.
+ *
+ * The same two messages used to be spelled out at three and two call sites; the
+ * model could see different codes for an identical mistake.
+ */
+export function frameMissingFailure(frameId: number): ToolAnswer {
+  return unavailable(`Frame ${frameId} does not exist or has navigated. Call browser_snapshot again.`)
+}
+
+/** @see frameMissingFailure */
+export function frameArgumentInvalid(): ToolAnswer {
+  return { ok: false, error: { code: 'action-failed', message: 'frame must be a non-negative integer.' } }
 }
 
 /** Preserve the factual approval outcome for the model without prescribing a response. */
@@ -403,7 +418,7 @@ async function imageAnswer(tabId: number, call: ToolCall, frames: TabFrame[]): P
   const frame = frames.find((candidate) => candidate.frameId === frameId)
     ?? frames.find((candidate) => candidate.frameId === 0)
   if (frame === undefined) {
-    return unavailable(`Frame ${frameId} does not exist or has navigated. Call browser_snapshot again.`)
+    return frameMissingFailure(frameId)
   }
   // A sendMessage failure must reach the caller: the dispatch layer retries it
   // after injecting the content script into a page opened before this build.
@@ -532,10 +547,10 @@ async function dispatchOnce(
   if (call.name === 'browser_headers') return netRuleAnswer(tabId, call, 'headers')
 
   const frameId = requestedFrame(call.args)
-  if (frameId < 0) return { ok: false, error: { code: 'action-failed', message: 'frame must be a non-negative integer.' } }
+  if (frameId < 0) return frameArgumentInvalid()
   const frame = frames.find((candidate) => candidate.frameId === frameId)
   if (frame === undefined) {
-    return unavailable(`Frame ${frameId} does not exist or has navigated. Call browser_snapshot again.`)
+    return frameMissingFailure(frameId)
   }
   // No await occurs between this guard and tabs.sendMessage, so an expired
   // approval cannot cross the final state-changing dispatch boundary.
@@ -590,6 +605,14 @@ async function dispatchOnce(
   }
   if (call.name === 'browser_get_text') {
     return { ok: true, result: { text: wrapUntrustedContent(text, budget.maxChars) } }
+  }
+  if (call.name === 'browser_dom_query') {
+    // Every field here is page-authored: `name=` is the computed accessible
+    // name, and `text`/`aria-label`/`title`/attribute values all come from the
+    // document. It gets the same boundary as the snapshot and get_text paths,
+    // in the compact form because a structured read can be smaller than the
+    // full enclosure (~421 characters) while the negotiated floor is 500.
+    return { ok: true, result: { text: wrapUntrustedResult(text, budget.maxChars) } }
   }
   const pageContent = requestPageDelta ? answerPageContent(response) : undefined
   const label = answerLabel(response)
@@ -730,9 +753,9 @@ export async function dispatchToolCall(
 function validateFrameTarget(call: ToolCall, frames: TabFrame[]): ToolAnswer | undefined {
   if (call.name === 'browser_snapshot') return undefined
   const frameId = requestedFrame(call.args)
-  if (frameId < 0) return { ok: false, error: { code: 'action-failed', message: 'frame must be a non-negative integer.' } }
+  if (frameId < 0) return frameArgumentInvalid()
   if (!frames.some((frame) => frame.frameId === frameId)) {
-    return unavailable(`Frame ${frameId} does not exist or has navigated. Call browser_snapshot again.`)
+    return frameMissingFailure(frameId)
   }
   return undefined
 }

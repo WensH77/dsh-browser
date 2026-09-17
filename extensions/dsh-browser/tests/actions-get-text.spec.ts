@@ -77,6 +77,25 @@ describe('browser_get_text find', () => {
     expect(plain.text).not.toContain('text search:')
   })
 
+  it('honours a maxChars above the old 8000 hard cap, up to the negotiated budget', async () => {
+    // 12k of body text; the host schema advertises 500-32000 with an 8000
+    // default, so asking for 12000 used to come back as 8000 with no sign of it.
+    document.body.innerHTML = `<main>${'a'.repeat(12_000)}</main>`
+    const wideContext = { ids: new ElementIds(), budget: { maxItems: 20, maxForms: 10, maxChars: 32_000 } }
+
+    const wide = await runAction('browser_get_text', { maxChars: 12_000 }, wideContext)
+    expect(wide.text.length).toBeGreaterThan(8_000)
+    expect(wide.text).not.toContain('Truncated')
+
+    // The negotiated ceiling still bounds it: this context caps at 8000.
+    const narrow = await runAction('browser_get_text', { maxChars: 12_000 }, context())
+    expect(narrow.text).toContain('Truncated')
+
+    // No maxChars means the negotiated budget, not a fixed 8000.
+    const byDefault = await runAction('browser_get_text', {}, wideContext)
+    expect(byDefault.text).not.toContain('Truncated')
+  })
+
   it('keeps the reported window within maxChars', async () => {
     document.body.innerHTML = `<main>${'a'.repeat(3_000)}needle${'b'.repeat(3_000)}</main>`
 

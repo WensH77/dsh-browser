@@ -27,7 +27,7 @@ import LlmService from '@deepseek-ai/dsh-llm'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import UserQuestionService from '@deepseek-ai/dsh-user-questions'
 import * as BridgeBrowser from '../src/index.ts'
-import { BRIDGE_PATH, BRIDGE_PROTO, type BridgeFrame } from '../src/protocol.ts'
+import { BRIDGE_EXTENSION_IDS, BRIDGE_PATH, BRIDGE_PROTO, BRIDGE_TOOLSET, type BridgeFrame } from '../src/protocol.ts'
 
 const BRIDGE = '@yuxianglin/dsh-bridge-browser'
 const TOKEN = 'abcdabcdabcdabcdabcdabcdabcdabcd'
@@ -114,8 +114,8 @@ async function loadComposition(): Promise<{ ctx: Context; configPath: string; po
   return { ctx: context, configPath, port: web.port }
 }
 
-/** 扩展上下文 Origin（回环免 token 的必要条件）。 */
-const EXT_ORIGIN = 'chrome-extension://test-extension-id'
+/** 扩展上下文 Origin（回环免 token 的必要条件）：必须是宿主固定接受的那个扩展 ID。 */
+const EXT_ORIGIN = `chrome-extension://${BRIDGE_EXTENSION_IDS[0]}`
 
 function connect(port: number): Promise<{
   ws: WebSocket
@@ -196,22 +196,29 @@ describe('real Loader composition', () => {
     // non-loopback token gate is covered by server.spec overrides). This hello
     // declares no `toolset`, i.e. an extension from before the versioned
     // handshake: the host must narrow the surface it exposes to the model.
+    // `extensionId` is what the no-token path is bound to: the Origin must name
+    // the same extension, or the bridge refuses the socket.
     expect(tools.get('browser_capture')).toBeUndefined()
     expect(tools.get('browser_dom_query')).toBeDefined()
     const client = await connect(port)
-    send(client.ws, { t: 'hello', token: '', caps: { debugger: true, snapshotMaxChars: 32_000, maxInteractiveItems: 60 } })
+    send(client.ws, {
+      t: 'hello',
+      token: '',
+      caps: { debugger: true, extensionId: BRIDGE_EXTENSION_IDS[0], snapshotMaxChars: 32_000, maxInteractiveItems: 60 },
+    })
     await Promise.race([
       waitFor(() => client.frames.some((f) => f.t === 'hello.ok')),
       client.closed.then(({ code, reason }) => {
         throw new Error(`bridge closed before hello.ok (${String(code)} ${reason}): ${JSON.stringify(client.frames)}`)
       }),
     ])
-    // The host echoes its own budgets and handshake version in hello.ok;
-    // `debugger`/`toolset` are the extension's own capability report and are
-    // never mirrored back.
+    // The host echoes its own budgets, handshake version, and toolset in
+    // hello.ok; `debugger` and `extensionId` are the extension's own report and
+    // are never mirrored back. This hello declares no `toolset`, so the echoed
+    // one is the host's own level, not a copy of what arrived.
     expect(client.frames.find((f) => f.t === 'hello.ok')).toEqual({
       t: 'hello.ok',
-      caps: { proto: BRIDGE_PROTO, snapshotMaxChars: 32_000, maxInteractiveItems: 60 },
+      caps: { proto: BRIDGE_PROTO, toolset: BRIDGE_TOOLSET, snapshotMaxChars: 32_000, maxInteractiveItems: 60 },
     })
     // Capabilities reach the live registry: `debugger: true` in this hello
     // registers the debugging group, and the missing `toolset` drops the tools

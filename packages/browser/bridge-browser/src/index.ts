@@ -16,6 +16,7 @@
  * @module @yuxianglin/dsh-bridge-browser
  */
 
+import { describeRetention, nodeRetentionIo, pruneExports } from './gdrive-retention.ts'
 import { spawn } from 'node:child_process'
 import { copyFile, mkdir, rename, unlink } from 'node:fs/promises'
 import { basename, join } from 'node:path'
@@ -52,6 +53,54 @@ const DEFAULT_MAX_INTERACTIVE_ITEMS = 60
 function sanitizePathSegment(value: string): string {
   const cleaned = value.replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '')
   return cleaned === '' ? 'export' : cleaned.slice(0, 80)
+}
+
+/**
+ * The part of the workspace service this plugin reads.
+ *
+ * The service is registered as `workspaceRegistry` (see
+ * `@deepseek-ai/dsh-workspace`, which declares `Context.workspaceRegistry`),
+ * and it is not one of this plugin's `inject` entries, so it is looked up
+ * optionally: with no registry there is nothing archived, and nothing is
+ * removed.
+ */
+interface WorkspaceArchiveSource {
+  /** The registry-global archive set; sessions hidden from every surface. */
+  archivedSessionIds: readonly string[]
+}
+
+/** The plugin context slice used for retention lookups and logging. */
+interface RetentionContext {
+  get(key: string): unknown
+  logger?: { info(message: string): void; warn(message: string): void }
+}
+
+/** Read the archive set, treating an absent service or a fault as "nothing archived". */
+function archivedSessionIdsOf(ctx: RetentionContext): readonly string[] {
+  try {
+    const registry = ctx.get('workspaceRegistry') as Partial<WorkspaceArchiveSource> | undefined
+    return Array.isArray(registry?.archivedSessionIds) ? registry.archivedSessionIds : []
+  } catch {
+    return []
+  }
+}
+
+/**
+ * Run one retention pass over the export root and log what it did.
+ *
+ * Never rejects: this is called from the plugin's startup path, and a disk
+ * problem there must not keep the bridge from loading.
+ *
+ * @param ctx - plugin context (workspace service and logger).
+ * @param root - the export root.
+ */
+async function pruneGdriveExports(ctx: RetentionContext, root: string): Promise<void> {
+  try {
+    const outcome = await pruneExports(nodeRetentionIo(root), archivedSessionIdsOf(ctx))
+    ctx.logger?.info(describeRetention(outcome))
+  } catch (error: unknown) {
+    ctx.logger?.warn(`browser bridge: gdrive retention failed — ${error instanceof Error ? error.message : String(error)}`)
+  }
 }
 
 /** Reveal a folder in the system file manager (host side). */
@@ -131,6 +180,12 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   const tokenRes = await resolveToken(resolved.token)
 
   const gdriveRoot = dshHomePath('gdrive')
+  // Reclaim exported files whose session has been archived and whose directory
+  // is past the retention window. Startup-only, never throwing: a full disk
+  // must not stop the bridge from loading, and an unarchived session's exports
+  // are never touched. Runs detached from the rest of `apply` so a slow
+  // filesystem cannot delay the handshake path.
+  void pruneGdriveExports(ctx, gdriveRoot)
   // Assigned by the tools effect below; the server calls it on every hello,
   // replacement, and disconnect.
   let capabilitiesSync: ((caps: BridgeCaps | undefined) => void) | undefined
@@ -160,6 +215,10 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
       // This host's handshake version: an extension built after this plugin
       // reads the older number and tells the user to restart dsh.
       proto: BRIDGE_PROTO,
+      // The toolset this host offers. An extension built before the newest level
+      // reads the higher number and tells the user to reload the extension;
+      // without it the surface silently shrinks and nothing names the cause.
+      toolset: BRIDGE_TOOLSET,
       snapshotMaxChars: resolved.snapshotMaxChars,
       maxInteractiveItems: resolved.maxInteractiveItems,
     },

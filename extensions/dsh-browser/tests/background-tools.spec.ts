@@ -1,10 +1,31 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { dispatchToolCall, invalidationReason, type ToolAnswer, type ToolCall } from '../src/background/tools.ts'
+import { dispatchToolCall, frameArgumentInvalid, frameMissingFailure, invalidationReason, type ToolAnswer, type ToolCall } from '../src/background/tools.ts'
 import type { TabFrame } from '../src/background/frames.ts'
 
 const CALL: ToolCall = { id: 'tool-1', name: 'browser_snapshot', args: {} }
 const OK: ToolAnswer = { ok: true, result: { text: 'page' } }
+
+describe('frame refusals', () => {
+  // These two messages used to be spelled out at five call sites; these
+  // assertions are the contract those copies had to agree on.
+  it('names the frame that went away and points at the next step', () => {
+    expect(frameMissingFailure(3)).toEqual({
+      ok: false,
+      error: {
+        code: 'content-unavailable',
+        message: 'Frame 3 does not exist or has navigated. Call browser_snapshot again.',
+      },
+    })
+  })
+
+  it('refuses a frame argument that is not a non-negative integer', () => {
+    expect(frameArgumentInvalid()).toEqual({
+      ok: false,
+      error: { code: 'action-failed', message: 'frame must be a non-negative integer.' },
+    })
+  })
+})
 
 function mockChrome(options: {
   tab?: { id?: number; url?: string }

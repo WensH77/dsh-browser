@@ -56,12 +56,16 @@ The paired Playwright / extension duration ratio was **1.24** (95% CI **1.16–1
 | Run page JavaScript | `browser_eval` | Evaluate an expression in the page's own context; page CSP does not block it, and every call is approved on its own |
 | Block or rewrite requests | `browser_block` / `browser_headers` | Block matching requests, or rewrite request/response headers — scoped to the controlled tab and session-only |
 | Click element | `browser_click` | Click by inventory number, or by CSS selector when a control has no usable inventory entry (icon-only buttons) |
+| Click a control bound to the press | `browser_click_pointer` | Sends `pointerdown`, `mousedown`, `pointerup`, `mouseup`, and `click` at the element's centre — for canvas/SVG editors such as Google Slides, where `browser_click` reports success and nothing changes |
 | Fill forms | `browser_type` | React/Vue-compatible input by inventory number or CSS selector; `replace` clears the field first |
 | Press keys | `browser_press` | Keyboard events such as Enter, Tab, Escape, and arrow keys |
 | Scroll | `browser_scroll` | Viewport scrolling: up, down, top, and bottom |
 | Navigate | `browser_navigate` / `browser_back` / `browser_forward` / `browser_reload` | Navigation inside the controlled tab, with login state preserved |
-| Read region | `browser_get_text` | Lazy-loaded or partial page text |
+| Read region | `browser_get_text` | Lazy-loaded or partial page text; `find` (+ `context`) locates a phrase and returns a bounded window |
 | Inspect elements | `browser_dom_query` | Read the fields you name off elements matching a CSS selector, each with a verified unique selector to act on |
+| Read a page picture | `browser_image` | A picture the page embeds (`<img>` / `<canvas>` / SVG `<image>` / CSS background) at its original resolution; needs no debugging capability, so DevTools open or a background tab is fine |
+| Bind a page | `browser_bind_interactive` | List the bindable pages, ask the user to pick one, and bind this session to it |
+| Export a Google file | `google_drive_export` | Docs and Sheets only; Slides and Drive files are ordinary pages read with the browser tools |
 | Wait for stability | `browser_wait` | Page-load and render-settle detection |
 
 ## Repository layout
@@ -70,8 +74,10 @@ The paired Playwright / extension duration ratio was **1.24** (95% CI **1.16–1
 packages/browser/bridge-browser/
   cordis.patch.yml
 extensions/dsh-browser/
+.dsh/skills/
 scripts/install.sh
 scripts/install.ps1
+scripts/install-skills.mjs
 ```
 
 ## Why this design
@@ -115,6 +121,12 @@ cd dsh-browser
 
 On Windows, run `.\scripts\install.ps1` from the checkout instead. After pulling or switching revisions, rerun the installer and reload the extension.
 
+### Skills shipped with this repository
+
+The repository also ships the operational knowledge that goes with these tools, as skills under `.dsh/skills/`. They live in the repo so a change in browser behaviour and the advice about that behaviour are reviewed and committed together, and they are installed into `~/.dsh/skills/` so that a session in **any other workspace** can use them — the skill filesystem provider scans the project root at rank 100 and the user's `~/.dsh/skills` at rank 400, so the repo copy alone would only reach sessions started inside this repo.
+
+`scripts/install-skills.mjs` (step 4 of the installer, or `pnpm run skills:install`) links each skill into `~/.dsh/skills`; `--copy` copies instead, which is what the Windows installer uses because creating a link there needs Developer Mode or elevation. A symlink is the default on macOS and Linux, so editing the repo copy takes effect with no reinstall and the installed skill cannot drift from it. A skill is only loaded when its description matches what the session is doing — `google-slides-via-browser`, for example, loads when the controlled tab is a Google Slides editor.
+
 ### Firefox source build
 
 Firefox uses a separate MV3 manifest, event-page background, and sidebar. Build it from a checkout, then open `about:debugging#/runtime/this-firefox`, choose **Load Temporary Add-on**, and select `extensions/dsh-browser/dist-firefox/manifest.json`:
@@ -148,7 +160,7 @@ Local Chrome use requires no configuration; Firefox requires the local bridge to
 
 - Make sure dsh web is running locally (default `http://127.0.0.1:3080`).
 - Verify the bridge is loaded: open `http://127.0.0.1:3080/ext/bridge-config`. It should return JSON such as `{"wsUrl":"ws://127.0.0.1:3080/ext/bridge"}`. If it returns a web page instead of JSON, the running dsh predates the bridge registration — restart dsh and refresh the page; the extension reconnects on its own.
-- The extension probes ports 3080, 3081, 3090, and 14389 automatically. If dsh runs on another port — or you use a remote `--host 0.0.0.0` deployment — set the address (and bridge token) in the extension options. Firefox always requires the token.
+- The extension probes ports 3080, 3081, 3090, 14389, and 43189 (dsh Desktop) automatically. If dsh runs on another port — or you use a remote `--host 0.0.0.0` deployment — set the address (and bridge token) in the extension options. Firefox always requires the token.
 
 ## Development
 

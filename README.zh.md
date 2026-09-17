@@ -52,14 +52,20 @@ Playwright / 扩展的配对耗时比为 **1.24**（95% CI **1.16–1.34**）：
 | 读取页面 | `browser_snapshot` | 结构化文本快照：标题/URL/正文/编号交互清单/表单字段（敏感值掩码）；`delta: true` 只返回变化；默认附带同刻截图，`visual: false` 可关 |
 | 截取页面 | `browser_capture` | 返回视口截图（`fullPage: true` 为整页），仅内存、不落盘 |
 | 读控制台与网络 | `browser_console` / `browser_network` | 控制台消息与未捕获错误（带 cursor 增量）；请求列表含状态与耗时、按 id 取响应体、内存内响应替换 |
+| 回应用户弹窗 | `browser_dialog` | 确认或取消 `alert` / `confirm` / `prompt`；这类弹窗会冻住页面，回应之前其它工具都会卡住 |
 | 执行页面 JS | `browser_eval` | 在页面自身上下文求值，不受页面 CSP 限制；每次单独审批 |
 | 阻断/改写请求 | `browser_block` / `browser_headers` | 阻断匹配请求，或改写请求/响应头；仅作用于受控标签页、仅当前浏览器会话 |
 | 点击元素 | `browser_click` | 按编号点击链接/按钮/复选框等 |
+| 点击绑定在按压上的控件 | `browser_click_pointer` | 在元素矩形中心派发 `pointerdown`、`mousedown`、`pointerup`、`mouseup`、`click`；用于 Google Slides 这类画布/SVG 编辑器——`browser_click` 回报成功但页面没反应时改用它 |
 | 填写表单 | `browser_type` | 输入文本（React/Vue 受控组件兼容），`replace` 清空重填 |
 | 按键 | `browser_press` | 键盘事件（Enter/Tab/Escape/方向键…） |
 | 滚动 | `browser_scroll` | 视口滚动（up/down/top/bottom） |
 | 页面导航 | `browser_navigate` / `browser_back` / `browser_forward` / `browser_reload` | 受控标签页内导航，保留登录态 |
-| 读取区域 | `browser_get_text` | 懒加载内容 / 局部文本 |
+| 读取区域 | `browser_get_text` | 懒加载内容 / 局部文本；`find`（配 `context`）按文本定位并返回有界窗口 |
+| 查询元素 | `browser_dom_query` | 按 CSS 选择器读指定字段，每个匹配都带一个经校验唯一的选择器可直接操作 |
+| 看图 | `browser_image` | 按引用取回页面里的图片（img/canvas/SVG/背景图），原分辨率返回；不需要调试能力，DevTools 开着或后台标签页都能用 |
+| 绑定页面 | `browser_bind_interactive` | 列出可绑定页面、让用户选一个并绑定本会话 |
+| 导出 Google 文档 | `google_drive_export` | 仅 Docs/Sheets；Slides 与 Drive 文件按普通页面用浏览器工具读 |
 | 等待稳定 | `browser_wait` | 页面加载与渲染稳定检测 |
 
 ## 组成
@@ -68,8 +74,10 @@ Playwright / 扩展的配对耗时比为 **1.24**（95% CI **1.16–1.34**）：
 packages/browser/bridge-browser/
   cordis.patch.yml
 extensions/dsh-browser/
+.dsh/skills/
 scripts/install.sh
 scripts/install.ps1
+scripts/install-skills.mjs
 ```
 
 ## 为什么这样设计
@@ -113,6 +121,12 @@ cd dsh-browser
 
 Windows 请在 checkout 中运行 `.\scripts\install.ps1`。拉取或切换版本后，请重新运行安装器并重新加载扩展。
 
+### 随仓库分发的技能
+
+仓库同时把这些工具对应的操作经验作为技能放在 `.dsh/skills/` 下。放在仓库里的原因：浏览器行为的改动和针对该行为的经验能一起评审、一起提交；安装到 `~/.dsh/skills/` 的原因：技能文件系统提供方会扫描项目根目录（优先级 100）和用户目录 `~/.dsh/skills`（优先级 400），只留在仓库里的话，只有从本仓库启动的会话能用到。
+
+`scripts/install-skills.mjs`（安装脚本的第 4 步，也可单独执行 `pnpm run skills:install`）把每个技能链接到 `~/.dsh/skills`；`--copy` 改为复制，Windows 安装脚本用的就是复制，因为在那里创建链接需要开发者模式或管理员权限。macOS 和 Linux 默认用符号链接，因此改仓库里的那份立即生效，安装出来的副本也不会与仓库脱节。技能只在其描述与当前任务匹配时才会加载，例如 `google-slides-via-browser` 只在受控标签页是 Google Slides 编辑器时加载。
+
 ### Firefox 源码构建
 
 Firefox 使用独立的 MV3 manifest、事件页后台和 Sidebar。在 checkout 中构建后，打开 `about:debugging#/runtime/this-firefox`，选择「临时载入附加组件」，再选取 `extensions/dsh-browser/dist-firefox/manifest.json`：
@@ -146,7 +160,7 @@ Chrome 本机使用无需配置；Firefox 需要填写上述本地桥 token。�
 
 - 确认本机 dsh web 正在运行（默认 `http://127.0.0.1:3080`）。
 - 确认桥接已加载：浏览器打开 `http://127.0.0.1:3080/ext/bridge-config`，应返回类似 `{"wsUrl":"ws://127.0.0.1:3080/ext/bridge"}` 的 JSON。如果返回的是网页而不是 JSON，说明当前运行的 dsh 早于桥接注册——重启 dsh 并刷新页面即可，扩展会自动重连。
-- 扩展会自动探测 3080/3081/3090/14389 端口。若 dsh 运行在其它端口，或使用 `--host 0.0.0.0` 远程部署，请在扩展设置页中填写地址与桥接 token。Firefox 始终需要 token。
+- 扩展会自动探测 3080/3081/3090/14389/43189（dsh Desktop）端口。若 dsh 运行在其它端口，或使用 `--host 0.0.0.0` 远程部署，请在扩展设置页中填写地址与桥接 token。Firefox 始终需要 token。
 
 ## 开发
 

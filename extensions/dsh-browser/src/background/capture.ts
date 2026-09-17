@@ -21,7 +21,7 @@ import type {
 } from '@yuxianglin/dsh-bridge-browser/src/protocol.ts'
 import { CaptureError, acquireDebuggerSession, cdpFailure, visionAvailable, type DebuggerLease } from './debugger-session.ts'
 
-export { CaptureError, cdpFailure, visionAvailable }
+export { CaptureError, visionAvailable }
 
 /** Default JPEG quality when the caller does not name one. */
 const DEFAULT_JPEG_QUALITY = 80

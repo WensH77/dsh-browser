@@ -11,6 +11,7 @@
  */
 
 import { accessibleName, isVisible, pageText, truncate } from './extract.ts'
+import { isSensitiveField, maskValue } from './privacy.ts'
 import type { ElementIds } from './ids.ts'
 import type { SnapshotBudget } from './snapshot.ts'
 import { buildSnapshot, renderSnapshot, uniqueSelector } from './snapshot.ts'
@@ -150,6 +151,16 @@ function sleep(ms: number): Promise<void> {
  * @param ids - the snapshot inventory.
  * @returns the resolved element and how it was addressed.
  */
+/**
+ * Resolve the element an action targets.
+ *
+ * `label` is how both the side panel and the tool-result text point at the
+ * element: `[<index>]` or `selector "<css>"`. It is deliberately structural —
+ * page-authored text belongs inside the untrusted-content boundary, and an
+ * element's accessible name spliced into a status line would sit outside it.
+ * The element's own name reaches the model through browser_dom_query, which
+ * encloses its answer.
+ */
 function targetOrThrow(args: Record<string, unknown>, ids: ElementIds): { element: Element; label: string } {
   const selector = typeof args.selector === 'string' ? args.selector.trim() : ''
   if (selector !== '') {
@@ -225,6 +236,8 @@ export async function runAction(action: string, args: Record<string, unknown>, c
       return snapshotAction(args, ctx)
     case 'browser_click':
       return clickAction(args, ctx)
+    case 'browser_click_pointer':
+      return clickAction(args, ctx, activateElementAsPointer)
     case 'browser_type':
       return typeAction(args, ctx)
     case 'browser_press':
@@ -240,7 +253,7 @@ export async function runAction(action: string, args: Record<string, unknown>, c
     case 'browser_reload':
       return reloadAction()
     case 'browser_get_text':
-      return getTextAction(args)
+      return getTextAction(args, ctx)
     case 'browser_dom_query':
       return domQueryAction(args)
     case 'browser_image':
@@ -283,7 +296,19 @@ function withPageDelta(text: string, ctx: ActionContext, label?: string): Action
   }
 }
 
-async function clickAction(args: Record<string, unknown>, ctx: ActionContext): Promise<ActionResult> {
+/**
+ * Click one element.
+ *
+ * @param args - `index` or `selector` target, plus optional `frame`.
+ * @param ctx - action context.
+ * @param activate - how to press it; the pointer sequence when a page binds to
+ *   the press rather than to `click` (see {@link activateElementAsPointer}).
+ */
+async function clickAction(
+  args: Record<string, unknown>,
+  ctx: ActionContext,
+  activate: (el: Element) => void = activateElement,
+): Promise<ActionResult> {
   const resolved = targetOrThrow(args, ctx.ids)
   const el = resolved.element
   const label = accessibleName(el)
@@ -348,7 +373,7 @@ async function clickAction(args: Record<string, unknown>, ctx: ActionContext): P
   if (el instanceof HTMLButtonElement && el.disabled) {
     throw new ActionError('action-failed', `Button ${resolved.label} is disabled.`)
   }
-  activateElement(el)
+  activate(el)
   await waitForPageSettled(ACTION_SETTLE)
   return withPageDelta(`Clicked ${resolved.label}.`, ctx, label)
 }
@@ -368,6 +393,50 @@ function activateElement(el: Element): void {
     return
   }
   el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, composed: true }))
+}
+
+/**
+ * Activate an element the way a real pointer does.
+ *
+ * `activateElement` sends exactly one `click` event. That is enough for almost
+ * every page, and it is deliberately left alone: adding events to the common
+ * path risks double-firing handlers that already respond to `click`.
+ *
+ * Some canvas/SVG editors bind their controls to the *press sequence* instead —
+ * Google Slides is the one this was built and measured against. Its filmstrip
+ * thumbnails and toolbar controls watch `mousedown`/`mouseup` and never act on a
+ * lone `click`, so a normal click reports success and changes nothing. Measured
+ * on a real Slides filmstrip: `pointerdown` alone did nothing,
+ * `pointerdown + pointerup + click` did nothing, and
+ * `pointerdown + mousedown + pointerup + mouseup + click` switched the slide
+ * every time — the mouse pair is the part that matters.
+ *
+ * Coordinates are mandatory: with no point inside the element's own rect the hit
+ * test fails and nothing happens even though the events were dispatched.
+ *
+ * @param el - the element to activate.
+ */
+function activateElementAsPointer(el: Element): void {
+  const rect = el.getBoundingClientRect()
+  const options = {
+    bubbles: true,
+    cancelable: true,
+    composed: true,
+    view: window,
+    detail: 1,
+    button: 0,
+    buttons: 1,
+    clientX: rect.left + rect.width / 2,
+    clientY: rect.top + rect.height / 2,
+  }
+  const sequence: Array<[string, typeof MouseEvent | typeof PointerEvent]> = [
+    ['pointerdown', PointerEvent],
+    ['mousedown', MouseEvent],
+    ['pointerup', PointerEvent],
+    ['mouseup', MouseEvent],
+    ['click', MouseEvent],
+  ]
+  for (const [type, EventCtor] of sequence) el.dispatchEvent(new EventCtor(type, options))
 }
 
 async function typeAction(args: Record<string, unknown>, ctx: ActionContext): Promise<ActionResult> {
@@ -495,9 +564,16 @@ function domQueryAction(args: Record<string, unknown>): ActionResult {
         ? String(element.checked)
         : undefined
       case 'disabled': return 'disabled' in element ? String((element as HTMLInputElement).disabled) : undefined
-      case 'value': return element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement
-        ? truncate(element.value, DOM_QUERY_VALUE_CHARS).text
-        : undefined
+      // A credential field is masked here exactly as it is in a snapshot: a
+      // form value has more than one path to the model, so the same gate has to
+      // hold on this one. `privacy.ts` states that contract; this is where it
+      // is honoured for the dom-query path.
+      case 'value': {
+        if (!(element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement)) return undefined
+        return isSensitiveField(element)
+          ? maskValue(element.value)
+          : truncate(element.value, DOM_QUERY_VALUE_CHARS).text
+      }
       default: {
         const attribute = element.getAttribute(field)
         return attribute === null ? undefined : truncate(attribute, DOM_QUERY_VALUE_CHARS).text
@@ -655,14 +731,17 @@ function reloadAction(): ActionResult {
   }
 }
 
-async function getTextAction(args: Record<string, unknown>): Promise<ActionResult> {
+async function getTextAction(args: Record<string, unknown>, ctx: ActionContext): Promise<ActionResult> {
   const selector = typeof args.selector === 'string' && args.selector !== '' ? args.selector : undefined
   const source = selector !== undefined ? document.querySelector(selector) : null
   const text = source !== null ? pageText(source) : selector !== undefined ? `No element matched selector: ${selector}` : pageText()
   const scope = selector === undefined ? 'the whole page' : `selector "${selector}"`
   const find = typeof args.find === 'string' ? args.find.trim() : ''
-  if (find !== '') return { text: findInText(text, find, scope, args) }
-  const truncated = truncate(text, optionalCharsBudget(args, 8_000))
+  // The ceiling is the negotiated tab budget, not a fixed 8000: a caller asking
+  // for 20000 used to get 8000 back with no way to tell. `maxChars` shrinks the
+  // read, never the negotiated maximum.
+  if (find !== '') return { text: findInText(text, find, scope, args, ctx.budget.maxChars) }
+  const truncated = truncate(text, optionalCharsBudget(args, ctx.budget.maxChars))
   return { text: truncated.text + (truncated.truncated > 0 ? `\n(Truncated ${truncated.truncated} characters.)` : '') }
 }
 
@@ -683,9 +762,10 @@ const FIND_MATCH_LIMIT = 5
  * @param needle - phrase to find (literal, case-insensitive).
  * @param scope - human label for where the text came from.
  * @param args - tool arguments (`context`, `maxChars`).
+ * @param ceiling - the negotiated per-read ceiling `maxChars` may shrink but not raise.
  * @returns the rendered match report.
  */
-function findInText(text: string, needle: string, scope: string, args: Record<string, unknown>): string {
+function findInText(text: string, needle: string, scope: string, args: Record<string, unknown>, ceiling: number): string {
   const lowerText = text.toLowerCase()
   const lowerNeedle = needle.toLowerCase()
   const context = typeof args.context === 'number' && Number.isInteger(args.context)
@@ -701,7 +781,7 @@ function findInText(text: string, needle: string, scope: string, args: Record<st
     return `text search: no match for "${needle}" in ${scope} (case-insensitive, ${text.length} characters searched).`
   }
 
-  const budget = optionalCharsBudget(args, 8_000)
+  const budget = optionalCharsBudget(args, ceiling)
   // Keep the match itself inside the budget: a wide context with a small
   // maxChars must shrink the window, never cut the phrase out of it.
   const perMatch = Math.max(120, Math.floor((budget - 120) / offsets.length))

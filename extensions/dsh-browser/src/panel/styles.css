@@ -28,7 +28,13 @@ body {
 .panel {
   display: flex;
   flex-direction: column;
-  height: 100vh;
+  /* 100%, not 100vh: the side panel's viewport is not the panel's box, and the
+     floating window is a popup with its own chrome. With `100vh` the panel grew
+     taller than its container as soon as the feed filled up, so the thing that
+     scrolled was the whole panel -- the header and the top of the feed slid out
+     of reach instead of the feed scrolling under a fixed header. */
+  height: 100%;
+  overflow: hidden;
   padding: 12px;
   gap: 10px;
 }
@@ -56,7 +62,10 @@ body {
 .panel__reconnect { font-size: 12px; padding: 3px 8px; border-radius: 6px; border: 1px solid rgba(128,128,128,.4); background: transparent; color: inherit; cursor: pointer; }
 .panel__reconnect:hover { border-color: var(--accent); color: var(--accent); }
 
-.panel__body { flex: 1; overflow: auto; }
+/* `min-height: 0` is what lets this shrink: a flex item defaults to
+   `min-height: auto`, so without it the body refuses to go below its content
+   and pushes everything above it out of the panel instead of scrolling. */
+.panel__body { flex: 1; min-height: 0; overflow: auto; }
 
 /* Handshake mismatch: the only thing the user can act on, kept above the feed. */
 .panel__notice {
@@ -149,16 +158,30 @@ button {
 
 .panel__footer-actions { display: inline-flex; gap: 6px; align-items: center; }
 
-.approvals { margin-bottom: 14px; }
 .approvals__label { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin-bottom: 6px; }
-.approvals__card { border: 1px solid rgba(128,128,128,.35); border-radius: 8px; padding: 8px; margin-bottom: 8px; }
 .approvals__head { font-weight: 600; font-size: 13px; }
 .approvals__body { margin-top: 4px; font-size: 12px; color: var(--muted); line-height: 1.5; }
 .approvals__origins { display: block; word-break: break-all; }
 .approvals__actions { margin-top: 8px; display: flex; gap: 6px; flex-wrap: wrap; }
 
 /*.approvals emphasis*/
-.approvals { margin-bottom: 16px; padding: 10px; border: 1px solid rgba(217,119,6,.45); border-radius: 10px; background: rgba(217,119,6,.06); animation: approvals-in 260ms ease-out; }
+/* The approval is the one thing the user must act on, and the feed above it can
+   be arbitrarily long: as a normal flow element it scrolled out of the viewport,
+   so the prompt was invisible while the pending call ran down its 90s and then
+   failed. It sticks to the top of the feed instead. The opaque background and
+   z-index are what stop the rows scrolling *through* it. */
+.approvals {
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  margin: 0 -4px 12px;
+  padding: 10px;
+  border: 1px solid rgba(217,119,6,.45);
+  border-radius: 10px;
+  background: rgba(217,119,6,.06) var(--bg);
+  animation: approvals-in 260ms ease-out;
+}
+@media (prefers-color-scheme: dark) { .approvals { background: rgba(217,119,6,.06) var(--bg-dark); } }
 .approvals__card { border: 1px solid rgba(128,128,128,.3); border-radius: 9px; padding: 9px; margin-bottom: 8px; background: var(--bg); }
 .approvals__card:last-child { margin-bottom: 0; }
 @keyframes approvals-in { from { opacity: 0; transform: translateY(-3px); } to { opacity: 1; transform: none; } }
@@ -199,6 +222,24 @@ button {
   overflow: hidden;
   white-space: nowrap;
   text-overflow: ellipsis;
+}
+
+/* The code an operation ran: its own line, wrapping, selectable. */
+.ops__code {
+  display: block;
+  margin-top: 3px;
+  padding: 3px 5px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--fg);
+  background: rgba(128, 128, 128, .09);
+  border-left: 2px solid rgba(128, 128, 128, .28);
+  border-radius: 3px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 4.2em;
+  overflow: hidden;
 }
 
 .ops__meta {

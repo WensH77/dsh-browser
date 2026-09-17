@@ -4,16 +4,19 @@ import { afterEach, describe, expect, it } from 'vitest'
 import WebSocket from 'ws'
 import { BridgeServer, BridgeToolError, isLoopbackAddress, messageToText, payloadCode, payloadMessage } from '../src/server.ts'
 import type { BridgeFrame } from '../src/protocol.ts'
-import { BRIDGE_PROTO, BRIDGE_TOOLSET, HANDSHAKE_MISMATCH_CLOSE_CODE } from '../src/protocol.ts'
+import { BRIDGE_EXTENSION_IDS, BRIDGE_PROTO, BRIDGE_TOOLSET, EXTENSION_UNVERIFIED_CLOSE_CODE, HANDSHAKE_MISMATCH_CLOSE_CODE } from '../src/protocol.ts'
 
 const TOKEN = 'deadbeefdeadbeefdeadbeefdeadbeef'
 
+/** The extension ID the bridge pins; the no-token loopback path requires it. */
+const EXT_ID = BRIDGE_EXTENSION_IDS[0]
+
 /** 扩展上下文的 Origin（回环免 token 的必要条件）。 */
-const EXT_ORIGIN = 'chrome-extension://test-extension-id'
+const EXT_ORIGIN = `chrome-extension://${EXT_ID}`
 const FIREFOX_EXT_ORIGIN = 'moz-extension://per-install-uuid'
 
 /** Extension caps used by every hello in this suite. */
-const CAPS = { debugger: true as const, snapshotMaxChars: 12_000, maxInteractiveItems: 60 }
+const CAPS = { debugger: true as const, extensionId: EXT_ID, snapshotMaxChars: 12_000, maxInteractiveItems: 60 }
 
 interface Harness {
   bridge: BridgeServer
@@ -142,6 +145,50 @@ describe('BridgeServer', () => {
     await waitFor(() => frames.some((f) => f.t === 'hello.ok'))
     expect(frames.find((f) => f.t === 'hello.ok')).toBeDefined()
     ws.close()
+  })
+
+  it('refuses a no-token loopback socket whose Origin names another extension', async () => {
+    // `Origin` is only a header: every other extension the user has installed
+    // can present a genuine `chrome-extension://<its own id>`. Accepting any
+    // such origin let any of them take the tool slot and read every tool call.
+    const h = await startBridge()
+    harnesses.push(h)
+    const { ws, done } = await connect(h.url, 'chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa')
+    const closed = new Promise<{ code: number; reason: string }>((resolve) => {
+      ws.on('close', (code, reason) => { resolve({ code, reason: reason.toString() }) })
+    })
+    send(ws, { t: 'hello', token: '', caps: { ...CAPS, extensionId: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' } })
+    await done
+    expect((await closed).code).toBe(4002)
+    expect(ws.readyState).toBe(WebSocket.CLOSED)
+  })
+
+  it('refuses a no-token loopback socket whose Origin is not an extension origin at all', async () => {
+    // A local process can send whatever it likes here.
+    const h = await startBridge()
+    harnesses.push(h)
+    const { ws, done } = await connect(h.url, `chrome-extension://${EXT_ID}-suffix`)
+    send(ws, { t: 'hello', token: '', caps: CAPS })
+    await done
+    expect(ws.readyState).toBe(WebSocket.CLOSED)
+  })
+
+  it('refuses a hello whose extensionId disagrees with the Origin it arrived on', async () => {
+    // The Origin names the pinned extension but the frame claims another: a
+    // process that learned the accepted origin cannot also pass the claim.
+    const h = await startBridge()
+    harnesses.push(h)
+    const { ws, done } = await connect(h.url, EXT_ORIGIN)
+    const closed = new Promise<{ code: number; reason: string }>((resolve) => {
+      ws.on('close', (code, reason) => { resolve({ code, reason: reason.toString() }) })
+    })
+    send(ws, { t: 'hello', token: '', caps: { ...CAPS, extensionId: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' } })
+    await done
+    const result = await closed
+    // Its own code, not 4002: the token was never the problem, so the extension
+    // must not be told to fix the token or to restart the host.
+    expect(result.code).toBe(EXTENSION_UNVERIFIED_CLOSE_CODE)
+    expect(result.reason).toContain('reload it from chrome://extensions')
   })
 
   it('requires a token from Firefox extension origins because their UUID is not an extension identity', async () => {

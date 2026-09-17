@@ -56,6 +56,33 @@ describe('browser_dom_query', () => {
     expect(answer.text).not.toContain('checked=')
   })
 
+  it('masks a credential field exactly as a snapshot does', async () => {
+    document.body.innerHTML = [
+      '<input name="user" type="text" value="jane">',
+      '<input name="password" type="password" value="hunter2">',
+      '<input id="cc-number" name="cardnumber" type="text" value="4111111111111111">',
+      '<input name="cvv" type="text" value="737">',
+      '<textarea name="note">plain</textarea>',
+    ].join('')
+
+    const answer = await runAction('browser_dom_query', {
+      selector: 'input, textarea',
+      fields: ['value'],
+      limit: 10,
+    }, context())
+
+    // The credential values never reach the model, by the same rule the
+    // snapshot path applies: password type, and card/cvv by name.
+    expect(answer.text).not.toContain('hunter2')
+    expect(answer.text).not.toContain('4111111111111111')
+    expect(answer.text).not.toContain('737')
+    // Masked fields still report that a value is present.
+    expect(answer.text).toContain('value="••••"')
+    // Non-sensitive fields stay readable.
+    expect(answer.text).toContain('value="jane"')
+    expect(answer.text).toContain('value="plain"')
+  })
+
   it('answers an empty match instead of failing', async () => {
     document.body.innerHTML = '<main>empty</main>'
 

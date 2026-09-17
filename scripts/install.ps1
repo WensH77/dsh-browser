@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
 dsh-browser 一键安装（Windows）：支持远程托管安装和本地 checkout 安装。
 dsh-browser one-command install (Windows): supports both managed remote installs and local checkout installs.
@@ -36,7 +36,7 @@ $BridgePlugin = '@yuxianglin/dsh-bridge-browser'
 function Write-Step {
   param([int]$Number, [string]$Zh, [string]$En)
   Write-Host ''
-  Write-Host ("[{0}/4] {1}" -f $Number, $Zh)
+  Write-Host ("[{0}/5] {1}" -f $Number, $Zh)
   Write-Host ("      {0}" -f $En)
 }
 
@@ -409,7 +409,18 @@ Write-Step 3 "构建 Chrome 扩展" "Build the Chrome extension"
 Invoke-Quiet -WorkingDirectory $Root -Command 'pnpm' -Arguments @('--filter', 'dsh-browser-extension', 'run', 'build') `
   -FailZh "扩展构建失败。" -FailEn "The extension build failed."
 
-Write-Step 4 "准备扩展并打开 Chrome" "Prepare the extension and open Chrome"
+Write-Step 4 "安装技能（所有工作区可用）" "Install skills (available to every workspace)"
+# Copied rather than linked: creating a symlink on Windows needs Developer Mode or elevation,
+# and the installer runs again on every update, so the copy is refreshed there.
+try {
+  Invoke-Quiet -WorkingDirectory $Root -Command 'node' -Arguments @('scripts/install-skills.mjs', '--copy') `
+    -FailZh "技能安装失败。" -FailEn "Skill install failed."
+} catch {
+  Write-Host "技能安装失败（不影响扩展使用，可稍后重跑 scripts/install-skills.mjs）" -ForegroundColor Yellow
+  Write-Host "Skill install failed (the extension still works; rerun scripts/install-skills.mjs later)" -ForegroundColor Yellow
+}
+
+Write-Step 5 "准备扩展并打开 Chrome" "Prepare the extension and open Chrome"
 Confirm-Browser | Out-Null
 $DistDir = Join-Path $DshHomeDir 'browser-extension'
 $IsUpdate = Test-Path -LiteralPath (Join-Path $DistDir 'manifest.json') -PathType Leaf
