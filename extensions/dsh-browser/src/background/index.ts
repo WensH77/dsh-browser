@@ -38,11 +38,14 @@ import { bridgeNotice } from './bridge-notice.ts'
 import { approvalFailureAnswer, dispatchToolCall, resetTabSnapshot, type ToolAnswer, type ToolCall } from './tools.ts'
 import { approvalPromptForCall, setActionTrustPolicy } from './authorization.ts'
 import {
+  allowsSessionScope,
   isApprovalDecision,
   type ApprovalAuthorization,
   type ApprovalPrompt,
   type ApprovalRequest,
+  type ApprovalVerdict,
 } from '../security/approval.ts'
+import { SessionAllowance, scopeKeyForCall } from '../security/session-allowance.ts'
 import { getUiLocale } from '../i18n.ts'
 import {
   actionCoveredByTrustedOrigins,
@@ -144,6 +147,12 @@ const tabAffinity = new TabAffinityController()
 const focusedWindow = new FocusedWindowTracker()
 /** Ephemeral allowlist: cleared when the worker restarts. */
 const sessionTrustedActionOrigins = new Set<string>()
+/**
+ * Per-session, per-action grants from "Allow in this session". Also ephemeral:
+ * a worker restart drops them, and so does unbinding the session or closing
+ * the tab it was driving.
+ */
+const sessionAllowances = new SessionAllowance()
 /** Tool calls that can still be withdrawn by a bridge `tool.cancel` frame. */
 const activeToolCalls = new Map<string, AbortController>()
 /** Origin of the dsh host we connect to (http://host:port), used to keep the
@@ -435,6 +444,19 @@ function cancelPendingApprovals(sessionId?: string): void {
   approvals.cancelAll(sessionId)
 }
 
+/**
+ * Drop everything a session was granted or is waiting on.
+ *
+ * "Allow in this session" earns its name here: the grant covers one session
+ * driving the controlled tab, so it goes away with the binding that defined
+ * it — unbind, handoff, tab close — and does not survive into a later session
+ * that happens to reuse the tab.
+ */
+function forgetSession(sessionId: string): void {
+  sessionAllowances.clear(sessionId)
+  cancelPendingApprovals(sessionId)
+}
+
 function summarizeTab(tab: chrome.tabs.Tab): AffinityTab | null {
   if (tab.id === undefined) return null
   return {
@@ -481,7 +503,7 @@ function observeActiveSummary(summary: AffinityTab): void {
   if (!tabAffinity.observeActive(summary)) return
   if (previousStatus !== 'handoff' && tabAffinity.snapshot().status === 'handoff') {
     const focused = tabAffinity.focusedSession()
-    if (focused !== null) cancelPendingApprovals(focused)
+    if (focused !== null) forgetSession(focused)
     else cancelPendingApprovals()
   }
   persistTabAffinity()
@@ -637,7 +659,7 @@ async function resolveToolTab(sessionId?: string): Promise<Pick<chrome.tabs.Tab,
     } catch {
       const affectedSessions = tabAffinity.sessionIdsForTab(resolution.tab.tabId)
       if (tabAffinity.removeTab(resolution.tab.tabId)) {
-        for (const sid of affectedSessions) cancelPendingApprovals(sid)
+        for (const sid of affectedSessions) forgetSession(sid)
         persistTabAffinity()
         broadcastTabAffinity()
       }
@@ -648,6 +670,7 @@ async function resolveToolTab(sessionId?: string): Promise<Pick<chrome.tabs.Tab,
 }
 
 async function authorizeToolCall(
+  call: ToolCall,
   prompt: ApprovalPrompt,
   signal: AbortSignal,
   windowId: number,
@@ -663,7 +686,12 @@ async function authorizeToolCall(
   }
   const result: ApprovalRequestResult = await approvals.request(prompt, signal, windowId, sessionId)
   if (signal.aborted) return 'cancelled'
-  if (result.status !== 'decision') return result.status
+  if (result.status !== 'decision') {
+    // The prompt expired with nobody watching. The call has not run and the
+    // worker is still alive, so the caller may raise a fresh prompt instead of
+    // failing an operation the model already asked for.
+    return result.status === 'timed-out' ? 'renew' : result.status
+  }
   const { decision } = result
   if (decision === 'always-allow-reads' && prompt.kind === 'read') {
     await persistSettings({ sharePageContent: 'auto' })
@@ -677,7 +705,50 @@ async function authorizeToolCall(
     await persistSettings({ trustedActionOrigins: [...settings.trustedActionOrigins, prompt.origins[0]!] })
     return 'approved'
   }
+  // The decision itself was only "once": the grant the user actually chose
+  // covers the rest of this session, so record it before the action runs.
+  if (allowsSessionScope(decision, { kind: prompt.kind, action: prompt.action, sessionId })
+    && sessionId !== undefined) {
+    sessionAllowances.remember(sessionId, scopeKeyForCall(call.name, call.args ?? {}), call.name)
+    return 'approved'
+  }
   return decision === 'allow-once' ? 'approved' : 'denied'
+}
+
+/**
+ * Whether this call is already covered by a grant the user gave this session.
+ *
+ * Checked before the prompt is even built, so a granted action neither shows a
+ * card nor rings a notification for the rest of the session.
+ */
+function coveredBySessionGrant(call: ToolCall): boolean {
+  return sessionAllowances.allows(call.sessionId, scopeKeyForCall(call.name, call.args ?? {}))
+}
+
+/** One place for the panel sequencing: waiting → running as consent settles. */
+async function authorizeCall(call: ToolCall, prompt: ApprovalPrompt, windowId: number, signal: AbortSignal): Promise<ApprovalAuthorization> {
+  settleOp(call.id, 'waiting')
+  const authorization = await authorizeToolCall(call, prompt, signal, windowId, call.sessionId)
+  if (authorization === 'approved') settleOp(call.id, 'running')
+  return authorization
+}
+
+/**
+ * The answer for a call whose prompt expired while nobody was looking.
+ *
+ * The operation never started, so the honest answer is "not approved yet" plus
+ * the one action that can fix it: the model asks again, which raises a fresh
+ * 60-second prompt in the side panel.
+ */
+function gatedToolRenewalAnswer(prompt: ApprovalPrompt): ToolAnswer {
+  return {
+    ok: false,
+    error: {
+      code: 'timeout',
+      message: `The approval prompt for "${prompt.action}" expired before the user answered it. `
+        + 'Nothing ran — call the tool again to raise a fresh prompt in the side panel.',
+    },
+  }
 }
 
 /** Window an approval may anchor to when no controlled tab exists yet. */
@@ -704,7 +775,7 @@ async function approvalAnchorWindowId(): Promise<number> {
  */
 async function authorizeUnboundNavigate(
   call: ToolCall,
-  authorize: (prompt: ApprovalPrompt) => Promise<ApprovalAuthorization>,
+  authorize: (prompt: ApprovalPrompt) => Promise<ApprovalVerdict>,
 ): Promise<ToolAnswer | undefined> {
   const destination = unboundNavigateDestination(call)
   if (destination === undefined) return undefined
@@ -712,6 +783,9 @@ async function authorizeUnboundNavigate(
   if (sessionId === undefined || sessionId.trim() === '') return undefined
   const policyFailure = destinationPolicyFailure(destination.href)
   if (policyFailure !== undefined) return policyFailure
+  // No session-grant check here on purpose: `browser_navigate` cannot hold one
+  // (see SESSION_SCOPABLE_ACTIONS), so this path is always a fresh prompt, and
+  // the destination it approves is the destination it opens.
   const prompt = approvalPromptForCall(call, settings.sharePageContent, [])
   if (prompt === undefined) return undefined
   const authorization = await authorize(prompt)
@@ -1075,13 +1149,18 @@ async function virtualToolGate(call: ToolCall, controller: AbortController): Pro
   const url = typeof call.args?.url === 'string' ? call.args.url : ''
   const blocked = blockedOriginFailure(url)
   if (blocked !== undefined) return blocked
+  if (coveredBySessionGrant(call)) return undefined
   const prompt = approvalPromptForCall(call, settings.sharePageContent, [])
   if (prompt === undefined) return undefined
   settleOp(call.id, 'waiting')
-  const authorization = await authorizeToolCall(prompt, controller.signal, await approvalAnchorWindowId(), call.sessionId)
+  const authorization = await authorizeToolCall(call, prompt, controller.signal, await approvalAnchorWindowId(), call.sessionId)
   if (authorization === 'approved') {
     settleOp(call.id, 'running')
     return undefined
+  }
+  // `renew` is not a refusal: the prompt expired, so tell the model to ask again.
+  if (authorization === 'renew') {
+    return gatedToolRenewalAnswer(prompt)
   }
   return approvalFailureAnswer(prompt, authorization)
 }
@@ -1154,7 +1233,8 @@ async function handleVirtualTool(call: ToolCall, signal: AbortSignal): Promise<T
     if (policyBlocked !== undefined) return policyBlocked
     await affinityReady
     if (signal.aborted) return { ok: false, error: { code: 'bridge-closed', message: 'Tool call was cancelled' } }
-    cancelPendingApprovals(sessionId)
+    // The session is being pointed at another tab: its grants named the old one.
+    forgetSession(sessionId)
     resetTabSnapshot(summary.tabId)
     tabAffinity.bindNewSession(sessionId, summary)
     keepTabAlive(summary.tabId)
@@ -1216,11 +1296,15 @@ function routeToolCall(call: ToolCall): void {
   void Promise.resolve()
     // Consent comes before any request leaves the browser: an unapproved
     // first navigate must not load its destination.
-    .then(() => authorizeUnboundNavigate(call, async (prompt) => {
+    .then(() => authorizeUnboundNavigate(call, async (prompt): Promise<ApprovalVerdict> => {
       settleOp(call.id, 'waiting')
-      const authorization = await authorizeToolCall(prompt, controller.signal, await approvalAnchorWindowId(), call.sessionId)
-      if (authorization === 'approved') settleOp(call.id, 'running')
-      return authorization
+      // A navigate is never renewable, so nothing here has to be asked twice.
+      const authorization = await authorizeToolCall(call, prompt, controller.signal, await approvalAnchorWindowId(), call.sessionId)
+      if (authorization === 'approved') {
+        settleOp(call.id, 'running')
+        return 'approved'
+      }
+      return authorization === 'renew' ? 'timed-out' : authorization
     }))
     .then((early) => early ?? debugToolRefusal(call.name, settings.allowExtensionDebug) ?? resolveToolTab(call.sessionId))
     .then((target) => 'ok' in target
@@ -1229,12 +1313,7 @@ function routeToolCall(call: ToolCall): void {
         call,
         settings.sharePageContent,
         budget,
-        async (prompt) => {
-          settleOp(call.id, 'waiting')
-          const authorization = await authorizeToolCall(prompt, controller.signal, target.windowId, call.sessionId)
-          if (authorization === 'approved') settleOp(call.id, 'running')
-          return authorization
-        },
+        (prompt) => authorizeCall(call, prompt, target.windowId, controller.signal),
         controller.signal,
         target,
         () => target.id !== undefined && tabAffinity.allowsTarget(target.id, call.sessionId),
@@ -1429,7 +1508,7 @@ chrome.runtime.onMessage.addListener((message: unknown, sender, sendResponse) =>
     case 'session.unbind': {
       const sessionId = tabAffinity.focusedSession()
       if (sessionId !== null && tabAffinity.unbindSession(sessionId)) {
-        cancelPendingApprovals(sessionId)
+        forgetSession(sessionId)
         persistTabAffinity()
         broadcastTabAffinity()
         sendResponse({ accepted: true })
@@ -1517,7 +1596,7 @@ chrome.tabs.onReplaced.addListener((addedTabId, removedTabId) => {
   void affinityReady.then(() => {
     const affectedSessions = tabAffinity.sessionIdsForTab(removedTabId)
     if (!tabAffinity.replaceTab(removedTabId, addedTabId)) return
-    for (const sid of affectedSessions) cancelPendingApprovals(sid)
+    for (const sid of affectedSessions) forgetSession(sid)
     resetTabSnapshot(removedTabId)
     resetTabSnapshot(addedTabId)
     persistTabAffinity()
@@ -1537,7 +1616,7 @@ chrome.tabs.onRemoved.addListener((tabId) => {
   void affinityReady.then(() => {
     const affectedSessions = tabAffinity.sessionIdsForTab(tabId)
     if (!tabAffinity.removeTab(tabId)) return
-    for (const sid of affectedSessions) cancelPendingApprovals(sid)
+    for (const sid of affectedSessions) forgetSession(sid)
     persistTabAffinity()
     broadcastTabAffinity()
   })
