@@ -24,7 +24,8 @@ import { addBlockRule, addHeaderRule, clearTabRules, listTabRules, parseHeaderCh
 import { wrapUntrustedContent, wrapUntrustedResult } from '../security/untrusted.ts'
 import { approvalPromptForCall } from './authorization.ts'
 import { waitForNextDocumentReady } from './navigation.ts'
-import type { ApprovalAuthorization, ApprovalPrompt } from '../security/approval.ts'
+import type { ApprovalAuthorization, ApprovalPrompt, ApprovalRefusal } from '../security/approval.ts'
+import { isSessionScopableAction } from '../security/session-allowance.ts'
 
 /** A tool call from the bridge. */
 export interface ToolCall {
@@ -163,7 +164,7 @@ export function frameArgumentInvalid(): ToolAnswer {
 }
 
 /** Preserve the factual approval outcome for the model without prescribing a response. */
-export function approvalFailureAnswer(approval: ApprovalPrompt, authorization: Exclude<ApprovalAuthorization, 'approved'>): ToolAnswer {
+export function approvalFailureAnswer(approval: ApprovalPrompt, authorization: ApprovalRefusal): ToolAnswer {
   switch (authorization) {
     case 'denied':
       return {
@@ -668,14 +669,20 @@ export async function dispatchToolCall(
   if (frameError !== undefined) return frameError
   const targetError = validateElementTarget(call, tab.id, frames)
   if (targetError !== undefined) return targetError
-  const approval = approvalPromptForCall(call, sharePageContent, frames)
+  let approval = approvalPromptForCall(call, sharePageContent, frames)
   if (approval !== undefined) {
-    const authorization = authorize === undefined ? 'unavailable' : await authorize(approval)
-    if (isCancelled(call, signal)) return cancelled()
-    if (targetStillAllowed?.() === false) return targetChanged()
-    if (authorization !== 'approved') {
-      return approvalFailureAnswer(approval, authorization)
-    }
+    const result = await settleApproval({
+      approval,
+      frames,
+      call,
+      tab,
+      signal,
+      targetStillAllowed,
+      sharePageContent,
+      authorize,
+    })
+    if ('answer' in result) return result.answer
+    approval = result.approval
   }
   let executionFrames = frames
   if (approval !== undefined) {
@@ -747,6 +754,78 @@ export async function dispatchToolCall(
     } catch {
       return unavailable('The content script could not be loaded on this page. Chrome internal and protected pages do not support browser operations.')
     }
+  }
+}
+
+interface SettleApprovalOptions {
+  approval: ApprovalPrompt
+  /** Frames the prompt was built from; a renewal must stay inside them. */
+  frames: TabFrame[]
+  call: ToolCall
+  tab: Pick<chrome.tabs.Tab, 'id' | 'url'>
+  signal?: AbortSignal
+  targetStillAllowed?: () => boolean
+  sharePageContent: 'ask' | 'auto' | 'off'
+  authorize?: (prompt: ApprovalPrompt) => Promise<ApprovalAuthorization>
+}
+
+type SettleApprovalResult = { approval: ApprovalPrompt } | { answer: ToolAnswer }
+
+/**
+ * Ask once, and when the answer is "this session" ask once more.
+ *
+ * Two decisions do not end the call: an expired prompt, and "Allow in this
+ * session", which records the grant before it can be honored. Both re-raise
+ * the prompt against freshly listed frames, so the approval the user sees
+ * still describes the page they are on; the retry then passes the boundary
+ * check below.
+ *
+ * Renewal is limited to calls whose decision actually changed something: an
+ * action that can hold a session grant, and a page read when sharing is set to
+ * "ask". A navigation is neither — retrying it would re-approve a *new*
+ * destination off an old prompt's answer, so an expired navigation prompt
+ * simply fails and the model decides whether to ask again.
+ */
+async function settleApproval(options: SettleApprovalOptions): Promise<SettleApprovalResult> {
+  const renewable = options.approval.kind === 'read' || isSessionScopableAction(options.call.name)
+  // A read is prompted from one frame's point of view; everything else from the
+  // whole tab, so the renewed prompt is scoped exactly like the first one.
+  const renew = options.approval.kind === 'read'
+    ? async (): Promise<ApprovalPrompt | undefined> => approvalPromptForCall(
+        options.call,
+        options.sharePageContent,
+        options.frames.filter((frame) => frame.frameId === requestedFrame(options.call.args)),
+      )
+    : async (): Promise<ApprovalPrompt | undefined> => approvalPromptForCall(
+        options.call,
+        options.sharePageContent,
+        await listTabFrames(options.tab.id!, options.tab.url),
+      )
+
+  let approval = options.approval
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const authorization: ApprovalAuthorization = options.authorize === undefined
+      ? 'unavailable'
+      : await options.authorize(approval)
+    if (isCancelled(options.call, options.signal)) return { answer: cancelled() }
+    if (options.targetStillAllowed?.() === false) return { answer: targetChanged() }
+    if (authorization === 'approved') return { approval }
+    // `renewable` is what keeps `renew` out of the refusal here: it was checked
+    // together with the result above, but TypeScript cannot narrow through it.
+    if (authorization !== 'renew' || !renewable) return { answer: approvalFailureAnswer(approval, authorization as ApprovalRefusal) }
+    const renewed = await renew()
+    if (renewed === undefined || !sameApprovalBoundary(approval, renewed)) {
+      return {
+        answer: unavailable('The page changed while the approval prompt was open: '
+          + `${invalidationReason(approval, renewed, options.call, options.frames, options.frames)}. `
+          + 'Nothing ran — call browser_snapshot again before retrying.'),
+      }
+    }
+    approval = renewed
+  }
+  return {
+    answer: unavailable(`The approval prompt for "${approval.action}" expired before it was answered. `
+      + 'Nothing ran — call the tool again to raise a fresh prompt in the side panel.'),
   }
 }
 

@@ -3,7 +3,7 @@ import { getUiLocale } from '../i18n.ts'
 import { opLabel, type OpCopy } from './op-label.ts'
 import { sendUiRequest, type UiState } from '../shared/messages.ts'
 import { noticeText } from '../shared/notice-copy.ts'
-import type { ApprovalDecision, ApprovalRequest } from '../security/approval.ts'
+import { decisionButtons } from './approval-buttons.ts'
 
 const zh = {
   appName: 'dsh 浏览器助手',
@@ -21,6 +21,7 @@ const zh = {
   deny: '拒绝',
   alwaysAllowReads: '始终允许读取',
   trustOrigin: '信任此网站',
+  allowInSession: '本会话内允许',
   read: '读取',
   action: '操作',
   operations: '最近操作',
@@ -70,6 +71,7 @@ const en = {
   deny: 'Deny',
   alwaysAllowReads: 'Always allow reads',
   trustOrigin: 'Trust this site',
+  allowInSession: 'Allow in this session',
   read: 'Read',
   action: 'Action',
   operations: 'Operations',
@@ -160,18 +162,6 @@ function opStateLabel(state: string): string | undefined {
   }
 }
 
-function decisionButtons(request: ApprovalRequest): Array<{ id: ApprovalDecision; label: string }> {
-  const buttons: Array<{ id: ApprovalDecision; label: string }> = [
-    { id: 'allow-once', label: copy.allowOnce },
-    { id: 'deny', label: copy.deny },
-  ]
-  if (request.kind === 'read') buttons.splice(1, 0, { id: 'always-allow-reads', label: copy.alwaysAllowReads })
-  if (request.kind === 'action' && request.canTrust && request.origins.length === 1) {
-    buttons.push({ id: 'trust-origin', label: copy.trustOrigin })
-  }
-  return buttons
-}
-
 export function App(): ReactElement {
   const [ui, setUi] = useState<UiState | null>(null)
 
@@ -258,7 +248,7 @@ export function App(): ReactElement {
                   {request.origins.length > 0 && <span className="approvals__origins">{request.origins.join(', ')}</span>}
                 </div>
                 <div className="approvals__actions">
-                  {decisionButtons(request).map((button) => (
+                  {decisionButtons(request, copy).map((button) => (
                     <button
                       type="button"
                       key={button.id}
