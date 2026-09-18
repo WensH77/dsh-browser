@@ -10,13 +10,20 @@
 
 import type { ToolAnswer } from './tools.ts'
 
-/** Why the session has no usable controlled tab. */
+/**
+ * Why the session has no usable controlled tab.
+ *
+ * `handoff` is only reachable for a call that carries no session binding: a
+ * session that owns a tab keeps operating it while the user looks elsewhere,
+ * so this is no longer the "user switched tabs" answer it once was.
+ */
 export type AffinityFailureKind = 'handoff' | 'lost' | 'missing'
 
 /**
  * Build the failure answer for one affinity problem.
  *
- * @param kind - handoff (user switched tabs), lost (tab closed), missing (never bound).
+ * @param kind - handoff (no session binding and no decided target), lost (tab
+ * closed), missing (never bound).
  * @returns the tool answer to settle the call with.
  */
 export function affinityFailureAnswer(kind: AffinityFailureKind): ToolAnswer {
@@ -25,8 +32,9 @@ export function affinityFailureAnswer(kind: AffinityFailureKind): ToolAnswer {
       ok: false,
       error: {
         code: 'action-failed',
-        message: 'The user switched tabs, so browser operations are paused. Switch back to the controlled page and retry — '
-          + 'or call browser_bind_interactive to let the user pick which open page this session should follow.',
+        message: 'No page is decided for this call yet, so browser operations are paused. '
+          + 'Call browser_bind_interactive to let the user pick which open page this session should follow, '
+          + 'or browser_navigate to open the target URL in a new tab.',
       },
     }
   }
