@@ -498,14 +498,19 @@ function persistTabAffinity(): void {
   })
 }
 
+/**
+ * Record which tab the user is looking at.
+ *
+ * A focus change is not a rebinding: the session keeps operating the tab it was
+ * bound to, and anything it is waiting on stays valid. That is the whole point
+ * of "operate the page in the background" — and the approval card lives in the
+ * dsh page, so a user who switches to another tab to reach it (Gmail, the
+ * panel's own window) must not have the prompt withdrawn under them. Consent
+ * still dies with the binding it was given for: unbind, tab close, or an
+ * explicit bind elsewhere.
+ */
 function observeActiveSummary(summary: AffinityTab): void {
-  const previousStatus = tabAffinity.snapshot().status
   if (!tabAffinity.observeActive(summary)) return
-  if (previousStatus !== 'handoff' && tabAffinity.snapshot().status === 'handoff') {
-    const focused = tabAffinity.focusedSession()
-    if (focused !== null) forgetSession(focused)
-    else cancelPendingApprovals()
-  }
   persistTabAffinity()
   broadcastTabAffinity()
 }

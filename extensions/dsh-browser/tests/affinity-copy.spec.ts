@@ -13,11 +13,14 @@ describe('affinityFailureAnswer', () => {
     expect(answer.error?.message).toContain('asks the user')
   })
 
-  it('offers to rebind after the user switched tabs, without hijacking the new one', () => {
+  it('offers a rebind when no page is decided, without hijacking the active one', () => {
     const answer = affinityFailureAnswer('handoff')
 
-    expect(answer.error?.message).toContain('switched tabs')
+    // A bound session never sees this: a focus change no longer pauses it.
+    // Reaching here means the call had no decided page, so the two ways out are
+    // an explicit pick and a fresh tab — never "the page you are looking at".
     expect(answer.error?.message).toContain('browser_bind_interactive')
+    expect(answer.error?.message).toContain('browser_navigate')
     expect(answer.error?.message).not.toContain('opened the page for you')
   })
 

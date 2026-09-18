@@ -38,6 +38,21 @@ describe('TabAffinityController', () => {
     expect(affinity.snapshot()).toMatchObject({ status: 'following', controlled: { tabId: 2 } })
   })
 
+  it('keeps a bound session on its tab without any follow/keep decision', () => {
+    // The shape the background relies on: a session that owns a tab operates it
+    // while the user reads another tab, so no handoff decision is on the path.
+    const affinity = new TabAffinityController()
+    affinity.observeActive(tab(1))
+    affinity.bindInitial(tab(1), 'session-a')
+    affinity.observeActive(tab(2))
+
+    expect(affinity.resolveTarget('session-a')).toMatchObject({ kind: 'target', tab: { tabId: 1 } })
+    expect(affinity.allowsTarget(1, 'session-a')).toBe(true)
+    expect(affinity.allowsTarget(2, 'session-a')).toBe(false)
+    // The unbound-controller answer stays strict: no session, no decided tab.
+    expect(affinity.resolveTarget()).toEqual({ kind: 'handoff' })
+  })
+
   it('keeps operating the bound tab in the background after an explicit keep choice', () => {
     const affinity = new TabAffinityController()
     affinity.observeActive(tab(1))
