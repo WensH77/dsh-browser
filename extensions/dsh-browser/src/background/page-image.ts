@@ -21,8 +21,16 @@
  * @module
  */
 
+import { base64ToBytes, bytesToBase64 } from '../shared/base64.ts'
 import type { CaptureLimits, CapturedImage, CapturedImageMediaType } from '@yuxianglin/dsh-bridge-browser/src/protocol.ts'
 import type { PageImageSource } from '../content/actions.ts'
+import {
+  RasterError,
+  decodeRaster,
+  exceedsLimits,
+  fitRasterWithinLimits,
+  type RasterWording,
+} from './bitmap.ts'
 
 /** A picture failure the background projects onto a stable tool error code. */
 export class PageImageError extends Error {
@@ -41,8 +49,12 @@ const ACCEPTED_MEDIA_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp', '
 /** Fallback admission limits when the host sends none (it normally sends theirs). */
 const FALLBACK_LIMITS: CaptureLimits = { maxBytes: 20 * 1024 * 1024, maxPixels: 64_000_000, maxDimension: 8_192 }
 
-/** JPEG quality ladder for a picture too large to pass through. */
-const QUALITY_LADDER = [80, 60, 40] as const
+/** How this module words a raster failure, so the shared mechanics stay neutral. */
+const PICTURE_WORDING: RasterWording = {
+  subject: 'picture',
+  decodeHint: 'Use browser_capture to screenshot the page instead.',
+  fitHint: 'Use browser_capture with a smaller region instead.',
+}
 
 /** Validate the location a content script reported for one picture. */
 export function parsePageImageSource(value: unknown): PageImageSource | undefined {
@@ -54,22 +66,6 @@ export function parsePageImageSource(value: unknown): PageImageSource | undefine
   const dataUrl = typeof candidate.dataUrl === 'string' && candidate.dataUrl.startsWith('data:') ? candidate.dataUrl : undefined
   if (url === undefined && dataUrl === undefined) return undefined
   return { kind, ...url === undefined ? {} : { url }, ...dataUrl === undefined ? {} : { dataUrl } }
-}
-
-function bytesToBase64(bytes: Uint8Array): string {
-  let binary = ''
-  const chunk = 0x8000
-  for (let at = 0; at < bytes.length; at += chunk) {
-    binary += String.fromCharCode(...bytes.subarray(at, at + chunk))
-  }
-  return btoa(binary)
-}
-
-function base64ToBytes(base64: string): Uint8Array {
-  const binary = atob(base64)
-  const bytes = new Uint8Array(binary.length)
-  for (let at = 0; at < binary.length; at += 1) bytes[at] = binary.charCodeAt(at)
-  return bytes
 }
 
 /** Guess a media type from a URL when the response carries none. */
@@ -171,57 +167,23 @@ async function readSourceBytes(source: PageImageSource): Promise<{ bytes: Uint8A
   )
 }
 
-/** Decode a raster, naming the failure when the bytes are not a picture. */
+/** Decode a picture's bytes, naming the failure when they are not a picture. */
 async function decode(bytes: Uint8Array, mediaType: string): Promise<ImageBitmap> {
-  try {
-    return await createImageBitmap(new Blob([bytes as BlobPart], { type: mediaType }))
-  } catch {
-    throw new PageImageError(
-      'action-failed',
-      `The picture (${mediaType === '' ? 'unknown type' : mediaType}) could not be decoded into a raster. Use browser_capture to screenshot the page instead.`,
-    )
-  }
-}
-
-/** Whether the picture must be resized before the deployment will accept it. */
-function exceedsLimits(width: number, height: number, bytes: number, limits: CaptureLimits): boolean {
-  return bytes > limits.maxBytes
-    || width * height > limits.maxPixels
-    || Math.max(width, height) > limits.maxDimension
+  return await asPictureError(() => decodeRaster(bytes, mediaType, PICTURE_WORDING))
 }
 
 /** Rasterize and shrink a picture into the deployment's admission limits. */
 async function fitWithinLimits(bitmap: ImageBitmap, limits: CaptureLimits): Promise<CapturedImage> {
-  const pixelScale = Math.sqrt(limits.maxPixels / (bitmap.width * bitmap.height))
-  const dimensionScale = limits.maxDimension / Math.max(bitmap.width, bitmap.height)
-  const scale = Math.min(1, pixelScale, dimensionScale)
-  const width = Math.max(1, Math.round(bitmap.width * scale))
-  const height = Math.max(1, Math.round(bitmap.height * scale))
-  const canvas = new OffscreenCanvas(width, height)
-  const context = canvas.getContext('2d')
-  if (context === null) {
-    throw new PageImageError('action-failed', 'This browser build cannot rasterize a picture (no 2D canvas in the service worker).')
-  }
-  context.drawImage(bitmap, 0, 0, width, height)
-  bitmap.close()
+  return await asPictureError(() => fitRasterWithinLimits(bitmap, limits, PICTURE_WORDING))
+}
 
-  let mediaType: CapturedImageMediaType = 'image/png'
-  let blob = await canvas.convertToBlob({ type: 'image/png' })
-  if (blob.size > limits.maxBytes) {
-    mediaType = 'image/jpeg'
-    for (const quality of QUALITY_LADDER) {
-      blob = await canvas.convertToBlob({ type: 'image/jpeg', quality })
-      if (blob.size <= limits.maxBytes) break
-    }
+/** Re-brand the shared raster failure as this module's stable tool error. */
+async function asPictureError<T>(run: () => Promise<T>): Promise<T> {
+  try {
+    return await run()
+  } catch (error: unknown) {
+    throw error instanceof RasterError ? new PageImageError('action-failed', error.message) : error
   }
-  if (blob.size > limits.maxBytes) {
-    throw new PageImageError(
-      'action-failed',
-      `The picture could not be fitted into ${limits.maxBytes} bytes. Use browser_capture with a smaller region instead.`,
-    )
-  }
-  const bytes = new Uint8Array(await blob.arrayBuffer())
-  return { dataBase64: bytesToBase64(bytes), mediaType, width, height, bytes: bytes.byteLength }
 }
 
 /**

@@ -10,6 +10,7 @@
  * @module
  */
 
+import { bytesToBase64 } from '../shared/base64.ts'
 import {
   CaptureError,
   cdpFailure,
@@ -313,10 +314,19 @@ async function answerPausedRequest(tabId: number, event: Record<string, unknown>
       responseCode: rule.status ?? 200,
       responseHeaders: (rule.headers ?? [{ name: 'content-type', value: 'text/plain; charset=utf-8' }])
         .map((header) => ({ name: header.name, value: header.value })),
-      body: Buffer.from(body, 'utf8').toString('base64'),
+      body: bytesToBase64(new TextEncoder().encode(body)),
     })
-  } catch {
-    // The page navigated or the session ended while the request was paused.
+  } catch (error: unknown) {
+    // A failed *fulfil* must not leave the request paused: the page would wait on
+    // it forever (measured: a fetch that never settles). Release it, and keep the
+    // reason — this catch used to be silent, which is what hid a body encoder
+    // that threw on every mock for weeks.
+    console.warn('[dsh-browser] network override could not be applied; releasing the request', error)
+    try {
+      await chrome.debugger.sendCommand({ tabId }, 'Fetch.continueRequest', { requestId })
+    } catch {
+      // The session went away as well; there is nothing left to release.
+    }
   }
 }
 
@@ -467,8 +477,15 @@ export async function installMock(tabId: number, rule: MockRule): Promise<number
     await holdSession(tabId, {})
     const session = sessionFor(tabId)
     session.mocks.push(rule)
+    // `Fetch.enable` replaces the pattern set rather than adding to it, so every
+    // installed rule has to travel in this one call: sending only the newest
+    // pattern silently disabled the earlier ones while the tool still counted
+    // them (measured: "2 rule(s)" with only the last one intercepting).
     await chrome.debugger.sendCommand({ tabId }, 'Fetch.enable', {
-      patterns: [{ urlPattern: toUrlPattern(rule.pattern), requestStage: 'Request' }],
+      patterns: session.mocks.map((installed) => ({
+        urlPattern: toUrlPattern(installed.pattern),
+        requestStage: 'Request',
+      })),
     })
   })
   return sessionFor(tabId).mocks.length

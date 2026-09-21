@@ -53,6 +53,80 @@ describe('SessionAllowance', () => {
     expect(allowances.grantsFor('session-a').map((grant) => grant.action)).toEqual(['browser_dialog', 'browser_headers'])
     expect(allowances.grantsFor('session-b')).toEqual([])
   })
+
+  it('reports the grant key, which is what a later call is checked against', () => {
+    // The panel lists keys: `browser_network#mock` and `browser_network` are two
+    // powers under one tool name, and a list of bare names cannot show which one
+    // the user still holds.
+    const allowances = new SessionAllowance()
+    allowances.remember('session-a', 'browser_network#mock', 'browser_network', 7)
+
+    expect(allowances.grantsFor('session-a')).toEqual([
+      { action: 'browser_network', key: 'browser_network#mock', grantedAt: 7 },
+    ])
+  })
+
+  it('records why a session lost its grants', () => {
+    const allowances = new SessionAllowance()
+    allowances.remember('session-a', 'browser_eval', 'browser_eval')
+    allowances.remember('session-a', 'browser_network#mock', 'browser_network')
+
+    expect(allowances.revoke('session-a', 'rebind')).toEqual({ reason: 'rebind', count: 2 })
+    expect(allowances.allows('session-a', 'browser_eval')).toBe(false)
+    expect(allowances.revocationFor('session-a')).toEqual({ reason: 'rebind', count: 2 })
+  })
+
+  it('records nothing when a binding change drops nothing', () => {
+    // An explanation with no loss would be noise: the panel would announce a
+    // revocation the user never saw a grant for.
+    const allowances = new SessionAllowance()
+
+    expect(allowances.revoke('session-a', 'closed')).toBeUndefined()
+    expect(allowances.revocationFor('session-a')).toBeUndefined()
+    expect(allowances.revocationFor(undefined)).toBeUndefined()
+  })
+
+  it('keeps the revocation of one session out of another', () => {
+    const allowances = new SessionAllowance()
+    allowances.remember('session-a', 'browser_eval', 'browser_eval')
+    allowances.remember('session-b', 'browser_eval', 'browser_eval')
+
+    allowances.revoke('session-a', 'unbound')
+
+    expect(allowances.revocationFor('session-a')?.reason).toBe('unbound')
+    expect(allowances.revocationFor('session-b')).toBeUndefined()
+    expect(allowances.allows('session-b', 'browser_eval')).toBe(true)
+  })
+
+  it('drops the explanation once the session is granted something again', () => {
+    // The new grant answers "why was I asked again"; a stale reason beside a
+    // live grant would contradict the list right above it.
+    const allowances = new SessionAllowance()
+    allowances.remember('session-a', 'browser_eval', 'browser_eval')
+    allowances.revoke('session-a', 'rebind')
+
+    allowances.remember('session-a', 'browser_eval', 'browser_eval', 9)
+
+    expect(allowances.revocationFor('session-a')).toBeUndefined()
+    expect(allowances.grantsFor('session-a')).toHaveLength(1)
+  })
+
+  it('drops revocations with the grants when a session is cleared outright', () => {
+    const allowances = new SessionAllowance()
+    allowances.remember('session-a', 'browser_eval', 'browser_eval')
+    allowances.revoke('session-a', 'closed')
+
+    expect(allowances.clear('session-a')).toBe(false)
+    expect(allowances.revocationFor('session-a')).toBeUndefined()
+
+    allowances.remember('session-a', 'browser_eval', 'browser_eval')
+    allowances.revoke('session-a', 'closed')
+    allowances.remember('session-b', 'browser_eval', 'browser_eval')
+    allowances.clearAll()
+
+    expect(allowances.revocationFor('session-a')).toBeUndefined()
+    expect(allowances.allows('session-b', 'browser_eval')).toBe(false)
+  })
 })
 
 describe('allowsSessionScope', () => {

@@ -12,6 +12,7 @@ import type { BridgeCaps } from '@yuxianglin/dsh-bridge-browser/src/protocol.ts'
 import type { BridgeNotice, BridgeState } from '../background/bridge.ts'
 import type { TabAffinityState } from '../background/tab-affinity.ts'
 import type { ApprovalDecision, ApprovalRequest } from '../security/approval.ts'
+import type { SessionGrant, SessionGrantRevocation } from '../security/session-allowance.ts'
 import type { Settings } from './settings.ts'
 
 /** One recent browser operation shown read-only in the assistant. */
@@ -48,6 +49,15 @@ export interface UiState {
   controlled: ControlledTabInfo | null
   pendingApprovals: ApprovalRequest[]
   recentOps: RecentOp[]
+  /** "Allow in this session" grants the controlled session holds right now. */
+  sessionGrants: SessionGrant[]
+  /**
+   * Why the grants before those went away, or null.
+   *
+   * Carried in the snapshot as well as in the push, so a panel opened (or
+   * reopened) after the fact can still explain why the next call asks again.
+   */
+  grantRevocation: SessionGrantRevocation | null
 }
 
 /** One-way messages a UI page may send to the background. */
@@ -71,6 +81,47 @@ export type UiPush =
   | { type: 'push.op'; op: RecentOp }
   | { type: 'push.ops'; ops: RecentOp[] }
   | { type: 'push.ops-cleared' }
+  /**
+   * The session's grants changed: one was given, or all of them were dropped.
+   *
+   * `sessionId` is what lets a panel watching one session ignore the others —
+   * grants are per session, and a push for a session nobody is looking at must
+   * not replace the list on screen.
+   */
+  | {
+      type: 'push.session-grants'
+      sessionId: string
+      grants: SessionGrant[]
+      revocation?: SessionGrantRevocation
+    }
+
+/** The grant-bearing fields of one `push.session-grants` frame. */
+export type SessionGrantsPush = Extract<UiPush, { type: 'push.session-grants' }>
+
+/**
+ * Build one `push.session-grants` frame.
+ *
+ * The shape lives beside the type and the two ends that read it, so a field
+ * renamed on one side fails a test here instead of quietly emptying the panel's
+ * list of grants.
+ *
+ * @param sessionId - the session whose grants changed.
+ * @param grants - what that session holds now.
+ * @param revocation - what went away and why, omitted when a grant was added.
+ * @returns the frame to broadcast.
+ */
+export function sessionGrantsPush(
+  sessionId: string,
+  grants: SessionGrant[],
+  revocation?: SessionGrantRevocation,
+): SessionGrantsPush {
+  return {
+    type: 'push.session-grants',
+    sessionId,
+    grants,
+    ...revocation === undefined ? {} : { revocation },
+  }
+}
 
 /** How long a UI request waits for the background before giving up. */
 const UI_REQUEST_TIMEOUT_MS = 5_000

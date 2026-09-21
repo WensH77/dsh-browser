@@ -161,6 +161,65 @@ describe('response overrides', () => {
     expect(harness.sendCommand).toHaveBeenCalledWith({ tabId: 1 }, 'Fetch.disable')
   })
 
+  it('fulfils a mocked body without a Node global', async () => {
+    // The service worker is a browser worker, so `Buffer` does not exist there.
+    // The body encoder used it anyway; the throw landed in a bare catch and every
+    // mocked response stayed paused forever instead of being answered.
+    vi.stubGlobal('Buffer', undefined)
+    await harness.devtools.installMock(1, { pattern: '/api/user', status: 201, body: 'plain' })
+
+    harness.emit(1, 'Fetch.requestPaused', { requestId: 'p1', request: { url: 'https://app.example/api/user/7' } })
+
+    await vi.waitFor(() => {
+      expect(harness.sendCommand).toHaveBeenCalledWith({ tabId: 1 }, 'Fetch.fulfillRequest', {
+        requestId: 'p1',
+        responseCode: 201,
+        responseHeaders: [{ name: 'content-type', value: 'text/plain; charset=utf-8' }],
+        body: 'cGxhaW4=',
+      })
+    })
+  })
+
+  it('keeps every installed rule in the pattern set Fetch.enable replaces', async () => {
+    await harness.devtools.installMock(1, { pattern: '/api/one', body: 'one' })
+    await harness.devtools.installMock(1, { pattern: '/api/two', body: 'two' })
+
+    const enables = harness.sendCommand.mock.calls.filter((call) => call[1] === 'Fetch.enable')
+    // Sending only the newest pattern silently disabled the earlier rule while
+    // the tool still reported "2 rule(s)".
+    expect(enables.at(-1)?.[2]).toEqual({
+      patterns: [
+        { urlPattern: '*/api/one*', requestStage: 'Request' },
+        { urlPattern: '*/api/two*', requestStage: 'Request' },
+      ],
+    })
+
+    harness.emit(1, 'Fetch.requestPaused', { requestId: 'p1', request: { url: 'https://app.example/api/one' } })
+    harness.emit(1, 'Fetch.requestPaused', { requestId: 'p2', request: { url: 'https://app.example/api/two' } })
+
+    await vi.waitFor(() => {
+      expect(harness.sendCommand).toHaveBeenCalledWith({ tabId: 1 }, 'Fetch.fulfillRequest', expect.objectContaining({ requestId: 'p1', body: 'b25l' }))
+      expect(harness.sendCommand).toHaveBeenCalledWith({ tabId: 1 }, 'Fetch.fulfillRequest', expect.objectContaining({ requestId: 'p2', body: 'dHdv' }))
+    })
+  })
+
+  it('releases the request when a fulfil fails, instead of leaving it paused', async () => {
+    harness.sendCommand.mockImplementation(async (_target: unknown, method: string) => {
+      if (method === 'Fetch.fulfillRequest') throw new Error('Fulfil failed')
+      return {}
+    })
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    await harness.devtools.installMock(1, { pattern: '/api/user', body: 'x' })
+
+    harness.emit(1, 'Fetch.requestPaused', { requestId: 'p9', request: { url: 'https://app.example/api/user/7' } })
+
+    await vi.waitFor(() => {
+      expect(harness.sendCommand).toHaveBeenCalledWith({ tabId: 1 }, 'Fetch.continueRequest', { requestId: 'p9' })
+    })
+    // The reason has to survive the failure: a silent catch is what hid the bug.
+    expect(warn).toHaveBeenCalled()
+  })
+
   it('fails a matching request and releases the rest untouched', async () => {
     await harness.devtools.installMock(1, { pattern: 'blocked.example', fail: true })
 

@@ -110,6 +110,29 @@ function mockDebuggerApi(overrides: { attachError?: Error; targets?: unknown[] }
   return { attach, detach, sendCommand, getTargets, onEvent, onDetach }
 }
 
+/**
+ * Stand in for the raster decoder the capture path now runs.
+ *
+ * Every screenshot is decoded before it is reported, so the metadata describes
+ * the raster that came back rather than the clip Chrome was asked for. These
+ * tests assert that metadata, so they need a bitmap to decode to.
+ */
+function stubScreenshotRaster(width = 800, height = 600): void {
+  vi.stubGlobal('createImageBitmap', vi.fn(async () => ({ width, height, close: vi.fn() })))
+  vi.stubGlobal('OffscreenCanvas', class {
+    constructor(readonly width: number, readonly height: number) {}
+    getContext(): unknown { return { drawImage: vi.fn() } }
+    convertToBlob(options?: { type?: string }): Promise<Blob> {
+      const bytes = new Uint8Array(64)
+      return Promise.resolve({
+        size: bytes.length,
+        type: options?.type ?? 'image/png',
+        arrayBuffer: async () => bytes,
+      } as unknown as Blob)
+    }
+  })
+}
+
 describe('dispatchToolCall', () => {
   it('uses an already-loaded content script without injecting', async () => {
     const chromeMock = mockChrome({ tab: { id: 7, url: 'https://example.com' } })
@@ -659,6 +682,7 @@ describe('dispatchToolCall', () => {
 
   it('captures a screenshot for browser_capture without touching the content script', async () => {
     const debuggerApi = mockDebuggerApi()
+    stubScreenshotRaster()
     const chromeMock = mockChrome({ tab: { id: 41, url: 'https://app.example/visual' }, debugger: debuggerApi })
 
     const answer = await dispatchToolCall({ id: 'shot', name: 'browser_capture', args: {} }, 'auto')
@@ -677,6 +701,7 @@ describe('dispatchToolCall', () => {
 
   it('pairs a snapshot with a same-moment screenshot when the host asks for vision', async () => {
     const debuggerApi = mockDebuggerApi()
+    stubScreenshotRaster()
     const chromeMock = mockChrome({ tab: { id: 42, url: 'https://app.example/' }, debugger: debuggerApi })
 
     const answer = await dispatchToolCall(
@@ -739,6 +764,7 @@ describe('dispatchToolCall', () => {
     // target — the console/network priming hold, in practice. The capture must
     // reuse it rather than claim DevTools is open.
     const debuggerApi = mockDebuggerApi({ attachError: new Error('Another debugger is already attached to the tab with id: 45') })
+    stubScreenshotRaster()
     mockChrome({ tab: { id: 45, url: 'https://app.example/' }, debugger: debuggerApi })
 
     const answer = await dispatchToolCall({ id: 'shot-reuse', name: 'browser_capture', args: {} }, 'auto')

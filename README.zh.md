@@ -50,13 +50,14 @@ Playwright / 扩展的配对耗时比为 **1.24**（95% CI **1.16–1.34**）：
 | 能力 | 工具 | 说明 |
 |---|---|---|
 | 读取页面 | `browser_snapshot` | 结构化文本快照：标题/URL/正文/编号交互清单/表单字段（敏感值掩码）；`delta: true` 只返回变化；默认附带同刻截图，`visual: false` 可关 |
-| 截取页面 | `browser_capture` | 返回视口截图（`fullPage: true` 为整页），仅内存、不落盘 |
+| 截取页面 | `browser_capture` | 返回视口截图（`fullPage: true` 为整页），仅内存、不落盘。优先用视口——长页面的整页截图会被压到模型图像预算内，文字不可读 |
 | 读控制台与网络 | `browser_console` / `browser_network` | 控制台消息与未捕获错误（带 cursor 增量）；请求列表含状态与耗时、按 id 取响应体、内存内响应替换 |
 | 回应用户弹窗 | `browser_dialog` | 确认或取消 `alert` / `confirm` / `prompt`；这类弹窗会冻住页面，回应之前其它工具都会卡住 |
 | 执行页面 JS | `browser_eval` | 在页面自身上下文求值，不受页面 CSP 限制；每次单独审批 |
 | 阻断/改写请求 | `browser_block` / `browser_headers` | 阻断匹配请求，或改写请求/响应头；仅作用于受控标签页、仅当前浏览器会话 |
 | 点击元素 | `browser_click` | 按编号点击链接/按钮/复选框等 |
 | 点击绑定在按压上的控件 | `browser_click_pointer` | 在元素矩形中心派发 `pointerdown`、`mousedown`、`pointerup`、`mouseup`、`click`；用于 Google Slides 这类画布/SVG 编辑器——`browser_click` 回报成功但页面没反应时改用它 |
+| 跳到 Slides 某一页 | `browser_slides_open_page` | 按 1 起的页码打开演示文稿的某一页：走编辑器的网格视图，用 URL hash 核对落点，点击无效时按 hash 载入。比自己去点胶片栏缩略图可靠——胶片栏的按压是按坐标判定的 |
 | 填写表单 | `browser_type` | 输入文本（React/Vue 受控组件兼容），`replace` 清空重填 |
 | 按键 | `browser_press` | 键盘事件（Enter/Tab/Escape/方向键…） |
 | 滚动 | `browser_scroll` | 视口滚动（up/down/top/bottom） |
