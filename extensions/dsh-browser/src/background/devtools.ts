@@ -476,7 +476,14 @@ export async function installMock(tabId: number, rule: MockRule): Promise<number
   await withTabLock(tabId, async () => {
     await holdSession(tabId, {})
     const session = sessionFor(tabId)
-    session.mocks.push(rule)
+    // Mocking one pattern again replaces its response. Two rules for the same
+    // pattern are answered by the first one installed (`answerPausedRequest`),
+    // so appending the newer rule reported success while the page kept receiving
+    // the older body — measured when a mock was retried with corrected CORS
+    // headers and the response never changed.
+    const installed = session.mocks.findIndex((candidate) => candidate.pattern === rule.pattern)
+    if (installed === -1) session.mocks.push(rule)
+    else session.mocks[installed] = rule
     // `Fetch.enable` replaces the pattern set rather than adding to it, so every
     // installed rule has to travel in this one call: sending only the newest
     // pattern silently disabled the earlier ones while the tool still counted

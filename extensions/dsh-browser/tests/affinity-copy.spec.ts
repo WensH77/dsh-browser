@@ -31,4 +31,17 @@ describe('affinityFailureAnswer', () => {
     expect(answer.error?.message).toContain('browser_navigate')
     expect(answer.error?.message).toContain('browser_bind_interactive')
   })
+
+  it('names the session that holds the browser instead of offering a bind', () => {
+    const answer = affinityFailureAnswer('taken', { sessionId: 'session-2f31', url: 'https://app.example/orders' })
+
+    expect(answer).toMatchObject({ ok: false, error: { code: 'action-failed' } })
+    expect(answer.error?.message).toContain('session-2f31')
+    expect(answer.error?.message).toContain('https://app.example/orders')
+    // The session cannot free the browser itself, so the only next move is the
+    // user's: a bind retry would just fail again.
+    expect(answer.error?.message).toContain('Unbind')
+    expect(answer.error?.message).toContain('Do not retry')
+    expect(answer.error?.message).not.toContain('browser_bind_interactive')
+  })
 })

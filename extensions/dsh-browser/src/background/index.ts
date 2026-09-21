@@ -621,6 +621,12 @@ async function restoreTabAffinity(): Promise<void> {
     tabAffinity.restoreSessionTabs(restoredSessions)
   }
   tabAffinity.restoreFocusedSession(record?.focusedSessionId ?? null)
+  // Bindings are exclusive, but a record written before that was enforced can
+  // name several sessions. Keep the one the panel was showing and release the
+  // rest, so a worker restart cannot leave two sessions on the browser.
+  for (const dropped of tabAffinity.dropCompetingBindings(tabAffinity.focusedSession())) {
+    forgetSession(dropped, 'rebind')
+  }
 
   if (record !== null && 'controlledTabId' in record) {
     try {
@@ -647,30 +653,42 @@ const affinityReady = restoreTabAffinity()
  * `tool.call` for an unbound session takes the page the user is currently
  * viewing (bindInitial semantics), so a chat-less agent can still operate a
  * real tab.
+ *
+ * @returns undefined once the session owns a tab, else the answer that settles
+ * the call — "another session holds the browser" when that is why.
  */
-async function ensureInitialTabBinding(sessionId?: string): Promise<boolean> {
+async function ensureInitialTabBinding(sessionId?: string): Promise<ToolAnswer | undefined> {
   await affinityReady
   const alreadyBound = sessionId === undefined
     ? tabAffinity.resolveTarget().kind !== 'initial'
     : tabAffinity.hasBinding(sessionId)
-  if (alreadyBound) return true
+  if (alreadyBound) return undefined
+  // One controlled tab, one session: a second session cannot take the page by
+  // calling a tool. Nothing is bound and nothing runs until the user frees it.
+  const holder = sessionId === undefined ? undefined : tabAffinity.competingBinding(sessionId)
+  if (holder !== undefined) return takenBindingAnswer(holder)
   try {
     const tab = await syncActiveTab()
     const summary = tab === undefined ? null : summarizeTab(tab)
-    if (summary === null) return false
+    if (summary === null) return affinityFailureAnswer('missing')
     // Never hand the dsh web page itself to a session: the user chats there.
     // For a URL-less first call the user should switch to the target page (or
     // let browser_navigate open a fresh, separately approved tab).
-    if (isDshPageUrl(summary.url)) return false
+    if (isDshPageUrl(summary.url)) return affinityFailureAnswer('missing')
     if (tabAffinity.bindInitial(summary, sessionId)) {
       keepTabAlive(summary.tabId)
       persistTabAffinity()
       broadcastTabAffinity()
     }
-    return true
+    return undefined
   } catch {
-    return false
+    return affinityFailureAnswer('missing')
   }
+}
+
+/** The answer for a call that wants a browser another session already owns. */
+function takenBindingAnswer(holder: { sessionId: string; tab: AffinityTab }): ToolAnswer {
+  return affinityFailureAnswer('taken', { sessionId: holder.sessionId, url: holder.tab.url })
 }
 
 
@@ -686,13 +704,15 @@ async function resolveToolTab(sessionId?: string): Promise<Pick<chrome.tabs.Tab,
       // bind on). A previously bound tab that was closed re-binds on the
       // next call; failing that, report the tab as unavailable.
       if (sessionId !== undefined && sessionId.trim() !== '') {
-        if (!await ensureInitialTabBinding(sessionId)) return affinityFailureAnswer('missing')
+        const bindingFailure = await ensureInitialTabBinding(sessionId)
+        if (bindingFailure !== undefined) return bindingFailure
         continue
       }
       return affinityFailureAnswer('lost')
     }
     if (resolution.kind === 'initial') {
-      if (!await ensureInitialTabBinding(sessionId)) return affinityFailureAnswer('missing')
+      const bindingFailure = await ensureInitialTabBinding(sessionId)
+      if (bindingFailure !== undefined) return bindingFailure
       continue
     }
     try {
@@ -768,15 +788,31 @@ async function authorizeToolCall(
 /**
  * Whether this call is already covered by a grant the user gave this session.
  *
- * Checked before the prompt is even built, so a granted action neither shows a
- * card nor rings a notification for the rest of the session.
+ * Every consent gate reads this before it raises anything, so a granted action
+ * neither shows a card nor rings a notification for the rest of the session.
+ * The gate that forgets it is a gate that keeps asking after the user already
+ * answered — which is what this predicate exists to prevent, so treat it as the
+ * first line of every new gate rather than an optimization.
  */
 function coveredBySessionGrant(call: ToolCall): boolean {
   return sessionAllowances.allows(call.sessionId, scopeKeyForCall(call.name, call.args ?? {}))
 }
 
-/** One place for the panel sequencing: waiting → running as consent settles. */
+/**
+ * Consent for one page-tool call: waiting → running as consent settles.
+ *
+ * A grant this session already holds ends the question before the card is
+ * shown, which is the whole point of "Allow in this session": the user answered
+ * once, for this session and this action, and is not asked again. The grant
+ * short-circuits the *prompt* only — `dispatchToolCall` still re-reads the
+ * frames and re-checks the page boundary after this returns, so a granted call
+ * is no less fail-closed than a prompted one.
+ */
 async function authorizeCall(call: ToolCall, prompt: ApprovalPrompt, windowId: number, signal: AbortSignal): Promise<ApprovalAuthorization> {
+  if (coveredBySessionGrant(call)) {
+    settleOp(call.id, 'running')
+    return 'approved'
+  }
   settleOp(call.id, 'waiting')
   const authorization = await authorizeToolCall(call, prompt, signal, windowId, call.sessionId)
   if (authorization === 'approved') settleOp(call.id, 'running')
@@ -831,6 +867,11 @@ async function authorizeUnboundNavigate(
   if (destination === undefined) return undefined
   const sessionId = call.sessionId
   if (sessionId === undefined || sessionId.trim() === '') return undefined
+  // A fresh tab is still a binding, so a navigate cannot take the browser away
+  // from the session that owns it. Checked before the destination prompt: there
+  // is no point approving a URL this call is not allowed to open.
+  const holder = tabAffinity.competingBinding(sessionId)
+  if (holder !== undefined) return takenBindingAnswer(holder)
   const policyFailure = destinationPolicyFailure(destination.href)
   if (policyFailure !== undefined) return policyFailure
   // No session-grant check here on purpose: `browser_navigate` cannot hold one
@@ -1270,6 +1311,11 @@ async function handleVirtualTool(call: ToolCall, signal: AbortSignal): Promise<T
     if (sessionId === undefined || sessionId.trim() === '') {
       return { ok: false, error: { code: 'action-failed', message: 'No session is attached to this call' } }
     }
+    // Binding is how a session takes the browser, so it is the one call that
+    // has to lose when another session already owns the controlled tab. Failing
+    // here — rather than rebinding — is what keeps it to one session at a time.
+    const holder = tabAffinity.competingBinding(sessionId)
+    if (holder !== undefined) return takenBindingAnswer(holder)
     const rawId = (call.args as { tabId?: unknown }).tabId
     if (typeof rawId !== 'number' || !Number.isInteger(rawId) || rawId < 0) {
       return { ok: false, error: { code: 'bad-args', message: 'tabId must be a tab ID from browser_list_tabs' } }
