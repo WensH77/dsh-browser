@@ -92,6 +92,27 @@ export class TabAffinityController {
     return this.sessionTabs.get(sessionId)
   }
 
+  /**
+   * The binding held by a session other than this one, when there is one.
+   *
+   * One controlled tab belongs to one session: a caller that gets an answer here
+   * must not bind, because binding anyway would leave two sessions driving the
+   * same browser — the second one's calls would land on a tab the first session
+   * is in the middle of using. Handing the browser over is the user's decision,
+   * and the panel's Unbind is where they make it.
+   *
+   * @param sessionId - the session asking to bind.
+   * @returns the current holder, or undefined when the browser is free.
+   */
+  competingBinding(sessionId: string): { sessionId: string; tab: AffinityTab } | undefined {
+    const sid = sessionId.trim()
+    if (sid === '') return undefined
+    for (const [heldBy, tab] of this.sessionTabs.entries()) {
+      if (heldBy !== sid) return { sessionId: heldBy, tab: { ...tab } }
+    }
+    return undefined
+  }
+
   /** Whether a session already owns a controlled tab binding. */
   hasBinding(sessionId: string): boolean {
     return sessionId.trim() !== '' && this.sessionTabs.has(sessionId)
@@ -107,7 +128,49 @@ export class TabAffinityController {
   }
 
   focusedSession(): string | null {
+    // Focus is what the panel reads to answer "what is being operated": the tab
+    // it names, that session's operations, and that session's grants. A focus
+    // that names no bound session therefore reads as "nothing is being operated"
+    // while another session is still driving its own page — the panel loses the
+    // operation feed and the grant list for work that is happening. Re-derive it
+    // from a session that still holds a tab, and only report none when there is
+    // genuinely nothing bound.
+    if (this.focusedSessionId === null || !this.sessionTabs.has(this.focusedSessionId)) {
+      this.focusedSessionId = this.firstBoundSession()
+    }
     return this.focusedSessionId
+  }
+
+  /** A session that still holds a tab, oldest binding first. */
+  private firstBoundSession(): string | null {
+    for (const sessionId of this.sessionTabs.keys()) return sessionId
+    return null
+  }
+
+  /**
+   * Drop every binding but one, so a restored record cannot keep two sessions on
+   * the browser.
+   *
+   * Bindings are exclusive, but a record written before that was enforced can
+   * name several sessions. The one the panel was showing keeps the browser —
+   * dropping it instead would move what the user is looking at for no reason.
+   *
+   * @param keep - session to keep; when it holds no binding, the oldest one is kept.
+   * @returns the sessions that lost their binding, for grant revocation.
+   */
+  dropCompetingBindings(keep?: string | null): string[] {
+    const wanted = keep ?? null
+    const keeper = wanted !== null && this.sessionTabs.has(wanted) ? wanted : this.firstBoundSession()
+    if (keeper === null) return []
+    const dropped: string[] = []
+    for (const sessionId of [...this.sessionTabs.keys()]) {
+      if (sessionId === keeper) continue
+      this.sessionTabs.delete(sessionId)
+      dropped.push(sessionId)
+      if (this.focusedSessionId === sessionId) this.focusedSessionId = keeper
+    }
+    if (dropped.length > 0) this.revision += 1
+    return dropped
   }
 
   /** Observe the active tab after a user tab/window focus change. */
@@ -144,7 +207,12 @@ export class TabAffinityController {
     if (sid !== undefined && sid !== '') {
       if (this.sessionTabs.has(sid)) return false
       this.sessionTabs.set(sid, { ...tab })
-      if (this.focusedSessionId === null) this.focusedSessionId = sid
+      // The first session to bind owns the panel until another one binds
+      // explicitly — but a focus left over from a session whose tab is gone is
+      // not an owner, and keeping it would leave the panel on an empty view.
+      if (this.focusedSessionId === null || !this.sessionTabs.has(this.focusedSessionId)) {
+        this.focusedSessionId = sid
+      }
       if (this.focusedSessionId === sid) {
         this.active = { ...tab }
         this.controlled = { ...tab }

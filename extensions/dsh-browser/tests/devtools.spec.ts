@@ -180,6 +180,26 @@ describe('response overrides', () => {
     })
   })
 
+  it('replaces the response when the same pattern is mocked again', async () => {
+    // Rules are matched first-installed-first, so a second mock for one pattern
+    // has to take the first one's place: appending it left the page on the old
+    // body while the tool reported the new override as active.
+    await harness.devtools.installMock(1, { pattern: '/api/user', body: 'stale' })
+    const count = await harness.devtools.installMock(1, { pattern: '/api/user', body: 'fresh' })
+
+    expect(count).toBe(1)
+    harness.emit(1, 'Fetch.requestPaused', { requestId: 'p1', request: { url: 'https://app.example/api/user' } })
+
+    await vi.waitFor(() => {
+      expect(harness.sendCommand).toHaveBeenCalledWith({ tabId: 1 }, 'Fetch.fulfillRequest', expect.objectContaining({ requestId: 'p1', body: 'ZnJlc2g=' }))
+    })
+    expect(harness.sendCommand).not.toHaveBeenCalledWith(
+      { tabId: 1 },
+      'Fetch.fulfillRequest',
+      expect.objectContaining({ body: 'c3RhbGU=' }),
+    )
+  })
+
   it('keeps every installed rule in the pattern set Fetch.enable replaces', async () => {
     await harness.devtools.installMock(1, { pattern: '/api/one', body: 'one' })
     await harness.devtools.installMock(1, { pattern: '/api/two', body: 'two' })

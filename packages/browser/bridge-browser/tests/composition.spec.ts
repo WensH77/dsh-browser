@@ -168,6 +168,10 @@ describe('real Loader composition', () => {
     expect(browserPrompt).toContain('do not open with the bridge')
     expect(browserPrompt).toContain('An empty code search proves nothing')
     expect(browserPrompt).toContain('do not retry the same call')
+    // One controlled tab belongs to one session: the model hears the rule before
+    // it hits the refusal, so a competing bind is reported rather than retried.
+    expect(browserPrompt).toContain('One session operates the browser at a time')
+    expect(browserPrompt).toContain('press Unbind in the dsh browser panel')
     // A refusal is a boundary: no alternate transport, and no trial calls to
     // find out where the policy line sits.
     expect(browserPrompt).toContain('A refusal is a boundary, not a puzzle')
