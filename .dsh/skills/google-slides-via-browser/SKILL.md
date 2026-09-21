@@ -29,6 +29,36 @@ Slides 的编辑器不是普通网页：控件是 SVG + 自绘，交互绑定在
 
 **必需的正是那两个 mouse 事件。** 这条结论用 URL hash 前后差复现过三次。
 
+**2026-09-21 上午的复测（修前）：五件套仍被 Slides 接受（3/3 都切了页），但落点不是你要的那张。** 真实文稿（142 页，Chrome 152）上打 DOM 第 9/11/13 张：三次 hash 都在 `pointerup` 时刻变化，说明合成事件有效、后台标签页不是原因；但落点常是邻页——要第 13 张落在第 11 页。
+
+**2026-09-21 修复后复测：2/2 落到目标页。** 原因找到了：`clickAction` 会先 `scrollIntoView({block:'center'})`，而在虚拟化列表里那个滚动还在走，旧代码在同一个 task 里就把矩形量了——量到的是**滚动中**的位置，Slides 按坐标判定落点，于是点到邻居。现在的 `activateElementAsPointer` 派发前会「等到矩形稳定（至少一帧、且两次测量一致）+ 命中测试确认这个点在目标上」，命中不了就重新瞄准（各 400ms 上限）。实测：点胶片栏 DOM 第 13 张（需要滚动）→ 第 13 页；点第 21 张（在视口外）→ 第 21 页。
+
+**这个"等一帧"不能用裸 `requestAnimationFrame`。** 隐藏/后台标签页根本不派发 rAF，等它会一直挂到工具超时（实测：90s 超时、五个事件一个都没发出去）。当前实现是「可见时 rAF 与 32ms 定时器取先到者，隐藏时只用定时器」。
+
+**别把 `nth-of-type(N)` 当"第 N 页"。** 胶片栏虚拟化，只渲染十几到二十几张；deck 页数也不会等于 DOM 里的缩略图数量（同一个 deck 我先后数到 14、20、23 张，实际 142 页）。要点**指定页码**仍然优先用下面的 `browser_slides_open_page` 或网格流程：胶片栏窗口里可能根本没有那张缩略图。
+
+### 切页首选：`browser_slides_open_page`（2026-09-21 起）
+
+要"到第 N 页"，先调这个工具，不要自己点缩略图：
+
+```
+browser_slides_open_page { "page": 30 }
+```
+
+它内部就是下面这套网格流程（进网格 → 把目标页滚进渲染窗口 → 按一次 → 退出网格 → 读 hash 核对），并且：点击没让页面动时，直接用 `location.hash` 载入该页（Slides 里这是同文档跳转，不用重载）；落点对但页码不对时按"进度"重试，不会当成失败。扩展低于 toolset level 5 时这个工具不会出现在目录里，那就退回手写流程。
+
+### 手写流程（没有该工具时）：网格视图 + `browser_click_pointer`
+
+在胶片栏里直接点是"能切页但切错页"（见上）；把幻灯片铺成网格后再点就准得多：
+
+1. `browser_click_pointer { "selector": "#grid-view-toggle" }` 进网格视图（`browser_click` 点它无效）。进网格后 URL hash 会变空，`#grid-view-toggle` 的 `aria-pressed="true"`。
+2. 网格里每张仍是 `.punch-filmstrip-thumbnail`，`aria-label`/文本以页码开头；DOM 里只有当前窗口的若干张（本次 32 张），**按页码找元素，不要按下标猜页**。
+3. 目标已在屏幕内：直接 `browser_click_pointer { "selector": "g.punch-filmstrip-thumbnail:nth-of-type(N)" }`，一次即中（本次点第 7 页，蓝色描边落在第 7 页）。
+4. 目标在屏幕外：先用 `browser_eval` 把它 `scrollIntoView({ block: 'center', behavior: 'instant' })`，**等页面稳一下**（本次等 1.2s）再点。省掉这一步会点到别的页（第 30 页 → 落在第 6 页）。
+5. 再 `browser_click_pointer` 点 `#grid-view-toggle` 退出，hash 变成所选页的 `#slide=id.<slideId>`，用它核对落点（本次第 30 页 ✓）。
+
+另一条稳但慢的路子：直接带 hash 导航（`…/edit#slide=id.<slideId>`），代价是整页重载。
+
 ## 三、首选手法：`browser_click_pointer`
 
 上面的五件套已经固化成一个独立工具，直接调它，不要手抄 JS：

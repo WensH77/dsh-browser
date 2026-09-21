@@ -1,9 +1,10 @@
 import { useEffect, useState, type ReactElement } from 'react'
 import { getUiLocale } from '../i18n.ts'
 import { opLabel, type OpCopy } from './op-label.ts'
-import { sendUiRequest, type UiState } from '../shared/messages.ts'
+import { sendUiRequest, type SessionGrantsPush, type UiState } from '../shared/messages.ts'
 import { noticeText } from '../shared/notice-copy.ts'
 import { decisionButtons } from './approval-buttons.ts'
+import { applySessionGrantsPush, grantsLine, revocationLine, type SessionGrantsView } from './session-grants.ts'
 
 const zh = {
   appName: 'dsh 浏览器助手',
@@ -22,6 +23,15 @@ const zh = {
   alwaysAllowReads: '始终允许读取',
   trustOrigin: '信任此网站',
   allowInSession: '本会话内允许',
+  sessionGrants: '本会话已授予：',
+  sessionGrantsNone: '无',
+  grantSeparator: '、',
+  revokedRebind: '受控标签页已更换，本会话授权已失效——再调用会重新询问',
+  revokedClosed: '受控标签页已关闭，本会话授权已失效——再调用会重新询问',
+  revokedReplaced: '受控标签页被替换，本会话授权已失效——再调用会重新询问',
+  revokedUnbound: '本会话已解除关联，授权已失效——再调用会重新询问',
+  revokedCountBefore: '（',
+  revokedCountAfter: ' 项授权）',
   read: '读取',
   action: '操作',
   operations: '最近操作',
@@ -72,6 +82,17 @@ const en = {
   alwaysAllowReads: 'Always allow reads',
   trustOrigin: 'Trust this site',
   allowInSession: 'Allow in this session',
+  sessionGrants: 'Session grants: ',
+  sessionGrantsNone: 'none',
+  grantSeparator: ', ',
+  revokedRebind: 'The controlled tab changed, so this session\'s grants were dropped — the next call asks again',
+  revokedClosed: 'The controlled tab closed, so this session\'s grants were dropped — the next call asks again',
+  revokedReplaced: 'The controlled tab was replaced, so this session\'s grants were dropped — the next call asks again',
+  revokedUnbound: 'The session was unbound, so its grants were dropped — the next call asks again',
+  revokedCountBefore: ' (',
+  // `(s)` follows the message `browser_network` already uses for "1 rule(s)": a count of
+  // one is common here, and “(1 grants)” would read as a bug.
+  revokedCountAfter: ' grant(s))',
   read: 'Read',
   action: 'Action',
   operations: 'Operations',
@@ -198,6 +219,16 @@ export function App(): ReactElement {
         // Affinity changes (bind/unbind/focus) also affect controlled and the
         // ops list; reload the full ui.state so the UI follows immediately.
         refresh()
+      } else if (type === 'push.session-grants') {
+        const push = message as SessionGrantsPush
+        setUi((prev) => {
+          if (prev === null) return prev
+          const view = applySessionGrantsPush(push, prev.controlled?.sessionId, {
+            grants: prev.sessionGrants,
+            grantRevocation: prev.grantRevocation,
+          })
+          return { ...prev, sessionGrants: view.grants, grantRevocation: view.grantRevocation }
+        })
       }
     }
     chrome.runtime.onMessage.addListener(onMessage)
@@ -213,6 +244,11 @@ export function App(): ReactElement {
   const operating = connected && controlled !== null
   const pending = ui?.pendingApprovals ?? []
   const ops = ui?.recentOps ?? []
+  const grantsView: SessionGrantsView = {
+    grants: ui?.sessionGrants ?? [],
+    grantRevocation: ui?.grantRevocation ?? null,
+  }
+  const showsGrants = grantsView.grants.length > 0 || grantsView.grantRevocation !== null
 
   return (
     <div className="panel">
@@ -261,6 +297,18 @@ export function App(): ReactElement {
                 </div>
               </article>
             ))}
+          </section>
+        )}
+
+        {showsGrants && (
+          <section className="grants">
+            {/* Keys, not tool names: `browser_network#mock` and `browser_network`
+                are separate grants, and listing both as `browser_network` would
+                hide which of them a later call is still allowed to make. */}
+            <p className="grants__line">{grantsLine(grantsView, copy)}</p>
+            {grantsView.grantRevocation !== null && (
+              <p className="grants__revoked" role="status">{revocationLine(grantsView.grantRevocation, copy)}</p>
+            )}
           </section>
         )}
 

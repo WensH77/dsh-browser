@@ -164,14 +164,15 @@ export const LEGACY_PROTO = 1
  * {@link TOOLSET_SELECTOR_TARGETS} adds those and CSS `selector` targets;
  * {@link TOOLSET_TEXT_FIND} adds text search to `browser_get_text`;
  * {@link TOOLSET_PAGE_IMAGE} adds `browser_image` (a page picture by
- * reference); {@link TOOLSET_POINTER_CLICK} adds `browser_click_pointer`.
+ * reference); {@link TOOLSET_POINTER_CLICK} adds `browser_click_pointer`;
+ * {@link TOOLSET_SLIDES_OPEN_PAGE} adds `browser_slides_open_page`.
  *
  * A tool whose action the old build has no wire case for must be gated at the
  * level that ships it: exposing it to an older extension trades a smaller tool
  * surface, which the model can see, for an "Unknown action" failure, which it
  * cannot anticipate.
  */
-export const BRIDGE_TOOLSET = 4
+export const BRIDGE_TOOLSET = 5
 
 /** Level that first resolves CSS `selector` targets and ships the DOM/rule tools. */
 export const TOOLSET_SELECTOR_TARGETS = 1
@@ -184,6 +185,9 @@ export const TOOLSET_PAGE_IMAGE = 3
 
 /** Level that first ships `browser_click_pointer`, the full press sequence. */
 export const TOOLSET_POINTER_CLICK = 4
+
+/** Level that first ships `browser_slides_open_page`, a deck jump by page. */
+export const TOOLSET_SLIDES_OPEN_PAGE = 5
 
 /** Feature level assumed when `caps.toolset` is absent. */
 export const LEGACY_TOOLSET = 0
@@ -286,6 +290,12 @@ export interface CapturedImage {
   height: number
   /** Encoded byte length. */
   bytes: number
+  /**
+   * How this raster was produced when it differs from what was asked for, for
+   * example a full-page request answered with the viewport because the page
+   * would have arrived unreadably small.
+   */
+  note?: string
 }
 
 /** Storage bounds the host applies to one attached image; the extension downscales to fit. */
@@ -307,6 +317,13 @@ export interface CaptureRequest {
   /** JPEG quality (1-100). */
   quality?: number
   limits?: CaptureLimits
+  /**
+   * What the deployment hands the model after normalization. The capture uses
+   * it to judge whether a full-page raster would still be legible: a page that
+   * comes back at a fraction of its CSS size is delivered as the viewport
+   * instead, because its text could not be read anyway.
+   */
+  deliver?: CaptureLimits
 }
 
 /** Frames sent by the extension to the bridge plugin. */

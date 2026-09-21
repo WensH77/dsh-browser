@@ -140,6 +140,94 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => { setTimeout(resolve, ms) })
 }
 
+/** How long to let a scrolled target stop moving before pressing it. */
+const POINTER_SETTLE_MS = 400
+
+/** How long to keep re-aiming a press at a target the page is still shifting. */
+const POINTER_AIM_MS = 400
+
+/** Longest a frame wait may block when no frame is coming. */
+const FRAME_FALLBACK_MS = 32
+
+/**
+ * Yield one rendering frame, without depending on one arriving.
+ *
+ * A hidden tab gets no `requestAnimationFrame` callback at all, so waiting on
+ * one alone hangs a press in a background tab until the tool call times out
+ * (measured: the events were never dispatched and the call died at 90s). The
+ * timer is the floor that keeps the loop moving, and it is the only wait while
+ * the tab is hidden — there is nothing to animate there anyway.
+ */
+function nextFrame(): Promise<void> {
+  return new Promise((resolve) => {
+    let settled = false
+    const finish = (): void => {
+      if (settled) return
+      settled = true
+      resolve()
+    }
+    if (typeof requestAnimationFrame === 'function' && document.visibilityState === 'visible') {
+      requestAnimationFrame(() => { finish() })
+    }
+    setTimeout(finish, FRAME_FALLBACK_MS)
+  })
+}
+
+function sameRect(a: DOMRect, b: DOMRect): boolean {
+  return Math.abs(a.left - b.left) < 0.5
+    && Math.abs(a.top - b.top) < 0.5
+    && Math.abs(a.width - b.width) < 0.5
+    && Math.abs(a.height - b.height) < 0.5
+}
+
+/**
+ * Wait until the element's own rect stops moving.
+ *
+ * At least one frame always passes: `clickAction` scrolls the target into view
+ * right before activating it, and on a lazily rendered or virtualized list
+ * (Google Slides' filmstrip and grid view) that scroll is still animating when
+ * the same task would otherwise measure it.
+ */
+async function settledRect(el: Element, timeoutMs: number): Promise<DOMRect> {
+  const deadline = performance.now() + timeoutMs
+  let previous = el.getBoundingClientRect()
+  for (;;) {
+    await nextFrame()
+    const current = el.getBoundingClientRect()
+    if (sameRect(previous, current)) return current
+    previous = current
+    if (performance.now() >= deadline) return current
+  }
+}
+
+/**
+ * Pick the point to press, preferring one that hit-tests back to the target.
+ *
+ * A page that resolves a press by its coordinates ignores events whose point
+ * landed on a neighbour, so keep re-aiming while the list is still shifting;
+ * the last measured centre is the fallback when the point never verifies (a
+ * document without hit testing, or a target under an overlay).
+ */
+async function pointerPressPoint(el: Element): Promise<{ x: number; y: number }> {
+  const deadline = performance.now() + POINTER_AIM_MS
+  const canHitTest = typeof document.elementFromPoint === 'function'
+  let point = { x: 0, y: 0 }
+  for (;;) {
+    const budget = Math.min(POINTER_SETTLE_MS, Math.max(0, deadline - performance.now()))
+    const rect = await settledRect(el, budget)
+    point = { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 }
+    if (!canHitTest) return point
+    let hit: Element | null = null
+    try {
+      hit = document.elementFromPoint(point.x, point.y)
+    } catch {
+      hit = null
+    }
+    if (hit !== null && (hit === el || el.contains(hit))) return point
+    if (performance.now() >= deadline) return point
+  }
+}
+
 /**
  * Resolve the element a click/type call targets.
  *
@@ -238,6 +326,8 @@ export async function runAction(action: string, args: Record<string, unknown>, c
       return clickAction(args, ctx)
     case 'browser_click_pointer':
       return clickAction(args, ctx, activateElementAsPointer)
+    case 'browser_slides_open_page':
+      return slidesOpenPageAction(args)
     case 'browser_type':
       return typeAction(args, ctx)
     case 'browser_press':
@@ -307,7 +397,7 @@ function withPageDelta(text: string, ctx: ActionContext, label?: string): Action
 async function clickAction(
   args: Record<string, unknown>,
   ctx: ActionContext,
-  activate: (el: Element) => void = activateElement,
+  activate: (el: Element) => void | Promise<void> = activateElement,
 ): Promise<ActionResult> {
   const resolved = targetOrThrow(args, ctx.ids)
   const el = resolved.element
@@ -373,7 +463,7 @@ async function clickAction(
   if (el instanceof HTMLButtonElement && el.disabled) {
     throw new ActionError('action-failed', `Button ${resolved.label} is disabled.`)
   }
-  activate(el)
+  await activate(el)
   await waitForPageSettled(ACTION_SETTLE)
   return withPageDelta(`Clicked ${resolved.label}.`, ctx, label)
 }
@@ -412,12 +502,16 @@ function activateElement(el: Element): void {
  * every time — the mouse pair is the part that matters.
  *
  * Coordinates are mandatory: with no point inside the element's own rect the hit
- * test fails and nothing happens even though the events were dispatched.
+ * test fails and nothing happens even though the events were dispatched. They
+ * also have to be *current*: `clickAction` scrolls the target into view first,
+ * and in a virtualized list (the Slides filmstrip and grid view) that scroll
+ * keeps moving the element afterwards, so the press is aimed with a rect that is
+ * re-measured — and hit-tested — immediately before it is sent.
  *
  * @param el - the element to activate.
  */
-function activateElementAsPointer(el: Element): void {
-  const rect = el.getBoundingClientRect()
+async function activateElementAsPointer(el: Element): Promise<void> {
+  const point = await pointerPressPoint(el)
   const options = {
     bubbles: true,
     cancelable: true,
@@ -426,8 +520,8 @@ function activateElementAsPointer(el: Element): void {
     detail: 1,
     button: 0,
     buttons: 1,
-    clientX: rect.left + rect.width / 2,
-    clientY: rect.top + rect.height / 2,
+    clientX: point.x,
+    clientY: point.y,
   }
   const sequence: Array<[string, typeof MouseEvent | typeof PointerEvent]> = [
     ['pointerdown', PointerEvent],
@@ -728,6 +822,216 @@ function reloadAction(): ActionResult {
   return {
     text: 'The page is reloading. Call browser_snapshot again after it loads.',
     navigationPending: true,
+  }
+}
+
+/* -------------------------------------------------------------------------- *
+ * Google Slides: open one page
+ * -------------------------------------------------------------------------- */
+
+/** The Slides grid-view toggle; `aria-pressed` says whether the grid is up. */
+const SLIDES_GRID_TOGGLE = '#grid-view-toggle'
+
+/** One slide, rendered either in the filmstrip or in grid view. */
+const SLIDES_THUMBNAIL = '.punch-filmstrip-thumbnail'
+
+/** A rendered slide group is `filmstrip-slide-<0-based index>-<slideId>`. */
+const SLIDES_SLIDE_ID = /^filmstrip-slide-(\d+)-(.+)$/
+
+/** Scroll steps allowed while walking a long deck's window onto the page. */
+const SLIDES_MAX_SCROLL_STEPS = 14
+
+/** Presses allowed before the grid path is given up (one may hit a neighbour). */
+const SLIDES_MAX_ATTEMPTS = 4
+
+const SLIDES_GRID_SETTLE_MS = 3_000
+const SLIDES_SWITCH_SETTLE_MS = 2_500
+const SLIDES_POLL_MS = 100
+
+interface SlidesPage {
+  /** 0-based position of the slide in the deck. */
+  index: number
+  slideId: string
+  thumbnail: Element
+}
+
+function slidesToggle(): HTMLElement | null {
+  const toggle = document.querySelector(SLIDES_GRID_TOGGLE)
+  return toggle instanceof HTMLElement ? toggle : null
+}
+
+function slidesGridOpen(): boolean {
+  return slidesToggle()?.getAttribute('aria-pressed') === 'true'
+}
+
+/** Every slide the editor currently renders, keyed by its slide id. */
+function slidesRenderedPages(): SlidesPage[] {
+  const pages = new Map<string, SlidesPage>()
+  for (const container of document.querySelectorAll('[id^="filmstrip-slide-"]')) {
+    const match = SLIDES_SLIDE_ID.exec(container.id)
+    if (match === null) continue
+    const index = Number(match[1])
+    if (!Number.isInteger(index)) continue
+    const slideId = (match[2] ?? '').replace(/-(?:bg|paragraph-\d+)$/, '')
+    if (slideId === '' || pages.has(slideId)) continue
+    const thumbnail = container.closest(SLIDES_THUMBNAIL)
+    if (thumbnail === null) continue
+    pages.set(slideId, { index, slideId, thumbnail })
+  }
+  return [...pages.values()]
+}
+
+/** The slide the deck is on, read from the editor's URL hash. */
+function slidesCurrentSlideId(): string | null {
+  const match = /^#slide=id\.(.+)$/.exec(location.hash)
+  return match?.[1] ?? null
+}
+
+function slidesPageOfSlideId(slideId: string): number | null {
+  const page = slidesRenderedPages().find((candidate) => candidate.slideId === slideId)
+  return page === undefined ? null : page.index + 1
+}
+
+async function slidesWaitFor(ready: () => boolean, timeoutMs: number): Promise<boolean> {
+  const deadline = performance.now() + timeoutMs
+  for (;;) {
+    if (ready()) return true
+    if (performance.now() >= deadline) return false
+    await sleep(SLIDES_POLL_MS)
+  }
+}
+
+/** Press one Slides control and wait for the state it is supposed to change. */
+async function slidesPress(el: Element, applied: () => boolean, notes: string[]): Promise<boolean> {
+  await activateElementAsPointer(el)
+  const done = await slidesWaitFor(applied, SLIDES_GRID_SETTLE_MS)
+  if (!done) notes.push('a Slides control did not react to the press')
+  return done
+}
+
+/**
+ * Scroll the editor's rendered window until it covers the wanted slide.
+ *
+ * The filmstrip and the grid only keep a window of slides in the DOM, so a page
+ * far down the deck has to be walked into view before it can be pressed.
+ */
+async function slidesRevealPage(page: number): Promise<SlidesPage | null> {
+  const index = page - 1
+  for (let step = 0; step <= SLIDES_MAX_SCROLL_STEPS; step++) {
+    const pages = slidesRenderedPages()
+    const hit = pages.find((candidate) => candidate.index === index)
+    if (hit !== undefined) return hit
+    if (pages.length === 0) return null
+    const edge = pages.reduce((extreme, candidate) => index < extreme.index
+      ? (candidate.index < extreme.index ? candidate : extreme)
+      : (candidate.index > extreme.index ? candidate : extreme))
+    const seen = new Set(pages.map((candidate) => candidate.slideId))
+    edge.thumbnail.scrollIntoView({ block: 'center', behavior: 'instant' })
+    const moved = await slidesWaitFor(
+      () => slidesRenderedPages().some((candidate) => !seen.has(candidate.slideId)),
+      SLIDES_GRID_SETTLE_MS,
+    )
+    if (!moved) return null
+  }
+  return null
+}
+
+/**
+ * Open one page of the Google Slides deck in the controlled tab.
+ *
+ * Slides renders slides in a virtualized window, and its filmstrip resolves a
+ * press by coordinates rather than by the element the events were sent to —
+ * measured 2026-09-21: pressing thumbnail 13 left the deck on slide 11, because
+ * the scroll `browser_click_pointer` performs is undone by the editor before the
+ * press is handled. Grid view is the surface that does behave: its cells keep
+ * their position, so a press lands on the cell it was aimed at.
+ *
+ * The loop presses the wanted thumbnail in grid view, leaves the grid so the
+ * deck actually opens the selection, and reads the URL hash back. A press that
+ * moves the deck is progress and is retried; a press that changes nothing is a
+ * failure and falls back to loading the slide by hash — a same-document jump in
+ * Slides, and the only path that does not depend on a press reaching the page.
+ */
+async function slidesOpenPageAction(args: Record<string, unknown>): Promise<ActionResult> {
+  const page = numberArg(args, 'page')
+  if (!Number.isInteger(page) || page < 1) {
+    throw new ActionError('bad-args', 'page must be a positive whole number (the deck counts from 1).')
+  }
+  const toggle = slidesToggle()
+  if (toggle === null) {
+    throw new ActionError(
+      'action-failed',
+      'browser_slides_open_page needs a Google Slides editor tab: the grid-view toggle was not found on this page.',
+    )
+  }
+
+  const startedInGrid = slidesGridOpen()
+  const startId = slidesCurrentSlideId()
+  const startPage = startId === null ? null : slidesPageOfSlideId(startId)
+  if (startPage === page) return { text: `Already on slide ${page}.` }
+
+  const notes: string[] = []
+  const gridNote = startedInGrid ? ' The grid view is now closed.' : ''
+  let target: SlidesPage | null = null
+  let landedPage: number | null = null
+
+  for (let attempt = 1; attempt <= SLIDES_MAX_ATTEMPTS; attempt++) {
+    if (!slidesGridOpen() && !await slidesPress(toggle, slidesGridOpen, notes)) break
+    const revealed = await slidesRevealPage(page)
+    if (revealed === null) {
+      notes.push(`slide ${page} could not be scrolled into the rendered window`)
+      break
+    }
+    target = revealed
+    // Centre it first so the press does not race the window's own scrolling.
+    revealed.thumbnail.scrollIntoView({ block: 'center', behavior: 'instant' })
+    await activateElementAsPointer(revealed.thumbnail)
+    await sleep(SLIDES_POLL_MS)
+    if (slidesGridOpen()) await slidesPress(toggle, () => !slidesGridOpen(), notes)
+    await slidesWaitFor(() => slidesCurrentSlideId() !== null, SLIDES_SWITCH_SETTLE_MS)
+
+    const nowId = slidesCurrentSlideId()
+    landedPage = nowId === null ? null : slidesPageOfSlideId(nowId)
+    if (landedPage === page) {
+      const tries = attempt > 1 ? ` after ${attempt} presses` : ''
+      return { text: `Opened slide ${page} from grid view${tries}.${gridNote}` }
+    }
+    if (landedPage === startPage || nowId === startId) {
+      notes.push(`press ${attempt} did not move the deck`)
+      break
+    }
+    notes.push(`press ${attempt} landed on slide ${landedPage ?? 'unknown'}`)
+  }
+
+  if (target === null) {
+    throw new ActionError('action-failed', `Could not reach slide ${page} in the rendered window. ${notes.join('; ')}.`)
+  }
+
+  // A press that moves the deck but misses the page is not a failure: report
+  // where it stopped and the id needed to finish the jump in one call.
+  if (landedPage !== null && landedPage !== startPage) {
+    return {
+      text: `Grid presses moved the deck to slide ${landedPage}, not ${page}. `
+        + `The target slide id is ${target.slideId}: call browser_navigate with "#slide=id.${target.slideId}" `
+        + `or call browser_slides_open_page again. Notes: ${notes.join('; ')}.`,
+    }
+  }
+
+  // Nothing moved: load the slide by hash instead (a same-document jump).
+  if (slidesGridOpen()) await slidesPress(toggle, () => !slidesGridOpen(), notes)
+  location.hash = `#slide=id.${target.slideId}`
+  const jumped = await slidesWaitFor(() => slidesCurrentSlideId() === target?.slideId, SLIDES_SWITCH_SETTLE_MS)
+  if (!jumped) {
+    throw new ActionError(
+      'action-failed',
+      `Could not open slide ${page}: the grid press did not move the deck and loading #slide=id.${target.slideId} `
+      + `did not take effect either. ${notes.join('; ')}.`,
+    )
+  }
+  const jumpedPage = slidesPageOfSlideId(target.slideId)
+  return {
+    text: `Grid presses did not move the deck, so slide ${page} was loaded by hash`
+      + `${jumpedPage === null ? '' : ` (the deck is on slide ${jumpedPage})`}.${gridNote}`,
   }
 }
 

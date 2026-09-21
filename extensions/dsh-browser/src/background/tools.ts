@@ -371,7 +371,8 @@ function captureRequest(args: Record<string, unknown>): CaptureRequest {
 /** Factual, boundary-wrapped envelope that travels beside one screenshot. */
 function captureEnvelope(image: CapturedImage, url: string | undefined): string {
   const target = url === undefined || url === '' ? '' : `\nurl: ${url}`
-  return `<capture>\nimage: ${image.mediaType} ${image.width}x${image.height} px, ${image.bytes} bytes${target}\n</capture>`
+  const note = image.note === undefined ? '' : `\nnote: ${image.note}`
+  return `<capture>\nimage: ${image.mediaType} ${image.width}x${image.height} px, ${image.bytes} bytes${target}${note}\n</capture>`
 }
 
 /** Character budget for one capture envelope; the metadata is deliberately tiny. */

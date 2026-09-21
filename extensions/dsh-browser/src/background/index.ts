@@ -20,6 +20,7 @@
  *   ui → bg: { type: 'approval.response', id, decision }
  *   ui → bg: { type: 'reconnect' } | { type: 'open-options' }
  *   bg → ui: push.status / push.affinity / push.approval / push.approval-resolved
+ *            / push.session-grants / push.op / push.ops / push.ops-cleared
  *
  * @module
  */
@@ -45,7 +46,12 @@ import {
   type ApprovalRequest,
   type ApprovalVerdict,
 } from '../security/approval.ts'
-import { SessionAllowance, scopeKeyForCall } from '../security/session-allowance.ts'
+import {
+  SessionAllowance,
+  scopeKeyForCall,
+  type SessionGrantRevocation,
+  type SessionGrantRevocationReason,
+} from '../security/session-allowance.ts'
 import { getUiLocale } from '../i18n.ts'
 import {
   actionCoveredByTrustedOrigins,
@@ -74,6 +80,7 @@ import {
 } from '../shared/settings.ts'
 import {
   sendUiPush,
+  sessionGrantsPush,
   type ControlledTabInfo,
   type RecentOp,
   type UiState,
@@ -155,6 +162,19 @@ const sessionTrustedActionOrigins = new Set<string>()
 const sessionAllowances = new SessionAllowance()
 /** Tool calls that can still be withdrawn by a bridge `tool.cancel` frame. */
 const activeToolCalls = new Map<string, AbortController>()
+
+/**
+ * Read the in-flight tool calls from the worker's own console.
+ *
+ * The service worker is an ES module, so nothing declared in this file is
+ * reachable from DevTools by name — and nothing logs this map either, which made
+ * "did that download call leak?" impossible to answer from outside. Read-only,
+ * and it answers exactly that: the ids still held, empty once a call has
+ * settled. A held entry also keeps its closure alive, so a non-empty answer
+ * after the call finished means the call never settled.
+ */
+;(globalThis as { __dshInFlightToolCalls?: () => string[] }).__dshInFlightToolCalls =
+  () => [...activeToolCalls.keys()]
 /** Origin of the dsh host we connect to (http://host:port), used to keep the
  * dsh web page itself out of the bindable targets. */
 let bridgeOrigin: string | undefined
@@ -272,6 +292,8 @@ function currentBridgeNotice(): BridgeNotice | null {
 }
 
 function uiState(): UiState {
+  // Grants belong to the session the panel is showing, which is the focused one.
+  const sessionId = tabAffinity.focusedSession()
   return {
     bridgeState: bridge?.state ?? 'stopped',
     caps,
@@ -280,6 +302,8 @@ function uiState(): UiState {
     controlled: controlledTabInfo(),
     pendingApprovals: [...pendingApprovals.values()],
     recentOps: activeOps(),
+    sessionGrants: sessionId === null ? [] : sessionAllowances.grantsFor(sessionId),
+    grantRevocation: sessionId === null ? null : sessionAllowances.revocationFor(sessionId) ?? null,
   }
 }
 
@@ -328,6 +352,20 @@ function broadcastTabAffinity(): void {
   // Focus/bind changes switch which session's operations are shown.
   sendUiPush({ type: 'push.ops', ops: activeOps() })
   queueDevtoolsPriming()
+}
+
+/**
+ * Tell the panel what one session holds now, and why it holds less than before.
+ *
+ * Nothing else reports a session grant: without this push the panel saw a card,
+ * the user allowed it, and a later card simply appeared again — with no way to
+ * learn that the binding change in between had thrown the grant away.
+ *
+ * @param sessionId - the session whose grants changed.
+ * @param revocation - what was dropped and why; omitted when a grant was added.
+ */
+function broadcastSessionGrants(sessionId: string, revocation?: SessionGrantRevocation): void {
+  sendUiPush(sessionGrantsPush(sessionId, sessionAllowances.grantsFor(sessionId), revocation))
 }
 
 /** Bound tabs we already hold an eager debugging session for. */
@@ -448,13 +486,19 @@ function cancelPendingApprovals(sessionId?: string): void {
  * Drop everything a session was granted or is waiting on.
  *
  * "Allow in this session" earns its name here: the grant covers one session
- * driving the controlled tab, so it goes away with the binding that defined
- * it — unbind, handoff, tab close — and does not survive into a later session
- * that happens to reuse the tab.
+ * driving the controlled tab, so it goes away with the binding that defined it —
+ * the session is bound to another tab, that tab is closed or replaced, or the
+ * user unbinds — and does not survive into a later session that happens to reuse
+ * the tab.
+ *
+ * @param sessionId - the session losing its grants.
+ * @param reason - what happened to the controlled tab, so the panel can explain
+ *   why the next call asks again instead of leaving the user to guess.
  */
-function forgetSession(sessionId: string): void {
-  sessionAllowances.clear(sessionId)
+function forgetSession(sessionId: string, reason: SessionGrantRevocationReason): void {
+  const revocation = sessionAllowances.revoke(sessionId, reason)
   cancelPendingApprovals(sessionId)
+  if (revocation !== undefined) broadcastSessionGrants(sessionId, revocation)
 }
 
 function summarizeTab(tab: chrome.tabs.Tab): AffinityTab | null {
@@ -664,7 +708,7 @@ async function resolveToolTab(sessionId?: string): Promise<Pick<chrome.tabs.Tab,
     } catch {
       const affectedSessions = tabAffinity.sessionIdsForTab(resolution.tab.tabId)
       if (tabAffinity.removeTab(resolution.tab.tabId)) {
-        for (const sid of affectedSessions) forgetSession(sid)
+        for (const sid of affectedSessions) forgetSession(sid, 'closed')
         persistTabAffinity()
         broadcastTabAffinity()
       }
@@ -715,6 +759,7 @@ async function authorizeToolCall(
   if (allowsSessionScope(decision, { kind: prompt.kind, action: prompt.action, sessionId })
     && sessionId !== undefined) {
     sessionAllowances.remember(sessionId, scopeKeyForCall(call.name, call.args ?? {}), call.name)
+    broadcastSessionGrants(sessionId)
     return 'approved'
   }
   return decision === 'allow-once' ? 'approved' : 'denied'
@@ -1239,7 +1284,7 @@ async function handleVirtualTool(call: ToolCall, signal: AbortSignal): Promise<T
     await affinityReady
     if (signal.aborted) return { ok: false, error: { code: 'bridge-closed', message: 'Tool call was cancelled' } }
     // The session is being pointed at another tab: its grants named the old one.
-    forgetSession(sessionId)
+    forgetSession(sessionId, 'rebind')
     resetTabSnapshot(summary.tabId)
     tabAffinity.bindNewSession(sessionId, summary)
     keepTabAlive(summary.tabId)
@@ -1513,7 +1558,7 @@ chrome.runtime.onMessage.addListener((message: unknown, sender, sendResponse) =>
     case 'session.unbind': {
       const sessionId = tabAffinity.focusedSession()
       if (sessionId !== null && tabAffinity.unbindSession(sessionId)) {
-        forgetSession(sessionId)
+        forgetSession(sessionId, 'unbound')
         persistTabAffinity()
         broadcastTabAffinity()
         sendResponse({ accepted: true })
@@ -1601,7 +1646,7 @@ chrome.tabs.onReplaced.addListener((addedTabId, removedTabId) => {
   void affinityReady.then(() => {
     const affectedSessions = tabAffinity.sessionIdsForTab(removedTabId)
     if (!tabAffinity.replaceTab(removedTabId, addedTabId)) return
-    for (const sid of affectedSessions) forgetSession(sid)
+    for (const sid of affectedSessions) forgetSession(sid, 'replaced')
     resetTabSnapshot(removedTabId)
     resetTabSnapshot(addedTabId)
     persistTabAffinity()
@@ -1621,7 +1666,7 @@ chrome.tabs.onRemoved.addListener((tabId) => {
   void affinityReady.then(() => {
     const affectedSessions = tabAffinity.sessionIdsForTab(tabId)
     if (!tabAffinity.removeTab(tabId)) return
-    for (const sid of affectedSessions) forgetSession(sid)
+    for (const sid of affectedSessions) forgetSession(sid, 'closed')
     persistTabAffinity()
     broadcastTabAffinity()
   })

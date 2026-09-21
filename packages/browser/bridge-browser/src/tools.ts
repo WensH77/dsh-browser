@@ -31,6 +31,7 @@ import {
   TOOLSET_PAGE_IMAGE,
   TOOLSET_POINTER_CLICK,
   TOOLSET_SELECTOR_TARGETS,
+  TOOLSET_SLIDES_OPEN_PAGE,
   TOOLSET_TEXT_FIND,
   gdriveExportKind,
   parseBindableTabs,
@@ -101,6 +102,16 @@ interface AttachmentsLike {
     maxImagePixels: number
     maxImageDimension: number
     mediaTypes: readonly ImageMediaType[]
+  }
+  /**
+   * What the deployment hands the model after normalization, when the mounted
+   * service exposes it. The capture uses it to tell a legible full page from a
+   * thumbnail of everything; without it, nothing about a capture changes.
+   */
+  readonly normalizationPolicy?: {
+    maxPixels: number
+    maxBytes: number
+    maxDimension: number
   }
   saveImage(input: { data: Uint8Array; mediaType: ImageMediaType; name?: string }): Promise<ImageAttachmentRef>
 }
@@ -241,6 +252,22 @@ function captureLimits(attachments: AttachmentsLike | undefined): Record<string,
 }
 
 /**
+ * Bounds the deployment applies before the model sees a picture.
+ *
+ * Optional on purpose: a service that does not expose its normalization policy
+ * is not an error, it only means a capture cannot be judged for legibility up
+ * front. The fields are copied one by one so a partial policy is ignored rather
+ * than sent as a half-specified budget.
+ */
+function deliveryLimits(attachments: AttachmentsLike | undefined): Record<string, number> | undefined {
+  const policy = attachments?.normalizationPolicy
+  if (policy === undefined) return undefined
+  const { maxBytes, maxPixels, maxDimension } = policy
+  if (typeof maxBytes !== 'number' || typeof maxPixels !== 'number' || typeof maxDimension !== 'number') return undefined
+  return { maxBytes, maxPixels, maxDimension }
+}
+
+/**
  * Turn one bridge result into a canonical visual result, attaching the captured
  * bytes when the deployment accepts them.
  *
@@ -275,8 +302,14 @@ async function toVisualResult(
       mediaType: payload.mediaType,
       name: `${toolName === 'browser_capture' ? 'page-capture' : toolName === 'browser_image' ? 'page-image' : 'page-snapshot'}.${payload.mediaType === 'image/jpeg' ? 'jpg' : payload.mediaType === 'image/webp' ? 'webp' : payload.mediaType === 'image/gif' ? 'gif' : 'png'}`,
     })
+    // The capture reports the raster it produced; normalization can shrink that
+    // before it is stored (a 41.6 MP full page arrives as 4.19 MP). Saying which
+    // is which keeps the model from judging legibility by a size it never got.
+    const delivered = payload.width === ref.width && payload.height === ref.height
+      ? ''
+      : `\nThe attached image was normalized to ${ref.width}x${ref.height} px (${ref.bytes} bytes).`
     return {
-      text,
+      text: `${text}${delivered}`,
       image: {
         attachmentId: ref.attachmentId,
         mediaType: ref.mediaType,
@@ -688,6 +721,7 @@ export const BROWSER_TOOL_NAMES = [
   'browser_click',
   // Same target, different way of pressing it: see the tool's own description.
   'browser_click_pointer',
+  'browser_slides_open_page',
   'browser_type',
   'browser_press',
   'browser_scroll',
@@ -727,6 +761,13 @@ export const PAGE_IMAGE_TOOL_NAMES = ['browser_image'] as const
  * skew.
  */
 export const POINTER_CLICK_TOOL_NAMES = ['browser_click_pointer'] as const
+
+/**
+ * Tools that only exist at `TOOLSET_SLIDES_OPEN_PAGE`. Like the pointer click,
+ * the action is its own wire case: an extension below that level would answer
+ * `Unknown action`, so the surface carries the skew instead.
+ */
+export const SLIDES_OPEN_PAGE_TOOL_NAMES = ['browser_slides_open_page'] as const
 
 /**
  * Answer a selector click/type aimed at an extension that cannot resolve
@@ -807,11 +848,13 @@ export function registerBrowserTools(
     ...TEXT_FIND_TOOL_NAMES,
     ...PAGE_IMAGE_TOOL_NAMES,
     ...POINTER_CLICK_TOOL_NAMES,
+    ...SLIDES_OPEN_PAGE_TOOL_NAMES,
   ])
   // Tools absent below the level that first ships them.
   const legacyOnly = new Set<string>(TOOLSET_TOOL_NAMES)
   const pageImageOnly = new Set<string>(PAGE_IMAGE_TOOL_NAMES)
   const pointerClickOnly = new Set<string>(POINTER_CLICK_TOOL_NAMES)
+  const slidesOpenPageOnly = new Set<string>(SLIDES_OPEN_PAGE_TOOL_NAMES)
   const notAt = (...absent: Array<Set<string>>) => (tool: ToolDefinition): boolean =>
     absent.every((names) => !names.has(tool.name))
   const byName = (list: ToolDefinition[]): Map<string, ToolDefinition> => new Map(list.map((tool) => [tool.name, tool]))
@@ -819,17 +862,24 @@ export function registerBrowserTools(
   // it reaches. Every row is derived from the same factories, minus the tools
   // that level predates.
   const levelMaps = new Map<number, Map<string, ToolDefinition>>([
-    [TOOLSET_POINTER_CLICK, byName(currentDefinitions)],
-    [TOOLSET_PAGE_IMAGE, byName(currentDefinitions.filter(notAt(pointerClickOnly)))],
-    [TOOLSET_TEXT_FIND, byName(findOnlyDefinitions.filter(notAt(pageImageOnly, pointerClickOnly)))],
+    [TOOLSET_SLIDES_OPEN_PAGE, byName(currentDefinitions)],
+    [TOOLSET_POINTER_CLICK, byName(currentDefinitions.filter(notAt(slidesOpenPageOnly)))],
+    [TOOLSET_PAGE_IMAGE, byName(currentDefinitions.filter(notAt(pointerClickOnly, slidesOpenPageOnly)))],
+    [TOOLSET_TEXT_FIND, byName(findOnlyDefinitions.filter(notAt(pageImageOnly, pointerClickOnly, slidesOpenPageOnly)))],
     [TOOLSET_SELECTOR_TARGETS, byName(selectorOnlyDefinitions
-      .filter(notAt(pageImageOnly, pointerClickOnly))
+      .filter(notAt(pageImageOnly, pointerClickOnly, slidesOpenPageOnly))
       .map(guardForLevel))],
     [LEGACY_TOOLSET, byName(legacyDefinitions
-      .filter(notAt(legacyOnly, pageImageOnly, pointerClickOnly))
+      .filter(notAt(legacyOnly, pageImageOnly, pointerClickOnly, slidesOpenPageOnly))
       .map(guardForLevel))],
   ])
-  const levelOrder = [TOOLSET_POINTER_CLICK, TOOLSET_PAGE_IMAGE, TOOLSET_TEXT_FIND, TOOLSET_SELECTOR_TARGETS] as const
+  const levelOrder = [
+    TOOLSET_SLIDES_OPEN_PAGE,
+    TOOLSET_POINTER_CLICK,
+    TOOLSET_PAGE_IMAGE,
+    TOOLSET_TEXT_FIND,
+    TOOLSET_SELECTOR_TARGETS,
+  ] as const
   for (const tool of currentDefinitions) {
     // Debugging tools wait for a connection that allows them.
     if (!debugNames.has(tool.name)) disposers.set(tool.name, ctx.tools.register(tool))
@@ -1002,6 +1052,7 @@ function defineTools(
     execute: async (args, exec) => {
       const a = args as { delta?: boolean; region?: string; maxChars?: number; visual?: boolean }
       const attachments = ctx.get('attachments') as AttachmentsLike | undefined
+      const delivery = deliveryLimits(attachments)
       const capable = await imageRouteAvailable(ctx, exec, clientDebugger)
       const wantsVisual = a.visual !== false && capable
       const raw = await callRaw(exec, 'browser_snapshot', {
@@ -1010,6 +1061,7 @@ function defineTools(
         ...a.maxChars !== undefined ? { maxChars: a.maxChars } : {},
         visual: wantsVisual,
         ...wantsVisual ? { limits: captureLimits(attachments) } : {},
+        ...wantsVisual && delivery !== undefined ? { deliver: delivery } : {},
       })
       const note = a.visual === false
         ? undefined
@@ -1020,9 +1072,9 @@ function defineTools(
 
   const capture = (): ToolDefinition => defineTool({
     name: 'browser_capture',
-    description: 'Capture a screenshot of the current page and return the image itself, for visual questions (layout, styling, canvas, charts, rendering). The image stays in memory and is never written to disk. Use browser_snapshot first for page structure. Requires the current model to accept image input.',
+    description: 'Capture a screenshot of the current page and return the image itself, for visual questions (layout, styling, canvas, charts, rendering). The image stays in memory and is never written to disk. Use browser_snapshot first for page structure. The viewport is the usual choice: a full-page capture of a long page is scaled to the model\'s image budget, so its text is unreadable. Requires the current model to accept image input.',
     parameters: {
-      fullPage: { type: 'boolean', description: 'Capture the whole scrollable page instead of the viewport. Defaults to false.' },
+      fullPage: { type: 'boolean', description: 'Capture the whole scrollable page instead of the viewport. Defaults to false. Use sparingly: on a long page the result is scaled down and its text is not legible — read those with browser_get_text. When the page would arrive unreadably small, the viewport is captured instead and the result says so.' },
       format: { type: 'string', enum: ['png', 'jpeg'], description: 'Encoded image format. Defaults to png.' },
       quality: { type: 'number', description: 'JPEG quality 1-100. Ignored for png.' },
     },
@@ -1034,11 +1086,13 @@ function defineTools(
       }
       const a = args as { fullPage?: boolean; format?: string; quality?: number }
       const attachments = ctx.get('attachments') as AttachmentsLike | undefined
+      const delivery = deliveryLimits(attachments)
       const raw = await callRaw(exec, 'browser_capture', {
         ...a.fullPage !== undefined ? { fullPage: a.fullPage } : {},
         ...a.format !== undefined ? { format: a.format } : {},
         ...a.quality !== undefined ? { quality: a.quality } : {},
         limits: captureLimits(attachments),
+        ...delivery === undefined ? {} : { deliver: delivery },
       })
       return toVisualResult(ctx, raw, 'browser_capture', 'the browser extension returned no image')
     },
@@ -1162,6 +1216,19 @@ function defineTools(
     timeoutMs: options.toolTimeoutMs,
     output: TEXT_OUTPUT,
     execute: (args, exec) => call(exec, 'browser_click_pointer', args as Record<string, unknown>),
+  })
+
+  const slidesOpenPage = (): ToolDefinition => defineTool({
+    name: 'browser_slides_open_page',
+    description: 'Open one page of the Google Slides deck in the controlled tab (page counts from 1). '
+      + 'It drives the editor\'s grid view, checks the landing through the URL hash, and loads the slide by hash '
+      + 'when a press changes nothing. Prefer it over pressing filmstrip thumbnails yourself.',
+    parameters: {
+      page: { type: 'number', required: true, description: 'Page number to open, counting from 1.' },
+    },
+    timeoutMs: options.toolTimeoutMs,
+    output: TEXT_OUTPUT,
+    execute: (args, exec) => call(exec, 'browser_slides_open_page', args as Record<string, unknown>),
   })
 
   const type = (): ToolDefinition => defineTool({
@@ -1370,6 +1437,7 @@ function defineTools(
     headers(),
     click(),
     clickPointer(),
+    slidesOpenPage(),
     type(),
     press(),
     scroll(),

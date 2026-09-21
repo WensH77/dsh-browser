@@ -50,13 +50,14 @@ The paired Playwright / extension duration ratio was **1.24** (95% CI **1.16–1
 | Capability | Tool | Notes |
 |---|---|---|
 | Read page | `browser_snapshot` | Structured text snapshot: title, URL, main text, numbered controls, and masked form fields; `delta: true` returns only changes; carries a same-moment screenshot unless `visual: false` |
-| Capture the page | `browser_capture` | Screenshot of the viewport (or the whole page with `fullPage: true`) delivered as an image; never written to disk |
+| Capture the page | `browser_capture` | Screenshot of the viewport (or the whole page with `fullPage: true`) delivered as an image; never written to disk. Prefer the viewport — a long page's full-page capture is scaled to the model's image budget, so its text is not legible |
 | Read console and network | `browser_console` / `browser_network` | Console messages and uncaught errors with a cursor; request list with status and timing, one response body by id, and in-memory response overrides |
 | Answer a page dialog | `browser_dialog` | Accept or dismiss an `alert` / `confirm` / `prompt`; such a dialog freezes the page, so every other tool blocks until it is answered |
 | Run page JavaScript | `browser_eval` | Evaluate an expression in the page's own context; page CSP does not block it, and every call is approved on its own |
 | Block or rewrite requests | `browser_block` / `browser_headers` | Block matching requests, or rewrite request/response headers — scoped to the controlled tab and session-only |
 | Click element | `browser_click` | Click by inventory number, or by CSS selector when a control has no usable inventory entry (icon-only buttons) |
 | Click a control bound to the press | `browser_click_pointer` | Sends `pointerdown`, `mousedown`, `pointerup`, `mouseup`, and `click` at the element's centre — for canvas/SVG editors such as Google Slides, where `browser_click` reports success and nothing changes |
+| Open a Google Slides page | `browser_slides_open_page` | Opens one page of the deck in the controlled tab by 1-based number: drives the editor's grid view, checks the landing through the URL hash, and loads the slide by hash when a press changes nothing. Safer than pressing a filmstrip thumbnail yourself, whose press resolves by coordinates |
 | Fill forms | `browser_type` | React/Vue-compatible input by inventory number or CSS selector; `replace` clears the field first |
 | Press keys | `browser_press` | Keyboard events such as Enter, Tab, Escape, and arrow keys |
 | Scroll | `browser_scroll` | Viewport scrolling: up, down, top, and bottom |

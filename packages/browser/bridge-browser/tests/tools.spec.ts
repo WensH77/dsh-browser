@@ -12,7 +12,8 @@ import {
   registerBrowserTools,
 } from '../src/tools.ts'
 import {
-  BRIDGE_TOOLSET, LEGACY_TOOLSET, TOOLSET_PAGE_IMAGE, TOOLSET_SELECTOR_TARGETS, TOOLSET_TEXT_FIND,
+  BRIDGE_TOOLSET, LEGACY_TOOLSET, TOOLSET_PAGE_IMAGE, TOOLSET_POINTER_CLICK, TOOLSET_SELECTOR_TARGETS,
+  TOOLSET_TEXT_FIND,
 } from '../src/protocol.ts'
 
 describe('clampWaitMs', () => {
@@ -77,6 +78,7 @@ describe('registerBrowserTools', () => {
           maxImageDimension: 4_096,
           mediaTypes: ['image/png', 'image/jpeg'],
         },
+        normalizationPolicy: { maxPixels: 4_194_304, maxBytes: 4_194_304, maxDimension: 8_192 },
         saveImage: vi.fn(async () => ({
           attachmentId: 'att-1',
           mediaType: 'image/png',
@@ -214,17 +216,50 @@ describe('registerBrowserTools', () => {
     const imageTool = registered.find((r) => r.name === 'browser_image')!.definition
     expect(Object.keys(params(imageTool))).toEqual(expect.arrayContaining(['selector', 'index', 'frame']))
 
-    // Level 4 adds the pointer click, with the same targets as browser_click.
-    tools.setClientToolset(BRIDGE_TOOLSET)
+    // Level 4 adds the pointer click, with the same targets as browser_click,
+    // but not the Slides page jump: that wire case arrives a level later.
+    tools.setClientToolset(TOOLSET_POINTER_CLICK)
     expect(tools.names()).toContain('browser_click_pointer')
+    expect(tools.names()).not.toContain('browser_slides_open_page')
     const pointerTool = registered.find((r) => r.name === 'browser_click_pointer')!.definition
     expect(Object.keys(params(pointerTool))).toEqual(expect.arrayContaining(['index', 'selector']))
+
+    // Level 5 adds the Slides page jump, which takes a page number and nothing
+    // else — the tool resolves the slide itself.
+    tools.setClientToolset(BRIDGE_TOOLSET)
+    expect(tools.names()).toContain('browser_slides_open_page')
+    const slidesTool = registered.find((r) => r.name === 'browser_slides_open_page')!.definition
+    expect(Object.keys(params(slidesTool))).toEqual(['page'])
 
     // Level 0 has neither selector targets nor text search.
     tools.setClientToolset(LEGACY_TOOLSET)
     expect(Object.keys(params(registered.find((r) => r.name === 'browser_get_text')!.definition))).not.toContain('find')
     expect(tools.names()).not.toContain('browser_dom_query')
     expect(Object.keys(params(registered.find((r) => r.name === 'browser_click')!.definition))).not.toContain('selector')
+  })
+
+  it('tells the capture the size the model will actually receive', async () => {
+    // The extension needs the delivery budget to tell a legible full page from a
+    // thumbnail of everything; it is optional, and a service without it changes
+    // nothing about the call.
+    const services = visualServices()
+    const { ctx, bridge, requestTool, registered } = makeHarness(services, true)
+    enableDebug(registerBrowserTools(ctx, bridge, { toolTimeoutMs: 1_000, snapshotMaxChars: 12_000, maxInteractiveItems: 60 }))
+    const tool = registered.find((r) => r.name === 'browser_capture')!
+    const exec = routedExec()
+    const argsOfLatestCaptureCall = (): Record<string, unknown> => {
+      const calls = requestTool.mock.calls.filter((call) => call[0] === 'browser_capture')
+      return calls[calls.length - 1]?.[1] as Record<string, unknown>
+    }
+
+    requestTool.mockResolvedValueOnce({ text: 'capture envelope', image: CAPTURED })
+    await (tool.definition.execute as (a: unknown, e: unknown) => Promise<unknown>)({}, exec)
+    expect(argsOfLatestCaptureCall().deliver).toEqual({ maxBytes: 4_194_304, maxPixels: 4_194_304, maxDimension: 8_192 })
+
+    delete (services.attachments as { normalizationPolicy?: unknown }).normalizationPolicy
+    requestTool.mockResolvedValueOnce({ text: 'capture envelope', image: CAPTURED })
+    await (tool.definition.execute as (a: unknown, e: unknown) => Promise<unknown>)({}, exec)
+    expect(argsOfLatestCaptureCall()).not.toHaveProperty('deliver')
   })
 
   it('executes browser_click with mapped args', async () => {
@@ -284,6 +319,7 @@ describe('registerBrowserTools', () => {
     expect(requestTool).toHaveBeenLastCalledWith('browser_snapshot', {
       visual: true,
       limits: { maxBytes: 4_000_000, maxPixels: 4_000_000, maxDimension: 4_096 },
+      deliver: { maxBytes: 4_194_304, maxPixels: 4_194_304, maxDimension: 8_192 },
     }, exec.signal, 1_000, 'session-visual')
     expect(value.text).toBe('snapshot text')
     expect(value.image).toMatchObject({ attachmentId: 'att-1', mediaType: 'image/png', bytes: 12, width: 800, height: 600 })
@@ -356,8 +392,30 @@ describe('registerBrowserTools', () => {
       format: 'jpeg',
       quality: 70,
       limits: { maxBytes: 4_000_000, maxPixels: 4_000_000, maxDimension: 4_096 },
+      deliver: { maxBytes: 4_194_304, maxPixels: 4_194_304, maxDimension: 8_192 },
     }, exec.signal, 1_000, 'session-visual')
     expect(value.image).toBeDefined()
+  })
+
+  it('says when normalization shrank the image the model received', async () => {
+    // A full-page capture reports the raster it produced; the store hands the
+    // model a smaller one. Reporting only the first put "6076x6850" beside a
+    // 1928x2174 picture, which is how a legibility call gets made on wrong data.
+    const services = visualServices()
+    ;(services.attachments as { saveImage: { mockResolvedValue: (value: unknown) => void } }).saveImage
+      .mockResolvedValue({ attachmentId: 'att-1', mediaType: 'image/jpeg', bytes: 900, width: 1928, height: 2174 })
+    const { ctx, bridge, requestTool, registered } = makeHarness(services, true)
+    enableDebug(registerBrowserTools(ctx, bridge, { toolTimeoutMs: 1_000, snapshotMaxChars: 12_000, maxInteractiveItems: 60 }))
+    requestTool.mockResolvedValueOnce({
+      text: '<capture>\nimage: image/jpeg 6076x6850 px, 778135 bytes\n</capture>',
+      image: { dataBase64: Buffer.from('jpeg-bytes').toString('base64'), mediaType: 'image/jpeg', width: 6076, height: 6850, bytes: 778_135 },
+    })
+    const tool = registered.find((r) => r.name === 'browser_capture')!
+
+    const value = await (tool.definition.execute as (a: unknown, e: unknown) => Promise<{ text: string }>)({ fullPage: true }, routedExec())
+
+    expect(value.text).toContain('6076x6850')
+    expect(value.text).toContain('normalized to 1928x2174 px')
   })
 
   it('routes only Docs and Sheets links to the export bridge', async () => {

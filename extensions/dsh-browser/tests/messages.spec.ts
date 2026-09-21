@@ -1,6 +1,6 @@
 // @vitest-environment node
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { sendUiRequest } from '../src/shared/messages.ts'
+import { sendUiRequest, sessionGrantsPush } from '../src/shared/messages.ts'
 
 afterEach(() => { vi.unstubAllGlobals(); vi.useRealTimers() })
 
@@ -38,5 +38,29 @@ describe('sendUiRequest', () => {
     })
 
     await expect(sendUiRequest({ type: 'ui.state' })).resolves.toEqual({ bridgeState: 'connected' })
+  })
+})
+
+describe('sessionGrantsPush', () => {
+  const grants = [{ action: 'browser_network', key: 'browser_network#mock', grantedAt: 5 }]
+
+  it('carries the session and the grant keys the panel lists', () => {
+    expect(sessionGrantsPush('session-a', grants)).toEqual({
+      type: 'push.session-grants',
+      sessionId: 'session-a',
+      grants,
+    })
+  })
+
+  it('carries the revocation only when there is one', () => {
+    // A frame without a revocation means a grant was added: the panel reads the
+    // absence as "the previous explanation is stale" and clears it.
+    expect(sessionGrantsPush('session-a', [], { reason: 'rebind', count: 1 })).toEqual({
+      type: 'push.session-grants',
+      sessionId: 'session-a',
+      grants: [],
+      revocation: { reason: 'rebind', count: 1 },
+    })
+    expect(sessionGrantsPush('session-a', grants)).not.toHaveProperty('revocation')
   })
 })
