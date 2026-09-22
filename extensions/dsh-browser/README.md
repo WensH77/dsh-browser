@@ -1,4 +1,4 @@
-# dsh Browser Control Extension (Chrome and Firefox MV3)
+# dsh Browser Control Extension (Chrome MV3)
 
 English | [中文](README.zh.md)
 
@@ -38,11 +38,10 @@ status panel / options / popup ◄─runtime messages─► background SW/event 
 ```sh
 pnpm install
 pnpm --filter dsh-browser-extension run build
-pnpm --filter dsh-browser-extension run build:firefox
 pnpm --filter dsh-browser-extension run test
 ```
 
-Run these commands from the repository root. Chrome outputs to `extensions/dsh-browser/dist/`; Firefox outputs to `extensions/dsh-browser/dist-firefox/`.
+Run these commands from the repository root. Chrome outputs to `extensions/dsh-browser/dist/`.
 
 ## Install and use
 
@@ -92,11 +91,11 @@ The recommended zero-configuration command does not require Git or a local clone
 
    The extension connects to the auto-discovered bridge as soon as it loads and keeps retrying with backoff; approvals can surface in the status window even while you work in other tabs. If the connection drops or another browser profile replaces it, the extension reconnects on its own.
 
-3. **Use it**: open a normal `http://` or `https://` page and click the DeepSeek whale icon. Both builds auto-discover local dsh. Chrome loopback connections need no address or token; Firefox must be given the token from `~/.dsh/ext-bridge-token` because a `moz-extension://` UUID is not an add-on identity.
+3. **Use it**: open a normal `http://` or `https://` page and click the DeepSeek whale icon. The build auto-discovers local dsh, and loopback connections need no address or token.
 
 Pages that were already open before extension installation or reload are instrumented automatically on the first action, so they do not require a manual refresh. Browser-internal and protected pages such as `chrome://` and the Chrome Web Store cannot be read or operated.
 
-For extension-only development, load `extensions/dsh-browser/dist/` from `chrome://extensions`, or run `build:firefox` and load `extensions/dsh-browser/dist-firefox/manifest.json` from `about:debugging#/runtime/this-firefox`. Rebuild and reload after code changes.
+For extension-only development, load `extensions/dsh-browser/dist/` from `chrome://extensions`. Rebuild and reload after code changes.
 
 ## Why text is the default view (and when vision joins)
 
@@ -125,9 +124,9 @@ For extension-only development, load `extensions/dsh-browser/dist/` from `chrome
 
 ## Permissions
 
-Chrome additionally requests `debugger` (tab screenshots, console/network buffers, page evaluation and response overrides over CDP; Chrome shows its debugging notice while a session is attached and refuses to attach while DevTools holds that tab) and `declarativeNetRequestWithHostAccess` (blocking and header rewriting, declared without an extra install warning because the extension already holds http/https host permissions). Firefox has no `debugger` API, so its build omits the permission and reports screenshots as unsupported.
+The extension requests `debugger` (tab screenshots, console/network buffers, page evaluation and response overrides over CDP; Chrome shows its debugging notice while a session is attached and refuses to attach while DevTools holds that tab) and `declarativeNetRequestWithHostAccess` (blocking and header rewriting, declared without an extra install warning because the extension already holds http/https host permissions).
 
-Chrome uses `sidePanel`; Firefox uses `sidebar_action`. Both request `storage` (settings), `notifications` (optional reminders for approvals received while no status window is open), `tabs` + `activeTab` + `scripting` (observe tab changes and inject/message the explicitly controlled tab, including lazy recovery for pages opened before install), `webNavigation` (enumerate and bind messages to that tab's frame documents), `alarms` (background keepalive), and `http/https` (content-script injection on normal pages). Firefox's AMO manifest declares the browsing activity, website content/activity, and personal communications that the add-on sends to the configured dsh/model service. The extension never changes the visible tab or silently follows a manual switch; background operation happens only after the user chooses to stay on the original tab.
+It uses `sidePanel` for its status surface, and also requests `storage` (settings), `notifications` (optional reminders for approvals received while no status window is open), `tabs` + `activeTab` + `scripting` (observe tab changes and inject/message the explicitly controlled tab, including lazy recovery for pages opened before install), `webNavigation` (enumerate and bind messages to that tab's frame documents), `alarms` (background keepalive), and `http/https` (content-script injection on normal pages). The extension never changes the visible tab or silently follows a manual switch; background operation happens only after the user chooses to stay on the original tab.
 
 ## Known limitations
 

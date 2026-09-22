@@ -4,9 +4,9 @@
 
 <img width="1701" height="897" alt="dsh Browser Control" src="https://github.com/user-attachments/assets/3b1f3a25-f962-4e02-a9ef-d23e0d01fc8e" />
 
-Connect [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) to the Chrome or Firefox tab you are already using. The model can read page content, click controls, fill forms, scroll, and navigate while preserving your login state, session, and cookies. A status panel shows which page is currently being operated.
+Connect [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) to the Chrome tab you are already using. The model can read page content, click controls, fill forms, scroll, and navigate while preserving your login state, session, and cookies. A status panel shows which page is currently being operated.
 
-`dsh` is DeepSeek AI's open-source, plugin-based agent harness. This repository provides a companion browser bridge plugin and Chrome/Firefox MV3 extension as one standalone pnpm workspace.
+`dsh` is DeepSeek AI's open-source, plugin-based agent harness. This repository provides a companion browser bridge plugin and Chrome MV3 extension as one standalone pnpm workspace.
 
 Pages become structured text with a numbered inventory of interactive elements, and the model addresses those elements by number. `browser_snapshot` pairs that text with a screenshot of the same moment, and `browser_capture` returns a screenshot on demand — both only for image-capable models, and both kept in memory: the extension never writes the image to disk, while a text-only route degrades to the text snapshot with a named reason.
 
@@ -29,7 +29,7 @@ Windows, in PowerShell:
 $s="$env:TEMP\dsh-install.ps1"; irm https://raw.githubusercontent.com/Lum1104/dsh-browser/refs/heads/main/scripts/install.ps1 -OutFile $s; powershell -NoProfile -ExecutionPolicy Bypass -File $s
 ```
 
-When the installer opens `chrome://extensions`, follow its instructions to load or reload **dsh Browser Assistant**. If dsh is already running, restart it after installation. See [Detailed installation and usage](#detailed-installation-and-usage) for prerequisites, startup commands, updates, and developer installation.
+When the installer opens `chrome://extensions`, follow its instructions to load or reload **AI Browser Assistant**. If dsh is already running, restart it after installation. See [Detailed installation and usage](#detailed-installation-and-usage) for prerequisites, startup commands, updates, and developer installation.
 
 > [!IMPORTANT]
 > The unscoped [`dsh-browser`](https://www.npmjs.com/package/dsh-browser) package on npm belongs to a different project and is not affiliated with this repository. This project is not currently published as an npm package; use the installer above.
@@ -90,7 +90,7 @@ scripts/install-skills.mjs
 
 ## Detailed installation and usage
 
-Requirements: Node.js `^22.19` or `>=24`, Corepack/pnpm, and Chrome 116+ or Firefox 140+. Windows additionally needs Windows PowerShell 5.1, which ships with Windows, or PowerShell 7+.
+Requirements: Node.js `^22.19` or `>=24`, Corepack/pnpm, and Chrome 116+. Windows additionally needs Windows PowerShell 5.1, which ships with Windows, or PowerShell 7+.
 
 ### Install or update
 
@@ -128,17 +128,6 @@ The repository also ships the operational knowledge that goes with these tools, 
 
 `scripts/install-skills.mjs` (step 4 of the installer, or `pnpm run skills:install`) links each skill into `~/.dsh/skills`; `--copy` copies instead, which is what the Windows installer uses because creating a link there needs Developer Mode or elevation. A symlink is the default on macOS and Linux, so editing the repo copy takes effect with no reinstall and the installed skill cannot drift from it. A skill is only loaded when its description matches what the session is doing — `google-slides-via-browser`, for example, loads when the controlled tab is a Google Slides editor.
 
-### Firefox source build
-
-Firefox uses a separate MV3 manifest, event-page background, and sidebar. Build it from a checkout, then open `about:debugging#/runtime/this-firefox`, choose **Load Temporary Add-on**, and select `extensions/dsh-browser/dist-firefox/manifest.json`:
-
-```sh
-pnpm install
-pnpm --filter dsh-browser-extension run build:firefox
-```
-
-The bridge address is still auto-discovered. Firefox's `moz-extension://` UUID does not authenticate an add-on, so copy the bearer token from `~/.dsh/ext-bridge-token` into the extension settings (the dsh startup log reports that file's path). Signed distribution can package the same `dist-firefox/` output.
-
 ### Start and use
 
 Start the managed installation with:
@@ -153,7 +142,7 @@ From a source checkout, run `pnpm start` in the repository root. The exact suppo
 npx @deepseek-ai/dsh@0.1.5-rc.1 web
 ```
 
-Local Chrome use requires no configuration; Firefox requires the local bridge token described above. Open an `http://` or `https://` page, click the DeepSeek whale icon, and wait for **Connected**. Existing tabs are instrumented on the first action; protected browser pages and extension stores are not supported.
+Local Chrome use requires no configuration. Open an `http://` or `https://` page, click the DeepSeek whale icon, and wait for **Connected**. Existing tabs are instrumented on the first action; protected browser pages and extension stores are not supported.
 
 ## Troubleshooting
 
@@ -161,11 +150,11 @@ Local Chrome use requires no configuration; Firefox requires the local bridge to
 
 - Make sure dsh web is running locally (default `http://127.0.0.1:3080`).
 - Verify the bridge is loaded: open `http://127.0.0.1:3080/ext/bridge-config`. It should return JSON such as `{"wsUrl":"ws://127.0.0.1:3080/ext/bridge"}`. If it returns a web page instead of JSON, the running dsh predates the bridge registration — restart dsh and refresh the page; the extension reconnects on its own.
-- The extension probes ports 3080, 3081, 3090, 14389, and 43189 (dsh Desktop) automatically. If dsh runs on another port — or you use a remote `--host 0.0.0.0` deployment — set the address (and bridge token) in the extension options. Firefox always requires the token.
+- The extension probes ports 3080, 3081, 3090, 14389, and 43189 (dsh Desktop) automatically. If dsh runs on another port — or you use a remote `--host 0.0.0.0` deployment — set the address (and bridge token) in the extension options.
 
 ## Development
 
-The bridge plugin and Chrome/Firefox extension are both members of this repository's workspace. Run all commands from the repository root. For the first development installation, run `pnpm install`.
+The bridge plugin and Chrome extension are both members of this repository's workspace. Run all commands from the repository root. For the first development installation, run `pnpm install`.
 
 ```sh
 pnpm run build
@@ -177,7 +166,6 @@ pnpm --filter @yuxianglin/dsh-bridge-browser run typecheck
 pnpm --filter @yuxianglin/dsh-bridge-browser run test
 
 pnpm --filter dsh-browser-extension run build
-pnpm --filter dsh-browser-extension run build:firefox
 pnpm --filter dsh-browser-extension run test
 ```
 
@@ -189,7 +177,7 @@ Notes:
 ## Security
 
 - The bridge path sits outside the `/api` trust boundary and performs its own bearer-token authentication.
-- Local Chrome extension origins retain zero-configuration loopback access; Firefox origins are per-install UUIDs and must present the bearer token.
+- Local Chrome extension origins retain zero-configuration loopback access.
 - Privileged gateway methods such as `settings.*`, `credentials.*`, and `host.open*` reject non-loopback sources.
 - Page reads are text by default: `browser_snapshot` adds a screenshot unless the current model route declares no image input. Console, network, evaluation, blocking, and header rules use the extension's `debugger` and `declarativeNetRequestWithHostAccess` capabilities; screenshots use `debugger` (Chrome shows its usual debugging notice while a capture runs) and stay in memory — nothing is written to disk. Password and payment-card values never leave the page.
 - When the assistant starts operating a page, it binds to the then-active tab at the first browser-tool call. If you switch tabs manually, later browser actions pause and the assistant asks whether it should continue on the original tab or follow the new one. Choosing the original tab permits background operation; the extension never silently retargets or changes your visible tab. Closing the controlled tab also pauses tools until the next call binds a page you explicitly choose.

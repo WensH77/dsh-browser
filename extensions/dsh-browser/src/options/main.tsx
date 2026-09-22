@@ -8,7 +8,7 @@ import { SETTINGS_DEFAULTS, type Settings } from '../shared/settings.ts'
 import { policyRails } from './rails.ts'
 
 const zh = {
-  title: 'dsh 浏览器助手',
+  title: 'AI 浏览器助手',
   lede: '这份面板决定模型可以碰你浏览器的哪些部分。',
   ledger: '当前策略',
   railReads: '读取页面',
@@ -76,7 +76,7 @@ const zh = {
 }
 
 const en = {
-  title: 'dsh Browser Assistant',
+  title: 'AI Browser Assistant',
   lede: 'This panel decides which parts of your browser the model may touch.',
   ledger: 'Current policy',
   railReads: 'Page reads',

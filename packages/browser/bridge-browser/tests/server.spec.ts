@@ -13,7 +13,9 @@ const EXT_ID = BRIDGE_EXTENSION_IDS[0]
 
 /** 扩展上下文的 Origin（回环免 token 的必要条件）。 */
 const EXT_ORIGIN = `chrome-extension://${EXT_ID}`
-const FIREFOX_EXT_ORIGIN = 'moz-extension://per-install-uuid'
+/** An extension this repo does not build: no loopback exemption, token required. */
+const OTHER_EXT_ID = 'a'.repeat(32)
+const OTHER_EXT_ORIGIN = `chrome-extension://${OTHER_EXT_ID}`
 
 /** Extension caps used by every hello in this suite. */
 const CAPS = { debugger: true as const, extensionId: EXT_ID, snapshotMaxChars: 12_000, maxInteractiveItems: 60 }
@@ -191,20 +193,20 @@ describe('BridgeServer', () => {
     expect(result.reason).toContain('reload it from chrome://extensions')
   })
 
-  it('requires a token from Firefox extension origins because their UUID is not an extension identity', async () => {
+  it('requires a token from extension origins this repo does not build', async () => {
     const h = await startBridge()
     harnesses.push(h)
-    const { ws, done } = await connect(h.url, FIREFOX_EXT_ORIGIN)
-    send(ws, { t: 'hello', token: '', caps: CAPS })
+    const { ws, done } = await connect(h.url, OTHER_EXT_ORIGIN)
+    send(ws, { t: 'hello', token: '', caps: { ...CAPS, extensionId: OTHER_EXT_ID } })
     await done
     expect(ws.readyState).toBe(WebSocket.CLOSED)
   })
 
-  it('accepts an authenticated Firefox extension origin', async () => {
+  it('accepts another extension that presents the token', async () => {
     const h = await startBridge()
     harnesses.push(h)
-    const { ws, frames } = await connect(h.url, FIREFOX_EXT_ORIGIN)
-    send(ws, { t: 'hello', token: TOKEN, caps: CAPS })
+    const { ws, frames } = await connect(h.url, OTHER_EXT_ORIGIN)
+    send(ws, { t: 'hello', token: TOKEN, caps: { ...CAPS, extensionId: OTHER_EXT_ID } })
     await waitFor(() => frames.some((f) => f.t === 'hello.ok'))
     expect(frames.find((f) => f.t === 'hello.ok')).toBeDefined()
     ws.close()
