@@ -374,7 +374,7 @@ interface Domains {
  */
 async function holdSession(tabId: number, need: Domains): Promise<void> {
   if (typeof chrome === 'undefined' || chrome.debugger === undefined) {
-    throw new CaptureError('unsupported', 'This browser build has no chrome.debugger API (Firefox), so console, network, and evaluation tools are unavailable.', 'unsupported')
+    throw new CaptureError('unsupported', 'This extension has no chrome.debugger API, so console, network, and evaluation tools are unavailable. Reload the extension from chrome://extensions.', 'unsupported')
   }
   installListener()
   // Events route into this tab's buffer record, so it must exist before the

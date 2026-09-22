@@ -4,9 +4,9 @@
 
 <img width="1701" height="897" alt="dsh 浏览器操作" src="https://github.com/user-attachments/assets/3b1f3a25-f962-4e02-a9ef-d23e0d01fc8e" />
 
-把 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 连接到你正在使用的 Chrome 或 Firefox 标签页。模型可以读取页面内容、点击控件、填写表单、滚动与导航，同时保留登录态、会话和 Cookie。状态面板会显示当前正在操作哪个页面。
+把 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 连接到你正在使用的 Chrome 标签页。模型可以读取页面内容、点击控件、填写表单、滚动与导航，同时保留登录态、会话和 Cookie。状态面板会显示当前正在操作哪个页面。
 
-`dsh` 是由 DeepSeek AI 开发的开源、插件化 agent harness（智能体框架）。本仓库将配套的浏览器桥插件与 Chrome/Firefox MV3 扩展组成一个独立的 pnpm workspace。
+`dsh` 是由 DeepSeek AI 开发的开源、插件化 agent harness（智能体框架）。本仓库将配套的浏览器桥插件与 Chrome MV3 扩展组成一个独立的 pnpm workspace。
 
 页面会转换为结构化文本和带编号的交互元素清单，模型通过编号定位元素。`browser_snapshot` 会把这份文本与同一时刻的截图一起返回，`browser_capture` 按需只返回截图——两者都只对支持图片输入的模型生效，且截图只存在内存里：扩展不落盘；纯文本模型会降级为文本快照并说明原因。
 
@@ -29,7 +29,7 @@ Windows（PowerShell）：
 $s="$env:TEMP\dsh-install.ps1"; irm https://raw.githubusercontent.com/Lum1104/dsh-browser/refs/heads/main/scripts/install.ps1 -OutFile $s; powershell -NoProfile -ExecutionPolicy Bypass -File $s
 ```
 
-安装器打开 `chrome://extensions` 后，请按提示加载或重新加载 **dsh 浏览器助手**。如果 dsh 已经在运行，安装完成后请重启。前置要求、启动命令、更新方式和开发者安装详见[详细安装与使用](#详细安装与使用)。
+安装器打开 `chrome://extensions` 后，请按提示加载或重新加载 **AI 浏览器助手**。如果 dsh 已经在运行，安装完成后请重启。前置要求、启动命令、更新方式和开发者安装详见[详细安装与使用](#详细安装与使用)。
 
 > [!IMPORTANT]
 > npm 上未加 scope 的 [`dsh-browser`](https://www.npmjs.com/package/dsh-browser) 包属于另一个项目，与本仓库无关。本项目目前没有发布 npm 包，请使用上方安装器。
@@ -90,7 +90,7 @@ scripts/install-skills.mjs
 
 ## 详细安装与使用
 
-前置要求：Node.js `^22.19` 或 `>=24`、Corepack/pnpm，以及 Chrome 116+ 或 Firefox 140+。Windows 还需要系统自带的 Windows PowerShell 5.1，或 PowerShell 7+。
+前置要求：Node.js `^22.19` 或 `>=24`、Corepack/pnpm，以及 Chrome 116+。Windows 还需要系统自带的 Windows PowerShell 5.1，或 PowerShell 7+。
 
 ### 安装或更新
 
@@ -128,17 +128,6 @@ Windows 请在 checkout 中运行 `.\scripts\install.ps1`。拉取或切换版�
 
 `scripts/install-skills.mjs`（安装脚本的第 4 步，也可单独执行 `pnpm run skills:install`）把每个技能链接到 `~/.dsh/skills`；`--copy` 改为复制，Windows 安装脚本用的就是复制，因为在那里创建链接需要开发者模式或管理员权限。macOS 和 Linux 默认用符号链接，因此改仓库里的那份立即生效，安装出来的副本也不会与仓库脱节。技能只在其描述与当前任务匹配时才会加载，例如 `google-slides-via-browser` 只在受控标签页是 Google Slides 编辑器时加载。
 
-### Firefox 源码构建
-
-Firefox 使用独立的 MV3 manifest、事件页后台和 Sidebar。在 checkout 中构建后，打开 `about:debugging#/runtime/this-firefox`，选择「临时载入附加组件」，再选取 `extensions/dsh-browser/dist-firefox/manifest.json`：
-
-```sh
-pnpm install
-pnpm --filter dsh-browser-extension run build:firefox
-```
-
-桥地址仍会自动探测。Firefox 的 `moz-extension://` UUID 不能证明扩展身份，因此需要把 `~/.dsh/ext-bridge-token` 中的 bearer token 填入扩展设置（dsh 启动日志会报告该文件路径）。签名发布时可直接使用同一份 `dist-firefox/` 产物。
-
 ### 启动与使用
 
 启动托管安装：
@@ -153,7 +142,7 @@ cd ~/.dsh/dsh-browser && pnpm start
 npx @deepseek-ai/dsh@0.1.5-rc.1 web
 ```
 
-Chrome 本机使用无需配置；Firefox 需要填写上述本地桥 token。打开任意 `http://` 或 `https://` 页面，点击 DeepSeek 鲸鱼图标，等待状态面板显示**已连接**。已有标签页会在第一次操作时自动加载；浏览器受保护页面和扩展商店不受支持。
+Chrome 本机使用无需配置。打开任意 `http://` 或 `https://` 页面，点击 DeepSeek 鲸鱼图标，等待状态面板显示**已连接**。已有标签页会在第一次操作时自动加载；浏览器受保护页面和扩展商店不受支持。
 
 ## 故障排查
 
@@ -161,11 +150,11 @@ Chrome 本机使用无需配置；Firefox 需要填写上述本地桥 token。�
 
 - 确认本机 dsh web 正在运行（默认 `http://127.0.0.1:3080`）。
 - 确认桥接已加载：浏览器打开 `http://127.0.0.1:3080/ext/bridge-config`，应返回类似 `{"wsUrl":"ws://127.0.0.1:3080/ext/bridge"}` 的 JSON。如果返回的是网页而不是 JSON，说明当前运行的 dsh 早于桥接注册——重启 dsh 并刷新页面即可，扩展会自动重连。
-- 扩展会自动探测 3080/3081/3090/14389/43189（dsh Desktop）端口。若 dsh 运行在其它端口，或使用 `--host 0.0.0.0` 远程部署，请在扩展设置页中填写地址与桥接 token。Firefox 始终需要 token。
+- 扩展会自动探测 3080/3081/3090/14389/43189（dsh Desktop）端口。若 dsh 运行在其它端口，或使用 `--host 0.0.0.0` 远程部署，请在扩展设置页中填写地址与桥接 token。
 
 ## 开发
 
-桥接插件和 Chrome/Firefox 扩展都属于本仓库 workspace；所有命令均在本仓库根目录执行。首次开发安装运行 `pnpm install`。
+桥接插件和 Chrome 扩展都属于本仓库 workspace；所有命令均在本仓库根目录执行。首次开发安装运行 `pnpm install`。
 
 ```sh
 pnpm run build
@@ -177,7 +166,6 @@ pnpm --filter @yuxianglin/dsh-bridge-browser run typecheck
 pnpm --filter @yuxianglin/dsh-bridge-browser run test
 
 pnpm --filter dsh-browser-extension run build
-pnpm --filter dsh-browser-extension run build:firefox
 pnpm --filter dsh-browser-extension run test
 ```
 
@@ -189,7 +177,7 @@ pnpm --filter dsh-browser-extension run test
 ## 安全
 
 - 桥路径在 `/api` 信任栅栏之外，自带 bearer token 认证。
-- Chrome 扩展的本地 Origin 保留零配置回环访问；Firefox Origin 是每次安装生成的 UUID，必须携带 bearer token。
+- Chrome 扩展的本地 Origin 保留零配置回环访问。
 - 特权网关方法（`settings.*`/`credentials.*`/`host.open*`）对非回环来源一律拒绝。
 - 单活动连接；页面读取默认走文本，模型路由声明支持图片输入时 `browser_snapshot` 会附带截图。截图依赖 Chrome 扩展的 `debugger` 权限（截取期间 Chrome 会显示调试提示条），只存在内存中、不写磁盘；密码和卡号值永不回传。
 - 助手开始操作页面时，会在首次浏览器工具调用时绑定当时的活动标签页，此后一直操作**这个**标签页：你切去看别的页面（包括 Gmail）不会打断它，也不会撤掉正在等待你确认的弹窗——弹窗就在 dsh 页面里，你得能切过去点它。受控标签页关闭后才会暂停，直到下一次调用显式选择页面；扩展也绝不静默改绑到别的标签页。

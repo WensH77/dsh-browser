@@ -93,7 +93,7 @@ export async function captureTab(
   signal?: AbortSignal,
 ): Promise<CapturedImage> {
   if (!visionAvailable()) {
-    throw new CaptureError('unsupported', 'This browser build cannot capture screenshots: the extension has no chrome.debugger API (Firefox). Use browser_snapshot for page text instead.')
+    throw new CaptureError('unsupported', 'This extension cannot capture screenshots because the chrome.debugger API is unavailable. Reload the extension from chrome://extensions; if missing capabilities persist, use browser_snapshot for page text instead.')
   }
   const limits = request.limits ?? FALLBACK_LIMITS
   const fullPage = request.fullPage === true

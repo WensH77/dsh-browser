@@ -1,4 +1,4 @@
-# dsh 浏览器操作扩展（Chrome 与 Firefox MV3）
+# dsh 浏览器操作扩展（Chrome MV3）
 
 [English](README.md) | 中文
 
@@ -38,11 +38,10 @@ dsh 的**纯浏览器操作端**：让模型直接读取并操作你在浏览器
 ```sh
 pnpm install
 pnpm --filter dsh-browser-extension run build
-pnpm --filter dsh-browser-extension run build:firefox
 pnpm --filter dsh-browser-extension run test
 ```
 
-请在仓库根目录执行这些命令。Chrome 产物输出到 `extensions/dsh-browser/dist/`；Firefox 产物输出到 `extensions/dsh-browser/dist-firefox/`。
+请在仓库根目录执行这些命令。产物输出到 `extensions/dsh-browser/dist/`。
 
 ## 安装与使用
 
@@ -92,11 +91,11 @@ pnpm --filter dsh-browser-extension run test
 
    扩展加载后即连接自动探测到的桥，并带退避持续重连；即使你在其它标签页工作，审批也能在状态窗中弹出。连接掉线或被另一浏览器 Profile 顶替时，扩展会自动重连。
 
-3. **开始使用**：打开普通的 `http://` 或 `https://` 页面，点击 DeepSeek 鲸鱼图标。两个构建都会自动探测本机 dsh。Chrome 回环连接无需地址或 Token；Firefox 的 `moz-extension://` UUID 不能证明扩展身份，必须在设置中填入 `~/.dsh/ext-bridge-token`。
+3. **开始使用**：打开普通的 `http://` 或 `https://` 页面，点击 DeepSeek 鲸鱼图标。扩展会自动探测本机 dsh，回环连接无需地址或 Token。
 
 页面即使在扩展安装或重载之前已经打开，也会在第一次操作时自动补加载内容脚本，无需手动刷新。`chrome://`、Chrome Web Store 等浏览器内置或受保护页面不支持读取和操作。
 
-如果只开发扩展，Chrome 从 `chrome://extensions` 加载 `extensions/dsh-browser/dist/`；Firefox 运行 `build:firefox` 后，从 `about:debugging#/runtime/this-firefox` 加载 `extensions/dsh-browser/dist-firefox/manifest.json`。代码更新后需重新构建并重新加载。
+如果只开发扩展，从 `chrome://extensions` 加载 `extensions/dsh-browser/dist/`。代码更新后需重新构建并重新加载。
 
 ## 为什么以文本为主视图（以及视觉何时加入）
 
@@ -125,9 +124,9 @@ pnpm --filter dsh-browser-extension run test
 
 ## 权限说明
 
-Chrome 额外申请 `debugger`（经 CDP 截图、控制台/网络缓冲、页面求值与响应替换；attach 期间 Chrome 会显示调试提示条，且该标签页开着 DevTools 时无法 attach）与 `declarativeNetRequestWithHostAccess`（阻断与改头；扩展已持有 http/https host 权限，因此不产生额外安装警告）。Firefox 没有 `debugger` API，构建里不含该权限，截图会明确报不支持。
+扩展额外申请 `debugger`（经 CDP 截图、控制台/网络缓冲、页面求值与响应替换；attach 期间 Chrome 会显示调试提示条，且该标签页开着 DevTools 时无法 attach）与 `declarativeNetRequestWithHostAccess`（阻断与改头；扩展已持有 http/https host 权限，因此不产生额外安装警告）。
 
-Chrome 使用 `sidePanel`，Firefox 使用 `sidebar_action`。两者都申请 `storage`（设置）、`notifications`（没有状态窗打开时可选的审批提醒）、`tabs` + `activeTab` + `scripting`（观察切页，并向用户显式选择的受控标签页注入/发消息；安装前已打开的页面也会按需补注入）、`webNavigation`（枚举该标签页中的 frame，并把消息绑定到具体文档）、`alarms`（后台保活）和 `http/https`（内容脚本注入普通网页）。Firefox AMO manifest 如实声明扩展会把浏览活动、网页内容/操作和对话内容发送给用户配置的 dsh/模型服务。扩展绝不改变用户正在看的标签页，也不会静默跟随手动切页；只有用户选择继续原页面后，助手才会在后台操作。
+状态面板使用 `sidePanel`；扩展还申请 `storage`（设置）、`notifications`（没有状态窗打开时可选的审批提醒）、`tabs` + `activeTab` + `scripting`（观察切页，并向用户显式选择的受控标签页注入/发消息；安装前已打开的页面也会按需补注入）、`webNavigation`（枚举该标签页中的 frame，并把消息绑定到具体文档）、`alarms`（后台保活）和 `http/https`（内容脚本注入普通网页）。扩展绝不改变用户正在看的标签页，也不会静默跟随手动切页；只有用户选择继续原页面后，助手才会在后台操作。
 
 ## 已知限制
 

@@ -1,6 +1,6 @@
 {
   "name": "dsh-browser-extension",
-  "description": "Chrome and Firefox MV3 extension for the dsh browser bridge: status panel, options page and approval popup that read and operate a user-controlled tab",
+  "description": "Chrome MV3 extension for the dsh browser bridge: status panel, options page and approval popup that read and operate a user-controlled tab",
   "version": "0.1.2",
   "author": "Yuxiang Lin",
   "license": "MIT",
@@ -8,9 +8,7 @@
   "type": "module",
   "scripts": {
     "build": "node scripts/build.mjs",
-    "build:firefox": "node scripts/build.mjs --firefox",
     "dev": "node scripts/build.mjs --watch",
-    "dev:firefox": "node scripts/build.mjs --firefox --watch",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run"
   },

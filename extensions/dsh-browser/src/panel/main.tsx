@@ -5,7 +5,7 @@ import { getUiLocale } from '../i18n.ts'
 
 const locale = getUiLocale()
 document.documentElement.lang = locale === 'zh' ? 'zh-CN' : 'en'
-document.title = locale === 'zh' ? 'dsh 浏览器助手' : 'dsh Browser Assistant'
+document.title = locale === 'zh' ? 'AI 浏览器助手' : 'AI Browser Assistant'
 
 const root = document.getElementById('root')
 if (root === null) throw new Error('panel root missing')

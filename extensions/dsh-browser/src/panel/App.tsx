@@ -7,7 +7,7 @@ import { decisionButtons } from './approval-buttons.ts'
 import { applySessionGrantsPush, grantsLine, revocationLine, type SessionGrantsView } from './session-grants.ts'
 
 const zh = {
-  appName: 'dsh 浏览器助手',
+  appName: 'AI 浏览器助手',
   connecting: '连接中…',
   connected: '已连接',
   reconnecting: '重连中…',
@@ -66,7 +66,7 @@ const zh = {
   bound: '当前页面',
 }
 const en = {
-  appName: 'dsh Browser Assistant',
+  appName: 'AI Browser Assistant',
   connecting: 'Connecting…',
   connected: 'Connected',
   reconnecting: 'Reconnecting…',

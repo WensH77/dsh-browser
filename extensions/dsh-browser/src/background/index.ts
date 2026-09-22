@@ -441,11 +441,11 @@ function notifyApproval(request: ApprovalRequest): void {
   const copy = getUiLocale() === 'zh'
     ? {
         title: '浏览器操作等待确认',
-        message: '点击打开 dsh 浏览器助手，并在 60 秒内确认或拒绝。',
+        message: '点击打开 AI 浏览器助手，并在 60 秒内确认或拒绝。',
       }
     : {
         title: 'Browser action awaiting approval',
-        message: 'Click to open dsh Browser Assistant, then allow or deny within 60 seconds.',
+        message: 'Click to open AI Browser Assistant, then allow or deny within 60 seconds.',
       }
   void Promise.resolve(chrome.notifications.create(approvalNotificationId(request.id), {
     type: 'basic',
@@ -1748,22 +1748,12 @@ chrome.alarms.onAlarm.addListener((alarm) => {
 
 // ---- Boot ----
 
-interface FirefoxSidebarAction {
-  open(): Promise<void> | void
-}
-
 /** The floating status window we last opened, re-focused when still alive. */
 let floatingWindowId: number | undefined
 
 /** Open the persistent status surface chosen in Settings (side panel or floating popup). */
 function openStatusSurface(windowId?: number): void {
   if (settings.statusMode === 'panel') {
-    if (import.meta.env.EXT_TARGET === 'firefox') {
-      const sidebar = (chrome as unknown as { sidebarAction?: FirefoxSidebarAction }).sidebarAction
-      if (sidebar === undefined) return
-      void Promise.resolve(sidebar.open()).catch(() => {})
-      return
-    }
     // chrome.sidePanel.open must run synchronously inside the user gesture;
     // any await before it drops the gesture and the open is rejected. The
     // action click gives us the window id synchronously, so open right away.
@@ -1809,9 +1799,7 @@ chrome.action.onClicked.addListener((tab) => {
 // Pre-rewrite builds set openPanelOnActionClick so the icon opened the side
 // panel; that behavior persists in Chrome and would swallow onClicked.
 // Clear it explicitly so the icon click reaches the handler above.
-if (import.meta.env.EXT_TARGET !== 'firefox') {
-  void chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: false }).catch(() => {})
-}
+void chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: false }).catch(() => {})
 
 armBridgeKeepalive()
 refreshBadge()

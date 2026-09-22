@@ -287,9 +287,9 @@ export class BridgeServer {
         // So the ID itself is pinned to the extension this repo builds
         // (BRIDGE_EXTENSION_IDS, derived from the manifest's public key), and
         // the extension also reports its own `chrome.runtime.id` in `hello` —
-        // the two must agree. Firefox `moz-extension://` origins carry a
-        // per-install UUID and are not a stable identity boundary, so they must
-        // present the bearer token (this fork does not ship a Firefox build).
+        // the two must agree. An extension this repo does not build is absent
+        // from BRIDGE_EXTENSION_IDS, so it must present the bearer token instead
+        // of inheriting the zero-config path.
         // Non-loopback remotes must present the bearer token as well.
         const loopbackNoToken = isLoopbackAddress(remoteAddress)
           && typeof origin === 'string'

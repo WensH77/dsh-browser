@@ -54,9 +54,9 @@ if (typeof globalThis.Window !== 'undefined'
 }
 
 if (typeof globalThis.PointerEvent === 'undefined') {
-  // Every real target (Chrome MV3, Firefox) ships `PointerEvent`, so this only
-  // fills the test environment: `MouseEvent` takes the same coordinate, button,
-  // and detail options the pointer path passes.
+  // Chrome MV3 ships `PointerEvent`, so this only fills the test environment:
+  // `MouseEvent` takes the same coordinate, button, and detail options the
+  // pointer path passes.
   Object.defineProperty(globalThis, 'PointerEvent', {
     configurable: true,
     writable: true,

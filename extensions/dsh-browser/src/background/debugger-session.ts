@@ -31,7 +31,7 @@ export type CdpFailureReason =
   | 'restricted-page'
   /** The session ended between two commands. */
   | 'detached'
-  /** No `chrome.debugger` in this build (Firefox). */
+  /** The `chrome.debugger` API is unavailable in this extension instance. */
   | 'unsupported'
   /** Anything else; the message carries Chrome's own text. */
   | 'unknown'
@@ -81,7 +81,7 @@ function foreignDebuggerError(): CaptureError {
   )
 }
 
-/** Whether this build can use `chrome.debugger` at all (Firefox cannot). */
+/** Whether this extension can use `chrome.debugger` right now. */
 export function visionAvailable(): boolean {
   return typeof chrome !== 'undefined' && chrome.debugger !== undefined
 }
@@ -185,7 +185,7 @@ export interface DebuggerLease {
  */
 export async function acquireDebuggerSession(tabId: number, need: DebuggerDomains = {}): Promise<DebuggerLease> {
   if (!visionAvailable()) {
-    throw new CaptureError('unsupported', 'This browser build has no chrome.debugger API (Firefox), so screenshots, console, network, and evaluation are unavailable.', 'unsupported')
+    throw new CaptureError('unsupported', 'This extension has no chrome.debugger API, so screenshots, console, network, and evaluation are unavailable. Reload the extension from chrome://extensions.', 'unsupported')
   }
   await withLock(tabId, async () => {
     const session = sessionFor(tabId)
