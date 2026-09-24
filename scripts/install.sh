@@ -399,4 +399,4 @@ fi
 print_pair "以后更新：重跑同一条安装命令，再在 Chrome 点一次「重新加载」。" "Later updates: rerun the same install command, then one more “Reload” in Chrome."
 print_pair "   $UPDATE_COMMAND" "   $UPDATE_COMMAND"
 printf '\n'
-print_pair "如果用得顺手，欢迎在 GitHub 点个 Star 支持我们：https://github.com/WensH77/dsh-browser" "If dsh-browser is useful to you, we'd appreciate a Star on GitHub: https://github.com/WensH77/dsh-browser"
+print_pair "本仓库 fork 自 omdsh-dev/dsh-browser（原始仓库），支持请到：https://github.com/omdsh-dev/dsh-browser" "This repository is a fork of omdsh-dev/dsh-browser (the original project) — support it there: https://github.com/omdsh-dev/dsh-browser"
