@@ -5,6 +5,9 @@ node_modules/
 !benchmark/lib/**
 **/dist/
 **/dist-firefox/
+# The Chrome extension copied into the plugin package by scripts/copy-extension.mjs:
+# a build output that travels inside the packaged tarball, never in git.
+packages/browser/bridge-browser/extension/
 **/coverage/
 # Local mock-up and scratch directories, plus the Finder metadata that comes with them:
 # working files, not part of the project that gets distributed.

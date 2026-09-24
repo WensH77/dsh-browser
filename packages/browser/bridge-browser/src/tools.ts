@@ -16,6 +16,7 @@
  * @module
  */
 
+import { spawn } from 'node:child_process'
 import { readFile, writeFile } from 'node:fs/promises'
 import { basename, dirname, join } from 'node:path'
 import * as XLSX from 'xlsx'
@@ -23,6 +24,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { AttachmentId, type ImageAttachmentRef, type ImageMediaType } from '@deepseek-ai/dsh-attachment'
 import { defineTool, type ToolDefinition, type ToolRunContext } from '@deepseek-ai/dsh-tools'
 import {
+  BRIDGE_PROTO,
   BRIDGE_TOOLSET,
   DEBUG_TOOL_NAMES,
   GDRIVE_UNSUPPORTED_HINT,
@@ -33,13 +35,37 @@ import {
   TOOLSET_SELECTOR_TARGETS,
   TOOLSET_SLIDES_OPEN_PAGE,
   TOOLSET_TEXT_FIND,
+  declaredProto,
+  declaredToolset,
   gdriveExportKind,
   parseBindableTabs,
+  type BridgeCaps,
 } from './protocol.ts'
+import { syncBundledExtension, type SyncResult } from './extension-assets.ts'
 import type { BridgeServer } from './server.ts'
 
 /** Re-exported from the shared wire contract so both halves use one list. */
 export { DEBUG_TOOL_NAMES }
+
+/**
+ * Host seams used by the always-on `browser_status` / `browser_setup` tools.
+ *
+ * Every field is optional and defaults to the real machine. They exist so a
+ * test of those two tools never writes the user's mirror directory and never
+ * launches a browser, and so `browser_status` can report the extension's own
+ * `hello` fields (id, declared proto/toolset) that `BridgeServer` exposes only
+ * as a version getter and a debugger flag.
+ */
+export interface BrowserHostHooks {
+  /** Capabilities of the connected extension; absent when the host cannot say. */
+  clientCaps?(): BridgeCaps | undefined
+  /** Refresh the mirror Chrome loads; defaults to {@link syncBundledExtension}. */
+  syncExtension?(target?: string): Promise<SyncResult>
+  /** Open `chrome://extensions`; false when no browser could be opened. */
+  openExtensionsPage?(): Promise<boolean>
+  /** Put text on the system clipboard; false when no clipboard tool exists. */
+  copyToClipboard?(text: string): Promise<boolean>
+}
 
 /** Options resolved from plugin config before tool registration. */
 export interface BrowserToolsOptions {
@@ -49,6 +75,8 @@ export interface BrowserToolsOptions {
   snapshotMaxChars: number
   /** Upper bound on interactive inventory items per snapshot. */
   maxInteractiveItems: number
+  /** Host seams for the status/setup tools; production leaves this out. */
+  host?: BrowserHostHooks
 }
 
 /** Canonical tool result: one text payload. */
@@ -782,6 +810,248 @@ const LEGACY_FIND_REFUSAL = 'This build of the browser extension cannot search p
   + 'for the whole page (or a selector) and search it yourself, or ask the user to reload the extension.'
 
 /**
+ * The two always-on host tools.
+ *
+ * Exported so a caller (or a test) can name them without re-typing the strings;
+ * they are deliberately absent from every gated list — see the registration in
+ * {@link registerBrowserTools}.
+ */
+export const HOST_TOOL_NAMES = ['browser_status', 'browser_setup'] as const
+
+/** Text `browser_status` prints where a field cannot be known. */
+const UNKNOWN_OLDER_BUILD = 'unknown (older build)'
+
+/** One fix a version skew implies, plus the sentence that states it. */
+interface Skew {
+  verdict: 'consistent' | 'reload-extension' | 'restart-dsh' | 'unknown'
+  text: string
+}
+
+/**
+ * Compare the connected extension's declared versions against this plugin's.
+ *
+ * Both direction are separate facts: an extension newer than the plugin is
+ * fatal and only a dsh restart fixes it, while an older one is accepted with a
+ * smaller tool surface and a reload is the fix. Neither may be reported as the
+ * other — the two words send the user to different places.
+ *
+ * @param caps - the extension's last reported capabilities.
+ * @returns the verdict and the text stating it.
+ */
+function versionSkew(caps: BridgeCaps | undefined): Skew {
+  if (caps === undefined) {
+    return { verdict: 'unknown', text: 'unknown — the host holds no capability sample for this connection' }
+  }
+  const proto = declaredProto(caps)
+  const toolset = declaredToolset(caps)
+  const mine = `this plugin speaks proto ${BRIDGE_PROTO} / toolset ${BRIDGE_TOOLSET}`
+  if (proto > BRIDGE_PROTO) {
+    return { verdict: 'restart-dsh', text: `restart dsh — the extension speaks proto ${proto}, ${mine}` }
+  }
+  if (proto < BRIDGE_PROTO || toolset < BRIDGE_TOOLSET) {
+    return { verdict: 'reload-extension', text: `reload the extension — it declares proto ${proto} / toolset ${toolset}, ${mine}` }
+  }
+  // A declared toolset above this plugin's own is additive: the extension
+  // implements at least what this host asks for, so nothing is stale.
+  return { verdict: 'consistent', text: `consistent — the extension declares proto ${proto} / toolset ${toolset}, ${mine}` }
+}
+
+/**
+ * " at <directory>", or nothing when the pass could name no directory.
+ *
+ * An empty target is part of the contract (a mirror pass that never reached the
+ * path resolver reports none), and "up-to-date at " would read as a truncated
+ * sentence rather than as an unknown location.
+ */
+function atDir(target: string): string {
+  return target === '' ? '' : ` at ${target}`
+}
+
+/** " (target <directory>)", or nothing when the pass could name no directory. */
+function targetSuffix(target: string): string {
+  return target === '' ? '' : ` (target ${target})`
+}
+
+/**
+ * " — <reason>", or nothing when the pass reported none.
+ *
+ * A *successful* pass carries a reason too when the source held entries it did
+ * not mirror (a symlink, FIFO, socket, or device node). Dropping that note would
+ * make "the mirror is complete" and "part of the build was quietly skipped"
+ * print identically, which is the silent loss this whole path exists to avoid.
+ * An empty string is treated as no reason, so a caller cannot grow a trailing
+ * separator out of a blank field.
+ */
+function reasonSuffix(reason: string | undefined): string {
+  return reason === undefined || reason === '' ? '' : ` — ${reason}`
+}
+
+/** One line describing the mirror directory Chrome loads. */
+function mirrorLine(result: SyncResult): string {
+  switch (result.status) {
+    case 'up-to-date':
+      return `extension files: up-to-date${atDir(result.target)}${reasonSuffix(result.reason)}`
+    case 'synced':
+      return `extension files: refreshed just now (${result.files} files)${atDir(result.target)}${reasonSuffix(result.reason)}`
+    case 'unavailable':
+      return `extension files: not bundled with this plugin — ${result.reason ?? 'no bundled extension directory'}`
+    case 'failed':
+      return `extension files: refresh failed — ${result.reason ?? 'unknown error'}${targetSuffix(result.target)}`
+  }
+}
+
+/**
+ * The single next action, from the connection state, the version skew and the
+ * mirror: exactly one step, most blocking fact first.
+ *
+ * `restart dsh` outranks the mirror on purpose — a restart re-syncs the mirror
+ * anyway, so naming the mirror first would send the user on a detour. A failed
+ * mirror pass outranks the reload hint for the opposite reason: `next: none`
+ * under a failure line reads as "nothing to do" while the retry exists, and the
+ * retry (`browser_setup`) also opens the page where the reload happens.
+ *
+ * @param connected - whether an extension is connected right now.
+ * @param skew - the version comparison.
+ * @param sync - the mirror pass that just ran.
+ * @returns one short instruction.
+ */
+function nextAction(connected: boolean, skew: Skew, sync: SyncResult): string {
+  if (!connected) {
+    if (sync.status === 'unavailable') return 'install the extension from a checkout — this plugin ships no extension build'
+    if (sync.status === 'failed') return 'run browser_setup to retry refreshing the extension files'
+    if (sync.status === 'synced') return 'load the extension on chrome://extensions — the files were just refreshed'
+    return 'run browser_setup to open chrome://extensions and load the extension'
+  }
+  if (skew.verdict === 'restart-dsh') return 'restart dsh so it loads the newer plugin build'
+  if (sync.status === 'failed') return 'run browser_setup to retry refreshing the extension files'
+  if (sync.status === 'synced') return 'reload the extension from chrome://extensions so the refreshed files load'
+  if (skew.verdict === 'reload-extension') return 'reload the extension from chrome://extensions'
+  return 'none — the bridge is ready'
+}
+
+/** The full `browser_status` text: every fact, then exactly one next action. */
+export function browserStatusText(server: BridgeServer, caps: BridgeCaps | undefined, sync: SyncResult): string {
+  const connected = server.hasConnection()
+  const skew = versionSkew(caps)
+  const lines = [
+    'browser bridge status',
+    `plugin: proto ${BRIDGE_PROTO}, toolset ${BRIDGE_TOOLSET}`,
+    `extension: ${connected ? 'connected' : 'not connected'}`,
+  ]
+  if (connected) {
+    // The version getter answers undefined both when nothing is connected and
+    // when the build predates the field; hasConnection above separates them.
+    lines.push(
+      `extension id: ${caps?.extensionId ?? UNKNOWN_OLDER_BUILD}`,
+      `extension version: ${server.clientExtensionVersion() ?? UNKNOWN_OLDER_BUILD}`,
+      `extension declares: proto ${declaredProto(caps)}, toolset ${declaredToolset(caps)}`,
+    )
+  }
+  lines.push(`version skew: ${skew.text}`, mirrorLine(sync), `next: ${nextAction(connected, skew, sync)}`)
+  return lines.join('\n')
+}
+
+/** The full `browser_setup` text: what was refreshed, then the one manual step. */
+export function browserSetupText(sync: SyncResult, opened: boolean, copied: boolean): string {
+  const refreshed = sync.status === 'synced'
+  const lines = [
+    'browser setup',
+    mirrorLine(sync),
+    opened
+      ? 'chrome://extensions: opened in the browser'
+      : 'chrome://extensions: could not be opened automatically — open it in the browser',
+  ]
+  // With no target there is no path to name — a bare "(…)" would read as a
+  // truncated message, so the line is only added when a path exists.
+  if (copied && sync.target !== '') lines.push(`clipboard: the load path is on the clipboard (${sync.target})`)
+  const next = sync.status === 'unavailable'
+    ? 'install from a checkout that has the extension build, then call browser_setup again'
+    : sync.status === 'failed'
+      ? 'fix the reported cause, then call browser_setup again'
+      : refreshed
+        ? 'reload the extension on chrome://extensions so the refreshed files load'
+        : 'on chrome://extensions, load or reload the extension — the files are current'
+  // Kept even though it duplicates neither the open nor the clipboard line: this
+  // is the sentence the model reads to tell the user what to do next.
+  lines.push(`next: ${next}`)
+  return lines.join('\n')
+}
+
+/** Resolve true when a spawned command exits 0; never throws and never rejects. */
+function runQuietly(command: string, args: readonly string[], stdin?: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    try {
+      const child = spawn(command, [...args], { stdio: stdin === undefined ? 'ignore' : ['pipe', 'ignore', 'ignore'] })
+      child.once('error', () => { resolve(false) })
+      child.once('exit', (code) => { resolve(code === 0) })
+      if (stdin !== undefined) {
+        // pbcopy can exit before reading everything; an EPIPE on this stream
+        // must stay a "no clipboard" answer rather than an unhandled error.
+        child.stdin?.on('error', () => {})
+        child.stdin?.end(stdin)
+      }
+    } catch {
+      resolve(false)
+    }
+  })
+}
+
+/**
+ * Open `chrome://extensions` in a browser.
+ *
+ * `chrome://` is not something the OS URL handler can resolve, so on macOS
+ * Chrome is named explicitly (app name first, bundle id as fallback); elsewhere
+ * the platform opener is tried. A failure resolves false — the caller tells the
+ * user to open the page by hand.
+ *
+ * @returns whether some browser was asked to open the page successfully.
+ */
+function openExtensionsPage(): Promise<boolean> {
+  const url = 'chrome://extensions'
+  if (process.platform === 'darwin') {
+    return runQuietly('open', ['-a', 'Google Chrome', url])
+      .then((opened) => opened || runQuietly('open', ['-b', 'com.google.Chrome', url]))
+  }
+  if (process.platform === 'win32') return runQuietly('cmd', ['/c', 'start', '', 'chrome', url])
+  return runQuietly('xdg-open', [url])
+}
+
+/**
+ * Put text on the system clipboard.
+ *
+ * pbcopy is the one clipboard tool this host can count on, so anywhere else
+ * this resolves false and the caller skips the step silently.
+ *
+ * @param text - the text to copy.
+ * @returns whether the clipboard now holds it.
+ */
+function copyWithPbcopy(text: string): Promise<boolean> {
+  if (process.platform !== 'darwin') return Promise.resolve(false)
+  return runQuietly('pbcopy', [], text)
+}
+
+/**
+ * Run one mirror pass without ever rejecting.
+ *
+ * `syncBundledExtension` reports its own I/O faults as `failed`; this also
+ * covers an injected implementation that throws, because a status tool that
+ * throws is exactly the tool that was needed most. The synthesized result names
+ * no target on purpose: resolving the mirror path here would be a second thing
+ * that can throw inside a catch, and the empty target is the same "no directory
+ * to report" contract `syncBundledExtension` uses.
+ *
+ * @param sync - the mirror implementation.
+ * @returns the pass result, real or synthesized.
+ */
+async function safeSync(sync: (target?: string) => Promise<SyncResult>): Promise<SyncResult> {
+  try {
+    return await sync()
+  } catch (error: unknown) {
+    return { status: 'failed', target: '', files: 0, reason: errText(error) }
+  }
+}
+
+/**
  * Register the browser tools on `ctx.tools`. Disposers are returned for the
  * caller's effect to own; each tool's cooperative timeout budget is declared
  * so `@deepseek-ai/dsh-timeout-policy` can enforce it, and every execute
@@ -914,6 +1184,46 @@ export function registerBrowserTools(
     },
   })
   disposers.set(gdrive.name, ctx.tools.register(gdrive))
+
+  // Status and setup are host-side facts, not extension actions: they answer in
+  // every connection state, so they are registered unconditionally and appear
+  // in neither `debugNames` nor `toolsetNames`. A down-levelled or
+  // debugging-disabled extension must still be able to ask why nothing works.
+  const host = options.host ?? {}
+  const syncExtension = host.syncExtension ?? syncBundledExtension
+  const openExtensions = host.openExtensionsPage ?? openExtensionsPage
+  const copyPath = host.copyToClipboard ?? copyWithPbcopy
+  const clientCaps = host.clientCaps ?? ((): BridgeCaps | undefined => undefined)
+  const status = defineTool({
+    name: 'browser_status',
+    description: 'Report bridge health: connection, extension id and version, protocol/toolset match, mirror freshness, '
+      + 'and the single next action. Use it first when a browser tool cannot connect.',
+    parameters: {},
+    timeoutMs: options.toolTimeoutMs,
+    output: TEXT_OUTPUT,
+    execute: async () => ({ text: browserStatusText(bridge, clientCaps(), await safeSync(syncExtension)) }),
+  })
+  const setup = defineTool({
+    name: 'browser_setup',
+    description: 'Refresh the extension files Chrome loads, open chrome://extensions, and copy the load path. '
+      + 'Use on a first install or when browser_status reports refreshed files.',
+    parameters: {},
+    timeoutMs: options.toolTimeoutMs,
+    output: TEXT_OUTPUT,
+    execute: async () => {
+      const result = await safeSync(syncExtension)
+      // The two side effects are independent and both best-effort: a missing
+      // clipboard tool must not stop the extensions page from opening, and
+      // neither failure turns into a tool error. With no target there is no
+      // path to copy either, so the clipboard step is skipped.
+      const [opened, copied] = await Promise.all([
+        openExtensions().catch(() => false),
+        result.target === '' ? Promise.resolve(false) : copyPath(result.target).catch(() => false),
+      ])
+      return { text: browserSetupText(result, opened, copied) }
+    },
+  })
+  for (const tool of [status, setup]) disposers.set(tool.name, ctx.tools.register(tool))
 
   return {
     setDebugToolsEnabled(enabled: boolean): void {

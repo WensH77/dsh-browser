@@ -175,6 +175,27 @@ describe('BridgeClient connection probe', () => {
 })
 
 describe('BridgeClient handshake version', () => {
+  /**
+   * Drive one handshake to the point where hello is on the wire and return its
+   * caps. `chromeStub` replaces the global so each defensive-read case is
+   * exercised the way the real background runs it.
+   */
+  async function helloCaps(chromeStub: unknown): Promise<Record<string, unknown>> {
+    vi.useFakeTimers()
+    vi.stubGlobal('WebSocket', FakeWebSocket)
+    vi.stubGlobal('chrome', chromeStub)
+    const client = new BridgeClient({ onStateChange: () => {}, onFrame: () => {}, onHelloOk: () => {}, onNotice: () => {} })
+
+    client.start('ws://127.0.0.1:3080/ext/bridge', '')
+    await vi.advanceTimersByTimeAsync(0)
+    const socket = FakeWebSocket.instances.at(-1)!
+    socket.open()
+    await vi.advanceTimersByTimeAsync(0)
+    const hello = JSON.parse(socket.sent[0]!) as { t: string; caps: Record<string, unknown> }
+    client.stop()
+    return hello.caps
+  }
+
   it('declares the protocol and toolset it speaks, with no legacy marker', async () => {
     vi.useFakeTimers()
     vi.stubGlobal('WebSocket', FakeWebSocket)
@@ -194,6 +215,29 @@ describe('BridgeClient handshake version', () => {
     expect(hello.caps.extensionId).toBe(EXTENSION_ID)
     expect(Object.keys(hello.caps)).not.toContain('textOnly')
     client.stop()
+  })
+
+  it('reports the installed build version, so the host can say "reload the extension"', async () => {
+    const caps = await helloCaps({ runtime: { id: EXTENSION_ID, getManifest: () => ({ version: '0.1.2' }) } })
+
+    expect(caps.extensionVersion).toBe('0.1.2')
+    expect(caps.extensionId).toBe(EXTENSION_ID)
+  })
+
+  it('omits the version rather than sending an empty one when it cannot be read', async () => {
+    // `hello` caps reaching the wire as `extensionVersion: ''` would be refused
+    // as malformed and cost the whole connection, so an unreadable version has
+    // to look exactly like a build that predates the field.
+    const missingApi = await helloCaps({ runtime: { id: EXTENSION_ID } })
+    expect(Object.keys(missingApi)).not.toContain('extensionVersion')
+    expect(missingApi.extensionId).toBe(EXTENSION_ID)
+
+    const noVersion = await helloCaps({ runtime: { id: EXTENSION_ID, getManifest: () => ({}) } })
+    expect(Object.keys(noVersion)).not.toContain('extensionVersion')
+
+    const noChrome = await helloCaps(undefined)
+    expect(Object.keys(noChrome)).not.toContain('extensionVersion')
+    expect(Object.keys(noChrome)).not.toContain('extensionId')
   })
 
   it('surfaces the host\'s refusal reason instead of failing silently', async () => {

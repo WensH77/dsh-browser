@@ -6,12 +6,16 @@ import {
   BROWSER_TOOL_NAMES,
   DEBUG_TOOL_NAMES,
   GOOGLE_DRIVE_TIMEOUT_MS,
+  HOST_TOOL_NAMES,
   MAX_WAIT_MS,
   TOOLSET_TOOL_NAMES,
   clampWaitMs,
   registerBrowserTools,
 } from '../src/tools.ts'
+import type { SyncResult } from '../src/extension-assets.ts'
+import type { BridgeCaps } from '../src/protocol.ts'
 import {
+  BRIDGE_PROTO,
   BRIDGE_TOOLSET, LEGACY_TOOLSET, TOOLSET_PAGE_IMAGE, TOOLSET_POINTER_CLICK, TOOLSET_SELECTOR_TARGETS,
   TOOLSET_TEXT_FIND,
 } from '../src/protocol.ts'
@@ -120,11 +124,11 @@ describe('registerBrowserTools', () => {
     const tools = registerBrowserTools(ctx, bridge, { toolTimeoutMs: 1_000, snapshotMaxChars: 12_000, maxInteractiveItems: 60 })
 
     const alwaysOn = [...BROWSER_TOOL_NAMES].filter((name) => !DEBUG_TOOL_NAMES.includes(name))
-    expect(tools.names().sort()).toEqual([...alwaysOn, 'browser_bind_interactive', 'google_drive_export'].sort())
+    expect(tools.names().sort()).toEqual([...alwaysOn, ...HOST_TOOL_NAMES, 'browser_bind_interactive', 'google_drive_export'].sort())
     for (const name of DEBUG_TOOL_NAMES) expect(registered.some((r) => r.name === name)).toBe(false)
 
     tools.setDebugToolsEnabled(true)
-    expect(tools.names().sort()).toEqual([...BROWSER_TOOL_NAMES, 'browser_bind_interactive', 'google_drive_export'].sort())
+    expect(tools.names().sort()).toEqual([...BROWSER_TOOL_NAMES, ...HOST_TOOL_NAMES, 'browser_bind_interactive', 'google_drive_export'].sort())
 
     tools.setDebugToolsEnabled(false)
     for (const name of DEBUG_TOOL_NAMES) expect(registered.some((r) => r.name === name)).toBe(false)
@@ -585,5 +589,389 @@ describe('registerBrowserTools', () => {
     const tool = registered.find((r) => r.name === 'browser_click')!
     const output = tool.definition.output as { render: (args: unknown, value: unknown) => unknown }
     expect(output.render({}, { text: 'hello' })).toEqual([{ type: 'text', text: 'hello' }])
+  })
+
+  describe('browser_status / browser_setup', () => {
+    const EXT_ID = 'abcdefghijklmnopabcdefghijklmnop'
+    const BUDGETS = { toolTimeoutMs: 1_000, snapshotMaxChars: 12_000, maxInteractiveItems: 60 }
+    const CURRENT: SyncResult = { status: 'up-to-date', target: '/tmp/mirror', source: '/tmp/dist', files: 12 }
+    const REFRESHED: SyncResult = { status: 'synced', target: '/tmp/mirror', source: '/tmp/dist', files: 12 }
+    const UNAVAILABLE: SyncResult = { status: 'unavailable', target: '/tmp/mirror', files: 0, reason: 'no bundled extension with a manifest.json' }
+    const FAILED: SyncResult = { status: 'failed', target: '/tmp/mirror', files: 0, reason: 'EACCES: permission denied' }
+    const CAPS: BridgeCaps = {
+      proto: BRIDGE_PROTO,
+      toolset: BRIDGE_TOOLSET,
+      extensionId: EXT_ID,
+      extensionVersion: '0.1.7',
+      snapshotMaxChars: 32_000,
+      maxInteractiveItems: 60,
+    }
+
+    /**
+     * Both host tools read live server accessors and three injected seams; this
+     * harness gives every one of them a value the test can name, so no test
+     * touches the real mirror directory or launches a browser.
+     */
+    function makeHostHarness(options: {
+      connected?: boolean
+      version?: string | undefined
+      caps?: BridgeCaps | undefined
+      sync?: SyncResult
+      syncThrows?: boolean
+      opened?: boolean
+      copied?: boolean
+      debuggerAllowed?: boolean
+    } = {}) {
+      const { ctx, registered } = makeHarness({}, options.debuggerAllowed ?? false)
+      const syncExtension = vi.fn(async (): Promise<SyncResult> => {
+        if (options.syncThrows === true) throw new Error('mirror exploded')
+        return options.sync ?? CURRENT
+      })
+      const openExtensionsPage = vi.fn(async () => options.opened ?? true)
+      const copyToClipboard = vi.fn(async () => options.copied ?? true)
+      const bridge = {
+        requestTool: vi.fn(async () => ({ text: 'ok' })),
+        clientDebugger: () => options.debuggerAllowed ?? false,
+        hasConnection: () => options.connected ?? false,
+        clientExtensionVersion: () => options.version,
+      } as unknown as BridgeServer
+      const tools = registerBrowserTools(ctx, bridge, {
+        ...BUDGETS,
+        host: {
+          clientCaps: () => options.caps,
+          syncExtension,
+          openExtensionsPage,
+          copyToClipboard,
+        },
+      })
+      return { ctx, registered, tools, syncExtension, openExtensionsPage, copyToClipboard }
+    }
+
+    /** Run one host tool and return its text. */
+    async function runText(registered: { name: string; definition: Record<string, unknown> }[], name: string): Promise<string> {
+      const tool = registered.find((entry) => entry.name === name)
+      if (tool === undefined) throw new Error(`${name} is not registered`)
+      const value = await (tool.definition.execute as (a: unknown, e: unknown) => Promise<{ text: string }>)(
+        {},
+        { signal: new AbortController().signal },
+      )
+      return value.text
+    }
+
+    const lastLine = (text: string): string => text.split('\n').at(-1)!
+
+    /** The one mirror line, so a test can pin it character for character. */
+    const mirrorLineOf = (text: string): string =>
+      text.split('\n').find((line) => line.startsWith('extension files:'))!
+
+    it('reports the plugin side and the mirror with nothing connected', async () => {
+      const h = makeHostHarness()
+      const text = await runText(h.registered, 'browser_status')
+
+      expect(text).toContain(`plugin: proto ${BRIDGE_PROTO}, toolset ${BRIDGE_TOOLSET}`)
+      expect(text).toContain('extension: not connected')
+      expect(text).toContain('extension files: up-to-date at /tmp/mirror')
+      // No id/version line without a connection: there is nothing to report.
+      expect(text).not.toContain('extension version:')
+      expect(lastLine(text)).toBe('next: run browser_setup to open chrome://extensions and load the extension')
+      // "One next action" is a property of the text, not of the writer.
+      expect(text.match(/^next: /gm)).toHaveLength(1)
+    })
+
+    it('reports the connected extension id, version and both declared levels', async () => {
+      const h = makeHostHarness({ connected: true, version: '0.1.7', caps: CAPS })
+      const text = await runText(h.registered, 'browser_status')
+
+      expect(text).toContain('extension: connected')
+      expect(text).toContain(`extension id: ${EXT_ID}`)
+      expect(text).toContain('extension version: 0.1.7')
+      expect(text).toContain(`extension declares: proto ${BRIDGE_PROTO}, toolset ${BRIDGE_TOOLSET}`)
+      expect(text).toContain('version skew: consistent')
+      expect(lastLine(text)).toBe('next: none — the bridge is ready')
+      expect(text.match(/^next: /gm)).toHaveLength(1)
+    })
+
+    it('calls a connected build that reports no version "unknown (older build)"', async () => {
+      // `clientExtensionVersion()` answers undefined both for "nothing is
+      // connected" and for a build that predates the field; hasConnection() is
+      // what tells the two apart, and the wording must not claim a mismatch.
+      const h = makeHostHarness({ connected: true, version: undefined, caps: { ...CAPS, extensionVersion: undefined } })
+      const text = await runText(h.registered, 'browser_status')
+
+      expect(text).toContain('extension: connected')
+      expect(text).toContain('extension version: unknown (older build)')
+      expect(text).toContain('version skew: consistent')
+      expect(text).not.toContain('extension version: undefined')
+    })
+
+    it('names a reload for an older extension and a dsh restart for a newer one', async () => {
+      const older = makeHostHarness({
+        connected: true,
+        version: '0.1.0',
+        caps: { ...CAPS, toolset: TOOLSET_SELECTOR_TARGETS },
+      })
+      const olderText = await runText(older.registered, 'browser_status')
+      expect(olderText).toContain('version skew: reload the extension')
+      expect(olderText).toContain(`it declares proto ${BRIDGE_PROTO} / toolset ${TOOLSET_SELECTOR_TARGETS}`)
+      expect(lastLine(olderText)).toBe('next: reload the extension from chrome://extensions')
+
+      // The other direction is fatal (the host refuses the handshake), so it
+      // must never be reported with the reload wording.
+      const newer = makeHostHarness({
+        connected: true,
+        version: '0.2.0',
+        caps: { ...CAPS, proto: BRIDGE_PROTO + 1 },
+      })
+      const newerText = await runText(newer.registered, 'browser_status')
+      expect(newerText).toContain(`version skew: restart dsh — the extension speaks proto ${BRIDGE_PROTO + 1}`)
+      expect(newerText).not.toContain('reload the extension —')
+      expect(lastLine(newerText)).toBe('next: restart dsh so it loads the newer plugin build')
+    })
+
+    it('asks for a reload when the mirror was just refreshed under a running extension', async () => {
+      const h = makeHostHarness({ connected: true, version: '0.1.7', caps: CAPS, sync: REFRESHED })
+      const text = await runText(h.registered, 'browser_status')
+
+      expect(text).toContain('extension files: refreshed just now (12 files) at /tmp/mirror')
+      expect(lastLine(text)).toBe('next: reload the extension from chrome://extensions so the refreshed files load')
+    })
+
+    it('never throws and states the reason for every mirror outcome', async () => {
+      for (const sync of [CURRENT, REFRESHED, UNAVAILABLE, FAILED]) {
+        for (const connected of [false, true]) {
+          const h = makeHostHarness({ connected, version: '0.1.7', caps: CAPS, sync })
+          const text = await runText(h.registered, 'browser_status')
+          expect(text).toContain('browser bridge status')
+          expect(text.match(/^next: /gm)).toHaveLength(1)
+        }
+      }
+      const unavailable = await runText(makeHostHarness({ sync: UNAVAILABLE }).registered, 'browser_status')
+      expect(unavailable).toContain('extension files: not bundled with this plugin — no bundled extension with a manifest.json')
+      expect(lastLine(unavailable)).toBe('next: install the extension from a checkout — this plugin ships no extension build')
+
+      const failed = await runText(makeHostHarness({ sync: FAILED }).registered, 'browser_status')
+      expect(failed).toContain('extension files: refresh failed — EACCES: permission denied')
+      expect(lastLine(failed)).toBe('next: run browser_setup to retry refreshing the extension files')
+
+      // Same mirror failure while connected: the failure line may not sit above
+      // `next: none` — a retry exists and is the action to name.
+      const failedOnline = await runText(
+        makeHostHarness({ connected: true, version: '0.1.7', caps: CAPS, sync: FAILED }).registered,
+        'browser_status',
+      )
+      expect(failedOnline).toContain('extension: connected')
+      expect(failedOnline).toContain('version skew: consistent')
+      expect(lastLine(failedOnline)).toBe('next: run browser_setup to retry refreshing the extension files')
+
+      // The bigger action still wins: restarting dsh re-syncs the mirror too, so
+      // a failed pass must not push the restart out of the next line.
+      const failedNewer = await runText(
+        makeHostHarness({
+          connected: true,
+          version: '0.2.0',
+          caps: { ...CAPS, proto: BRIDGE_PROTO + 1 },
+          sync: FAILED,
+        }).registered,
+        'browser_status',
+      )
+      expect(lastLine(failedNewer)).toBe('next: restart dsh so it loads the newer plugin build')
+
+      // A throwing seam is the worst case this tool exists for: it must still
+      // answer, with the fault as the reason.
+      const thrown = await runText(makeHostHarness({ syncThrows: true }).registered, 'browser_status')
+      expect(thrown).toContain('refresh failed — mirror exploded')
+      expect(thrown).toContain('browser bridge status')
+    })
+
+    it('refreshes files, opens the extensions page and copies the load path', async () => {
+      const h = makeHostHarness({ sync: REFRESHED, opened: true, copied: true })
+      const text = await runText(h.registered, 'browser_setup')
+
+      expect(text).toContain('extension files: refreshed just now (12 files) at /tmp/mirror')
+      expect(text).toContain('chrome://extensions: opened in the browser')
+      expect(text).toContain('clipboard: the load path is on the clipboard (/tmp/mirror)')
+      expect(lastLine(text)).toBe('next: reload the extension on chrome://extensions so the refreshed files load')
+      expect(h.syncExtension).toHaveBeenCalledTimes(1)
+      expect(h.openExtensionsPage).toHaveBeenCalledTimes(1)
+      expect(h.copyToClipboard).toHaveBeenCalledWith('/tmp/mirror')
+    })
+
+    it('is idempotent: a second run writes nothing and only describes the manual step', async () => {
+      const refreshed = makeHostHarness({ sync: REFRESHED })
+      await runText(refreshed.registered, 'browser_setup')
+      const current = makeHostHarness({ sync: CURRENT })
+      const second = await runText(current.registered, 'browser_setup')
+
+      expect(second).toContain('extension files: up-to-date at /tmp/mirror')
+      expect(second).not.toContain('refreshed')
+      expect(lastLine(second)).toBe('next: on chrome://extensions, load or reload the extension — the files are current')
+    })
+
+    it('skips the clipboard silently and survives an opener that fails', async () => {
+      const h = makeHostHarness({ sync: CURRENT, opened: false, copied: false })
+      const text = await runText(h.registered, 'browser_setup')
+
+      expect(text).not.toContain('clipboard:')
+      expect(text).toContain('chrome://extensions: could not be opened automatically — open it in the browser')
+      expect(text).toContain('/tmp/mirror')
+    })
+
+    it('reports, rather than throws, when the mirror cannot run at all', async () => {
+      const failed = await runText(makeHostHarness({ syncThrows: true }).registered, 'browser_setup')
+      expect(failed).toContain('extension files: refresh failed — mirror exploded')
+      expect(lastLine(failed)).toBe('next: fix the reported cause, then call browser_setup again')
+
+      const missing = await runText(makeHostHarness({ sync: UNAVAILABLE }).registered, 'browser_setup')
+      expect(lastLine(missing)).toBe('next: install from a checkout that has the extension build, then call browser_setup again')
+    })
+
+    it('omits the path instead of printing empty parentheses when no directory is known', async () => {
+      // An empty target is a legal pass result (the resolver faulted, so no
+      // directory was ever named); "(target )" and "clipboard … ()" would read
+      // as truncated text, and there is no path to copy either.
+      const NOWHERE: SyncResult = { status: 'failed', target: '', files: 0, reason: 'resolver exploded' }
+      const h = makeHostHarness({ sync: NOWHERE, opened: true, copied: true })
+
+      const statusText = await runText(h.registered, 'browser_status')
+      expect(statusText).toContain('extension files: refresh failed — resolver exploded')
+      expect(statusText).not.toContain('()')
+      expect(statusText).not.toMatch(/\(target\s*\)/)
+      expect(lastLine(statusText)).toBe('next: run browser_setup to retry refreshing the extension files')
+
+      const setupText = await runText(h.registered, 'browser_setup')
+      expect(setupText).toContain('extension files: refresh failed — resolver exploded')
+      expect(setupText).not.toContain('()')
+      expect(setupText).not.toContain('clipboard:')
+      expect(h.copyToClipboard).not.toHaveBeenCalled()
+
+      // The same rule for a non-failed pass that names no directory.
+      const unknownDir = makeHostHarness({ sync: { status: 'up-to-date', target: '', files: 0 } })
+      const currentText = await runText(unknownDir.registered, 'browser_status')
+      expect(currentText).toContain('extension files: up-to-date\n')
+      expect(currentText).not.toContain('up-to-date at')
+    })
+
+    it('shows the reason of a successful pass that skipped source entries', async () => {
+      // A synced/up-to-date pass reports a reason when the source held entries
+      // it did not mirror (this wording is what `skippedNote` emits). Both tools
+      // must surface it: the log does not, so dropping it here leaves "part of
+      // the build was skipped" invisible.
+      const SINGLE = 'skipped 1 non-regular entry in the extension source: sneaky.js'
+      const PLURAL = 'skipped 2 non-regular entries in the extension source: fifo, sneaky.js'
+      const cases: Array<{ sync: SyncResult; line: string }> = [
+        {
+          sync: { status: 'up-to-date', target: '/tmp/mirror', source: '/tmp/dist', files: 12, reason: SINGLE },
+          line: `extension files: up-to-date at /tmp/mirror — ${SINGLE}`,
+        },
+        {
+          sync: { status: 'synced', target: '/tmp/mirror', source: '/tmp/dist', files: 12, reason: PLURAL },
+          line: `extension files: refreshed just now (12 files) at /tmp/mirror — ${PLURAL}`,
+        },
+      ]
+      for (const { sync, line } of cases) {
+        const h = makeHostHarness({ sync })
+        expect(mirrorLineOf(await runText(h.registered, 'browser_status'))).toBe(line)
+        expect(mirrorLineOf(await runText(h.registered, 'browser_setup'))).toBe(line)
+      }
+    })
+
+    it('leaves a successful pass without a reason character-for-character unchanged', async () => {
+      // The note is appended only when there is one: an empty or absent reason
+      // must not grow a separator, an empty pair of parens, or trailing space.
+      const current = await runText(makeHostHarness({ sync: CURRENT }).registered, 'browser_status')
+      expect(mirrorLineOf(current)).toBe('extension files: up-to-date at /tmp/mirror')
+
+      const refreshed = await runText(makeHostHarness({ sync: REFRESHED }).registered, 'browser_setup')
+      expect(mirrorLineOf(refreshed)).toBe('extension files: refreshed just now (12 files) at /tmp/mirror')
+
+      const blankReason = await runText(
+        makeHostHarness({ sync: { status: 'up-to-date', target: '/tmp/mirror', files: 12, reason: '' } }).registered,
+        'browser_status',
+      )
+      expect(mirrorLineOf(blankReason)).toBe('extension files: up-to-date at /tmp/mirror')
+    })
+
+    it('answers without throwing when both the mirror seam and the path resolver fail', async () => {
+      // `safeSync`'s catch must not call anything that can throw: a resolver
+      // fault there turns the one tool that reports failures into the failure.
+      vi.resetModules()
+      vi.doMock('@deepseek-ai/dsh-home-paths', () => ({
+        dshHomePath: () => {
+          throw new Error('injected: dshHomePath exploded')
+        },
+      }))
+      try {
+        // Armed on purpose: a regression to `installedExtensionDir()` inside the
+        // catch would hit this mock and fail the test instead of passing quietly.
+        const homePaths = await import('@deepseek-ai/dsh-home-paths')
+        expect(() => homePaths.dshHomePath('browser-extension')).toThrow(/dshHomePath exploded/)
+
+        const fresh = await import('../src/tools.ts')
+        const registered: { name: string; definition: Record<string, unknown> }[] = []
+        const ctx = {
+          tools: {
+            register: (definition: { name: string }) => {
+              registered.push({ name: definition.name, definition: definition as Record<string, unknown> })
+              return () => {}
+            },
+          },
+          get: () => undefined,
+        } as unknown as Context
+        const bridge = {
+          requestTool: vi.fn(),
+          clientDebugger: () => false,
+          hasConnection: () => false,
+          clientExtensionVersion: () => undefined,
+        } as unknown as BridgeServer
+        fresh.registerBrowserTools(ctx, bridge, {
+          ...BUDGETS,
+          host: {
+            syncExtension: async () => { throw new Error('injected: mirror seam exploded') },
+          },
+        })
+
+        const statusText = await runText(registered, 'browser_status')
+        expect(statusText).toContain('extension files: refresh failed — injected: mirror seam exploded')
+        expect(statusText).not.toContain('()')
+        expect(lastLine(statusText)).toBe('next: run browser_setup to retry refreshing the extension files')
+
+        const setupText = await runText(registered, 'browser_setup')
+        expect(setupText).toContain('extension files: refresh failed — injected: mirror seam exploded')
+        expect(setupText).not.toContain('()')
+        expect(lastLine(setupText)).toBe('next: fix the reported cause, then call browser_setup again')
+      } finally {
+        vi.doUnmock('@deepseek-ai/dsh-home-paths')
+        vi.resetModules()
+      }
+    })
+
+    it('keeps both host tools when debugging is off and the toolset is down-levelled', async () => {
+      const h = makeHostHarness()
+      expect(h.tools.names()).toContain('browser_status')
+      expect(h.tools.names()).toContain('browser_setup')
+      // Neither name belongs to a gated group: this is the reason the tools
+      // below cannot be pruned, not an accident of the registration order.
+      for (const name of HOST_TOOL_NAMES) {
+        expect(DEBUG_TOOL_NAMES).not.toContain(name)
+        expect(TOOLSET_TOOL_NAMES).not.toContain(name)
+        expect(BROWSER_TOOL_NAMES).not.toContain(name)
+      }
+
+      h.tools.setDebugToolsEnabled(true)
+      h.tools.setDebugToolsEnabled(false)
+      h.tools.setClientToolset(LEGACY_TOOLSET)
+      expect(h.registered.some((r) => r.name === 'browser_status')).toBe(true)
+      expect(h.registered.some((r) => r.name === 'browser_setup')).toBe(true)
+      // A down-levelled surface still answers: the status text stays complete.
+      const text = await runText(h.registered, 'browser_status')
+      expect(text).toContain(`plugin: proto ${BRIDGE_PROTO}, toolset ${BRIDGE_TOOLSET}`)
+
+      h.tools.setClientToolset(BRIDGE_TOOLSET)
+      expect(h.registered.some((r) => r.name === 'browser_status')).toBe(true)
+      expect(h.registered.some((r) => r.name === 'browser_setup')).toBe(true)
+
+      h.tools.dispose()
+      expect(h.registered.some((r) => HOST_TOOL_NAMES.includes(r.name as typeof HOST_TOOL_NAMES[number]))).toBe(false)
+    })
   })
 })

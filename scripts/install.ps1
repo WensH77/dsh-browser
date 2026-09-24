@@ -23,7 +23,7 @@ $ProgressPreference = 'SilentlyContinue'
 # message into question marks on a non-Chinese install.
 try { [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false } catch { }
 
-$Repository = 'Lum1104/dsh-browser'
+$Repository = 'WensH77/dsh-browser'
 $RemoteRef = 'main'
 $DshHomeDir = if ($env:DSH_HOME) { $env:DSH_HOME } else { Join-Path $HOME '.dsh' }
 $ManagedRoot = Join-Path $DshHomeDir 'dsh-browser'
@@ -36,7 +36,7 @@ $BridgePlugin = '@yuxianglin/dsh-bridge-browser'
 function Write-Step {
   param([int]$Number, [string]$Zh, [string]$En)
   Write-Host ''
-  Write-Host ("[{0}/5] {1}" -f $Number, $Zh)
+  Write-Host ("[{0}/4] {1}" -f $Number, $Zh)
   Write-Host ("      {0}" -f $En)
 }
 
@@ -386,9 +386,14 @@ $WebProfileManifest = Join-Path $DshHomeDir 'profiles\web\package.json'
 Assert-Command 'pnpm' "未找到 pnpm；请先启用 Corepack 或安装 pnpm。" "pnpm was not found; enable Corepack or install pnpm first."
 Assert-Command 'node' "未找到 Node.js；请先安装受支持的 Node.js 版本。" "Node.js was not found; install a supported Node.js version first."
 
-Write-Step 1 "构建浏览器桥" "Build the browser bridge"
+Write-Step 1 "构建 Chrome 扩展与浏览器桥" "Build the Chrome extension and the browser bridge"
 Invoke-Quiet -WorkingDirectory $Root -Command 'pnpm' -Arguments @('install', '--frozen-lockfile') `
   -FailZh "依赖安装失败。" -FailEn "Dependency installation failed."
+# The extension is built first so the bridge package can copy the fresh dist into itself
+# (`scripts/copy-extension.mjs`, part of its build): the other order leaves the packaged
+# `extension/` one build behind, or missing on a clean checkout.
+Invoke-Quiet -WorkingDirectory $Root -Command 'pnpm' -Arguments @('--filter', 'dsh-browser-extension', 'run', 'build') `
+  -FailZh "扩展构建失败。" -FailEn "The extension build failed."
 Invoke-Quiet -WorkingDirectory $Root -Command 'pnpm' -Arguments @('--filter', $BridgePlugin, 'run', 'build') `
   -FailZh "桥插件构建失败。" -FailEn "The bridge plugin build failed."
 
@@ -405,11 +410,7 @@ Invoke-Quiet -WorkingDirectory $Root -Command 'pnpm' `
   -Arguments @('exec', 'dsh', 'plugin', '--profile', 'web', 'add', '-w', "$BridgePlugin@link:$LinkTarget") `
   -FailZh "注册桥插件失败。" -FailEn "Registering the bridge plugin failed."
 
-Write-Step 3 "构建 Chrome 扩展" "Build the Chrome extension"
-Invoke-Quiet -WorkingDirectory $Root -Command 'pnpm' -Arguments @('--filter', 'dsh-browser-extension', 'run', 'build') `
-  -FailZh "扩展构建失败。" -FailEn "The extension build failed."
-
-Write-Step 4 "安装技能（所有工作区可用）" "Install skills (available to every workspace)"
+Write-Step 3 "安装技能（所有工作区可用）" "Install skills (available to every workspace)"
 # Copied rather than linked: creating a symlink on Windows needs Developer Mode or elevation,
 # and the installer runs again on every update, so the copy is refreshed there.
 try {
@@ -420,10 +421,9 @@ try {
   Write-Host "Skill install failed (the extension still works; rerun scripts/install-skills.mjs later)" -ForegroundColor Yellow
 }
 
-Write-Step 5 "准备扩展并打开 Chrome" "Prepare the extension and open Chrome"
+Write-Step 4 "准备扩展并打开 Chrome" "Prepare the extension and open Chrome"
 Confirm-Browser | Out-Null
 $DistDir = Join-Path $DshHomeDir 'browser-extension'
-$IsUpdate = Test-Path -LiteralPath (Join-Path $DistDir 'manifest.json') -PathType Leaf
 New-Item -ItemType Directory -Path $DistDir -Force | Out-Null
 Sync-Directory -Source (Join-Path $Ext 'dist') -Destination $DistDir
 
@@ -441,51 +441,26 @@ $ClipboardReady = Set-ClipboardText $DistDir
 $ChromeOpened = Start-ExtensionsPage (Get-BrowserPath)
 
 Write-Host ''
-if (-not $ChromeOpened) {
-  Write-Pair "无法自动打开 Chrome，请手动打开浏览器并在地址栏输入 chrome://extensions。" "Could not open Chrome automatically; open the browser and type chrome://extensions in the address bar."
-}
+Write-Pair "扩展文件已就绪：$DistDir" "Extension files are ready: $DistDir"
 # PowerShell treats the typographic quotes “ ” as string delimiters, so every message that
 # contains them has to use single-quoted literals or it splits into extra arguments.
-if ($IsUpdate) {
-  Write-Pair "检测到已有扩展目录，文件已安全更新。" "Existing extension directory detected; its files were updated safely."
-  Write-Pair "打开 Google Chrome（注意不是 Edge/Firefox）：" "Open Google Chrome (not Edge/Firefox):"
-  Write-Host ''
-  Write-Pair "    地址栏输入 chrome://extensions" "    Type chrome://extensions in the address bar"
-  Write-Host ''
-  Write-Pair '如果页面上已有“dsh 浏览器助手”卡片：' 'If the “dsh Browser Assistant” card is already listed:'
-  Write-Pair '  点击卡片上的“重新加载”按钮，让扩展加载新文件。' '  Click “Reload” on that card so it picks up the updated files.'
-  Write-Host ''
-  Write-Pair "如果没有该卡片（例如从未加载过）：" "If the card is not listed (e.g. it was never loaded):"
-  Write-Pair '  打开右上角 “开发者模式”' '  Enable “Developer mode” in the upper-right corner'
-  Write-Pair '  点左上角 “加载已解压的扩展程序”' '  Click “Load unpacked” in the upper-left corner'
-  Write-Pair "  选择这个目录：" "  Select this directory:"
-  Write-Host ("   {0}" -f $DistDir)
-  Write-Host ''
-  Write-Pair '出现 “dsh 浏览器助手” 卡片即成功。' 'When the “dsh Browser Assistant” card appears, it is loaded.'
+if ($ChromeOpened) {
+  Write-Pair 'Chrome 扩展页已打开（Google Chrome，不是 Edge/Firefox）。在那里二选一：' 'Chrome Extensions is open (Google Chrome, not Edge/Firefox). Do one of these:'
 } else {
-  if ($ChromeOpened) {
-    Write-Pair "Chrome 扩展管理页已打开，请完成以下操作：" "Chrome Extensions is open. Complete these steps:"
-  } else {
-    Write-Pair "请在 Chrome 扩展管理页完成以下操作：" "Complete these steps on the Chrome Extensions page:"
-  }
-  Write-Host ''
-  Write-Pair '1. 开启右上角的“开发者模式”' 'Enable “Developer mode” in the upper-right corner'
-  Write-Pair '2. 点击“加载已解压的扩展程序”' 'Click “Load unpacked”'
-  if ($ClipboardReady) {
-    Write-Pair "3. 在路径栏粘贴以下路径（已复制到剪贴板）：" "Paste this path into the folder picker's address bar (already copied):"
-  } else {
-    Write-Pair "3. 在路径栏复制并粘贴以下路径：" "Copy and paste this path into the folder picker's address bar:"
-  }
-  Write-Host ("   {0}" -f $DistDir)
+  Write-Pair '无法自动打开 Chrome；请手动打开并在地址栏输入 chrome://extensions，然后二选一：' 'Could not open Chrome; open it and type chrome://extensions, then do one of these:'
+}
+Write-Pair '  已有「AI 浏览器助手」卡片 → 点卡片上的「重新加载」' '  The “AI Browser Assistant” card is listed → click “Reload” on it'
+Write-Pair '  没有该卡片 → 开右上角「开发者模式」→「加载已解压的扩展程序」→ 选：' '  No such card → enable “Developer mode” → “Load unpacked” → select:'
+Write-Host ("   {0}" -f $DistDir)
+if ($ClipboardReady) {
+  Write-Pair '  （路径已复制到剪贴板；选目录时在路径栏粘贴）' '  (Path copied to your clipboard; paste it into the folder picker)'
 }
 
 Write-Host ''
-Write-Pair "加载完成后：" "After loading the extension:"
-Write-Pair "• 点击工具栏中的 DeepSeek 鲸鱼图标，打开助手窗（状态侧栏或浮窗，依设置）" "Click the DeepSeek whale icon in the toolbar to open the assistant window (status side panel or floating popup, per settings)"
-Write-Pair "• 扩展会自动发现本机 dsh，无需填写地址或 token" "The extension discovers local dsh automatically; no address or token is required"
 $QuotedRoot = "'" + $Root.Replace("'", "''") + "'"
-Write-Host ("• 启动固定版本：cd {0}; pnpm start" -f $QuotedRoot)
-Write-Host ("   Start the pinned version: cd {0}; pnpm start" -f $QuotedRoot)
-Write-Pair "• 也可启动精确版本：npx @deepseek-ai/dsh@0.1.5-rc.1 web" "Or start the exact supported version: npx @deepseek-ai/dsh@0.1.5-rc.1 web"
+Write-Host ("启动：cd {0}; pnpm start" -f $QuotedRoot)
+Write-Pair "  或用精确版本：npx @deepseek-ai/dsh@0.1.7-rc.1 web" "  Or the exact version: npx @deepseek-ai/dsh@0.1.7-rc.1 web"
+Write-Pair "启动后在 dsh 里让助手调一次 browser_setup：自动刷新扩展文件、打开扩展页并复制路径；" "In dsh, have the assistant call browser_setup once: it refreshes the extension files, opens the extensions page and copies the path;"
+Write-Pair "随时用 browser_status 查看连接状态与下一步。插件与扩展都会自动发现对方，无需填地址或 token。" "browser_status reports the connection state and the next step at any time. Plugin and extension find each other automatically — no address or token to fill in."
 Write-Host ''
-Write-Pair "如果用得顺手，欢迎在 GitHub 点个 Star 支持我们：https://github.com/Lum1104/dsh-browser" "If dsh-browser is useful to you, we'd appreciate a Star on GitHub: https://github.com/Lum1104/dsh-browser"
+Write-Pair "如果用得顺手，欢迎在 GitHub 点个 Star 支持我们：https://github.com/WensH77/dsh-browser" "If dsh-browser is useful to you, we'd appreciate a Star on GitHub: https://github.com/WensH77/dsh-browser"

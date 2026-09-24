@@ -1,12 +1,13 @@
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Context } from '@deepseek-ai/cordis'
 import { apply, assertPositiveInteger, Config, resolveConfig } from '../src/index.ts'
 
 /** Minimal context stub: apply only needs the services at registration time. */
-function stubContext(): Context {
+function stubContext(): { ctx: Context; registered: string[] } {
+  const registered: string[] = []
   const gateway = {
     wireStream: {
       open: async (): Promise<AsyncIterable<unknown>> => ({ async *[Symbol.asyncIterator]() {} }),
@@ -17,9 +18,14 @@ function stubContext(): Context {
   const connection = {
     createSharedFetchHandler: () => ({ fetch: async () => new Response('not found', { status: 404 }) }),
   }
-  return {
+  const ctx = {
     webServer: { port: 0, registerUpgrade: () => () => {}, register: () => () => {} },
-    tools: { register: () => () => {} },
+    tools: {
+      register: (definition: { name: string }) => {
+        registered.push(definition.name)
+        return () => {}
+      },
+    },
     agents: { get: () => undefined },
     get: (key: string) => key === 'typertGateway' ? gateway : key === 'connection' ? connection : undefined,
     on: () => () => {},
@@ -29,6 +35,7 @@ function stubContext(): Context {
       return fn() as () => void
     },
   } as unknown as Context
+  return { ctx, registered }
 }
 
 const dirs: string[] = []
@@ -69,20 +76,36 @@ describe('config', () => {
 })
 
 describe('apply', () => {
+  // `apply` mirrors the extension into the dsh home at startup; point that home
+  // at a temp directory so a test run never rewrites the user's real mirror.
+  let home: string | undefined
+  beforeEach(async () => {
+    home = await mkdtemp(join(tmpdir(), 'dsh-bridge-home-'))
+    dirs.push(home)
+    vi.stubEnv('DSH_HOME', home)
+  })
+
   it('registers the bridge with a fixed token (no generation)', async () => {
-    await apply(stubContext(), { token: 'fixed-token', ...VALID })
+    const { ctx, registered } = stubContext()
+    await apply(ctx, { token: 'fixed-token', ...VALID })
+    // The two host tools must be on the table from startup, whatever the
+    // connection state: a tool the model can only reach after a hello cannot
+    // explain why the hello never arrived.
+    expect(registered).toContain('browser_status')
+    expect(registered).toContain('browser_setup')
   })
 
   it('generates and persists a token when none is configured', async () => {
-    const home = await mkdtemp(join(tmpdir(), 'dsh-bridge-home-'))
-    dirs.push(home)
-    vi.stubEnv('DSH_HOME', home)
-    await apply(stubContext(), VALID)
+    const ownHome = await mkdtemp(join(tmpdir(), 'dsh-bridge-home-'))
+    dirs.push(ownHome)
+    vi.stubEnv('DSH_HOME', ownHome)
+    const { ctx } = stubContext()
+    await apply(ctx, VALID)
   })
 
   it('rejects invalid budgets loudly', async () => {
-    await expect(apply(stubContext(), { ...VALID, toolTimeoutMs: 0 })).rejects.toThrow(/toolTimeoutMs/)
-    await expect(apply(stubContext(), { ...VALID, snapshotMaxChars: -1 })).rejects.toThrow(/snapshotMaxChars/)
-    await expect(apply(stubContext(), { ...VALID, snapshotMaxChars: 499 })).rejects.toThrow(/at least 500/)
+    await expect(apply(stubContext().ctx, { ...VALID, toolTimeoutMs: 0 })).rejects.toThrow(/toolTimeoutMs/)
+    await expect(apply(stubContext().ctx, { ...VALID, snapshotMaxChars: -1 })).rejects.toThrow(/snapshotMaxChars/)
+    await expect(apply(stubContext().ctx, { ...VALID, snapshotMaxChars: 499 })).rejects.toThrow(/at least 500/)
   })
 })

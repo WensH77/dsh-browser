@@ -450,6 +450,61 @@ describe('BridgeServer', () => {
     ws.close()
   })
 
+  it('refuses a hello whose reported extension version is present but empty', async () => {
+    // The wire contract reads present-but-empty as malformed, so the host must
+    // drop the frame rather than treat it as "an extension with no version" —
+    // otherwise `clientExtensionVersion()` could return a value the model would
+    // print as a version.
+    const h = await startBridge()
+    harnesses.push(h)
+    const { ws, done } = await connect(h.url)
+    send(ws, { t: 'hello', token: TOKEN, caps: { ...CAPS, extensionVersion: '' } })
+    await done
+    expect(ws.readyState).toBe(WebSocket.CLOSED)
+    expect(h.bridge.hasConnection()).toBe(false)
+    expect(h.bridge.clientExtensionVersion()).toBeUndefined()
+  })
+
+  it('samples the extension version from the last handshake and clears it on disconnect', async () => {
+    const h = await startBridge()
+    harnesses.push(h)
+    // Nothing has connected yet: no sample to report.
+    expect(h.bridge.clientExtensionVersion()).toBeUndefined()
+
+    const { ws, frames, done } = await connect(h.url)
+    send(ws, { t: 'hello', token: TOKEN, caps: { ...CAPS, extensionVersion: '0.1.2' } })
+    await waitFor(() => frames.some((f) => f.t === 'hello.ok'))
+    expect(h.bridge.clientExtensionVersion()).toBe('0.1.2')
+
+    ws.close()
+    await done
+    // The close is processed asynchronously; the sample must not outlive it.
+    await expect.poll(() => h.bridge.clientExtensionVersion()).toBeUndefined()
+  })
+
+  it('accepts a build that reports no version and takes the sample from the replacing socket', async () => {
+    const h = await startBridge()
+    harnesses.push(h)
+
+    // An older build: the field is absent, and the handshake still succeeds.
+    const legacy = await connect(h.url)
+    send(legacy.ws, { t: 'hello', token: TOKEN, caps: CAPS })
+    await waitFor(() => legacy.frames.some((f) => f.t === 'hello.ok'))
+    expect(h.bridge.hasConnection()).toBe(true)
+    expect(h.bridge.clientExtensionVersion()).toBeUndefined()
+
+    // A replacement owns the slot, so it also owns the sample: a version read
+    // after promotion must come from the socket that is actually connected.
+    const next = await connect(h.url)
+    send(next.ws, { t: 'hello', token: TOKEN, caps: { ...CAPS, extensionVersion: '0.2.0' } })
+    await waitFor(() => next.frames.some((f) => f.t === 'hello.ok'))
+    expect(h.bridge.clientExtensionVersion()).toBe('0.2.0')
+
+    await h.bridge.close()
+    expect(h.bridge.clientExtensionVersion()).toBeUndefined()
+    next.ws.close()
+  })
+
   it('tracks connection state through auth, close, and replacement', async () => {
     const h = await startBridge()
     harnesses.push(h)

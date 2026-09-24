@@ -270,6 +270,16 @@ export interface BridgeCaps {
    * no-token loopback path, which is the path this guards.
    */
   extensionId?: string
+  /**
+   * The extension's own build version (`chrome.runtime.getManifest().version`).
+   *
+   * Optional and additive on purpose: `BRIDGE_PROTO` only moves when both
+   * halves must agree, and an older host must keep accepting a newer extension
+   * that merely says more about itself. Absent means the extension predates the
+   * field, which the host reports as an unknown build rather than as a mismatch
+   * — a reload may still be the fix, so the two must not be conflated.
+   */
+  extensionVersion?: string
   /** Upper bound on one rendered snapshot's characters (plugin config, minimum 500). */
   snapshotMaxChars: number
   /** Upper bound on interactive inventory items per snapshot (plugin config). */
@@ -450,6 +460,12 @@ function isCaps(value: unknown): value is BridgeCaps {
     && isToolset(caps.toolset)
     && (caps.extensionId === undefined
       || (typeof caps.extensionId === 'string' && EXTENSION_ID_PATTERN.test(caps.extensionId)))
+    // Present-but-empty is malformed rather than "not reported": a build that
+    // has the field must have a version to put in it, and the host reads a
+    // value here as the thing to compare against its own. Whitespace-only is
+    // rejected for the same reason `tool.call.sessionId` is.
+    && (caps.extensionVersion === undefined
+      || (typeof caps.extensionVersion === 'string' && caps.extensionVersion.trim() !== ''))
     && typeof caps.snapshotMaxChars === 'number'
     && Number.isInteger(caps.snapshotMaxChars)
     && caps.snapshotMaxChars >= MIN_SNAPSHOT_MAX_CHARS

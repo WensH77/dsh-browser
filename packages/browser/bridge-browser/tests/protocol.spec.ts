@@ -193,6 +193,55 @@ describe('parseBridgeFrame', () => {
   })
 })
 
+describe('extension version capability', () => {
+  // Additive on purpose: the host uses it to say "reload the extension" instead
+  // of guessing, but a build that predates the field must keep connecting, and
+  // a host that predates it must keep ignoring it. So none of this moves
+  // BRIDGE_PROTO/BRIDGE_TOOLSET.
+  const BASE = { snapshotMaxChars: 32_000, maxInteractiveItems: 60 }
+
+  const hello = (caps: Record<string, unknown>): ReturnType<typeof parseBridgeFrame> =>
+    parseBridgeFrame(JSON.stringify({ t: 'hello', token: 'x', caps: { ...BASE, ...caps } }))
+
+  it('carries the reported version through both handshake directions', () => {
+    expect(hello({ proto: BRIDGE_PROTO, toolset: BRIDGE_TOOLSET, extensionVersion: '0.1.2' }))
+      .toEqual({ t: 'hello', token: 'x', caps: { ...BASE, proto: BRIDGE_PROTO, toolset: BRIDGE_TOOLSET, extensionVersion: '0.1.2' } })
+    expect(parseBridgeFrame(JSON.stringify({ t: 'hello.ok', caps: { ...BASE, extensionVersion: '9.9.9' } })))
+      .toEqual({ t: 'hello.ok', caps: { ...BASE, extensionVersion: '9.9.9' } })
+  })
+
+  it('still accepts a build that reports no version, as a legacy one', () => {
+    const frame = hello({})
+    expect(frame).toEqual({ t: 'hello', token: 'x', caps: { ...BASE } })
+    // Absent is "not reported", not "version 0": it must not need a version bump
+    // to be understood, and it must not be refused as a mismatch.
+    expect(declaredProto(frame?.t === 'hello' ? frame.caps : undefined)).toBe(1)
+    expect(handshakeRefusal({ ...BASE })).toBeUndefined()
+  })
+
+  it('rejects a present-but-unusable version instead of reading it as absent', () => {
+    for (const extensionVersion of ['', '   ', 7, null, true, [], {}, ['0.1.2']]) {
+      expect(hello({ extensionVersion }), JSON.stringify(extensionVersion)).toBeUndefined()
+    }
+  })
+
+  it('ignores unknown extra caps fields and is insensitive to their order', () => {
+    const frame = hello({ extensionVersion: '0.1.2', futureCapability: { level: 3 } })
+    expect(frame?.t).toBe('hello')
+    expect(frame?.t === 'hello' ? frame.caps.extensionVersion : undefined).toBe('0.1.2')
+
+    // The parser reads named fields, so a field arriving before or after them
+    // cannot change the outcome.
+    const reordered = parseBridgeFrame(JSON.stringify({
+      caps: { extensionVersion: '0.1.2', maxInteractiveItems: 60, snapshotMaxChars: 32_000, t: 'hello' },
+      token: 'x',
+      t: 'hello',
+    }))
+    expect(reordered?.t).toBe('hello')
+    expect(reordered?.t === 'hello' ? reordered.caps.extensionVersion : undefined).toBe('0.1.2')
+  })
+})
+
 /** Minimal valid shape per server-side frame type (for classification tests). */
 function serverShape(t: 'hello.ok' | 'rpc.result' | 'tool.call' | 'tool.cancel' | 'ping'): Record<string, unknown> {
   switch (t) {

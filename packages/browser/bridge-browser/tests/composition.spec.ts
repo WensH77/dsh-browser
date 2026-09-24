@@ -34,10 +34,15 @@ const TOKEN = 'abcdabcdabcdabcdabcdabcdabcdabcd'
 
 let root: string | undefined
 let context: Context | undefined
+/** Restored around every test: the plugin mirrors extension files into this home. */
+let previousDshHome: string | undefined
 
 afterEach(async () => {
   await context?.fiber.dispose()
   context = undefined
+  if (previousDshHome === undefined) delete process.env.DSH_HOME
+  else process.env.DSH_HOME = previousDshHome
+  previousDshHome = undefined
   if (root !== undefined) await rm(root, { recursive: true, force: true, maxRetries: 3, retryDelay: 50 })
   root = undefined
 })
@@ -60,6 +65,10 @@ const ApiHost = {
 /** Write a dist fixture and the composition cordis.yml, then boot it through the real Loader. */
 async function loadComposition(): Promise<{ ctx: Context; configPath: string; port: number }> {
   root = await mkdtemp(join(tmpdir(), 'dsh-bridge-browser-'))
+  // `apply` mirrors the built extension into the dsh home at startup; point
+  // that home at the temp root so the test never rewrites the user's mirror.
+  previousDshHome = process.env.DSH_HOME
+  process.env.DSH_HOME = root
   const configPath = join(root, 'cordis.yml')
   await writeFile(configPath, [
     "- name: '@deepseek-ai/dsh-host-webserver'",
@@ -158,6 +167,15 @@ describe('real Loader composition', () => {
     // The bridge plugin mounted the browser tool set on the real registry.
     const tools = ctx.get('tools') as ToolRegistry
     expect(tools.get('browser_snapshot')).toBeDefined()
+    // Status and setup are usable before any extension connects: that is the
+    // state they exist for, so they must be registered by `apply` itself.
+    expect(tools.get('browser_setup')).toBeDefined()
+    const statusTool = tools.get('browser_status')
+    expect(statusTool).toBeDefined()
+    const statusOffline = await statusTool!.execute({}, { signal: new AbortController().signal } as never) as { text: string }
+    expect(statusOffline.text).toContain(`plugin: proto ${BRIDGE_PROTO}, toolset ${BRIDGE_TOOLSET}`)
+    expect(statusOffline.text).toContain('extension: not connected')
+    expect(statusOffline.text.match(/^next: /gm)).toHaveLength(1)
 
     const browserPrompt = (await ctx.systemPrompt.assemble()).sections
       .find((section) => section.name === 'tool:bridge-browser')?.text
@@ -175,6 +193,9 @@ describe('real Loader composition', () => {
     // A refusal is a boundary: no alternate transport, and no trial calls to
     // find out where the policy line sits.
     expect(browserPrompt).toContain('A refusal is a boundary, not a puzzle')
+    // The two host tools are the advertised first stop when the bridge is down.
+    expect(browserPrompt).toContain('call browser_status first')
+    expect(browserPrompt).toContain('call browser_setup to prepare the files')
     // Reading text comes before scripting the DOM.
     expect(browserPrompt).toContain('slice it yourself')
     // Page pictures go through browser_image, not a screenshot.
@@ -231,6 +252,14 @@ describe('real Loader composition', () => {
     expect(tools.get('browser_dom_query')).toBeUndefined()
     expect(tools.get('browser_block')).toBeUndefined()
     expect(tools.get('browser_click')).toBeDefined()
+    // Down-levelling must not touch the host tools: this hello declares no
+    // toolset at all, and both must still be answerable, naming the reload.
+    expect(tools.get('browser_setup')).toBeDefined()
+    const statusOnline = await tools.get('browser_status')!.execute({}, { signal: new AbortController().signal } as never) as { text: string }
+    expect(statusOnline.text).toContain('extension: connected')
+    expect(statusOnline.text).toContain('extension version: unknown (older build)')
+    expect(statusOnline.text).toContain('version skew: reload the extension')
+    expect(statusOnline.text.match(/^next: /gm)).toHaveLength(1)
 
     // The bridge is a pure tool channel: gateway methods are refused rather
     // than passed through to the Host adapter.
@@ -252,6 +281,8 @@ describe('real Loader composition', () => {
     await bridgeEntry.fiber!.dispose()
     expect(tools.get('browser_snapshot')).toBeUndefined()
     expect(tools.get('browser_click')).toBeUndefined()
+    expect(tools.get('browser_status')).toBeUndefined()
+    expect(tools.get('browser_setup')).toBeUndefined()
     // Self-disposing an include-tree entry persists `disabled: true`; await
     // that debounced write so it cannot race the temp-dir removal.
     await expect.poll(async () => (await readFile(configPath, 'utf8')).includes('disabled: true')).toBe(true)

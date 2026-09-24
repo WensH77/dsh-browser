@@ -11,7 +11,7 @@ Connect [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) to t
 Pages become structured text with a numbered inventory of interactive elements, and the model addresses those elements by number. `browser_snapshot` pairs that text with a screenshot of the same moment, and `browser_capture` returns a screenshot on demand — both only for image-capable models, and both kept in memory: the extension never writes the image to disk, while a text-only route degrades to the text snapshot with a named reason.
 
 > [!IMPORTANT]
-> The migration branch's runtime pin is `0.1.5-rc.1` (raised from `0.1.2-rc.1` to `0.1.5-alpha.1` on 2026-09-09, then to `0.1.5-rc.1` on 2026-09-10; see the [upgrade note](docs/dsh-0.1.5-rc-upgrade.md)); it moves to the stable `0.1.5` tag when that is published on npm.
+> The migration branch's runtime pin is `0.1.7-rc.1` (raised from `0.1.2-rc.1` to `0.1.5-alpha.1` on 2026-09-09, then to `0.1.5-rc.1` on 2026-09-10, then to `0.1.7-rc.1` on 2026-09-24; see the [upgrade note](docs/dsh-0.1.7-rc-upgrade.md)). npm's `latest` tag still names `0.1.5-rc.3`, so this pin follows the `next` line on purpose.
 
 ## Quick install
 
@@ -20,16 +20,16 @@ The standard `dsh plugin` command alone cannot install this project. The integra
 macOS and Linux:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/Lum1104/dsh-browser/refs/heads/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/WensH77/dsh-browser/refs/heads/main/scripts/install.sh | bash
 ```
 
 Windows, in PowerShell:
 
 ```powershell
-$s="$env:TEMP\dsh-install.ps1"; irm https://raw.githubusercontent.com/Lum1104/dsh-browser/refs/heads/main/scripts/install.ps1 -OutFile $s; powershell -NoProfile -ExecutionPolicy Bypass -File $s
+$s="$env:TEMP\dsh-install.ps1"; irm https://raw.githubusercontent.com/WensH77/dsh-browser/refs/heads/main/scripts/install.ps1 -OutFile $s; powershell -NoProfile -ExecutionPolicy Bypass -File $s
 ```
 
-When the installer opens `chrome://extensions`, follow its instructions to load or reload **AI Browser Assistant**. If dsh is already running, restart it after installation. See [Detailed installation and usage](#detailed-installation-and-usage) for prerequisites, startup commands, updates, and developer installation.
+When the installer opens `chrome://extensions`, load or reload **AI Browser Assistant** once — that browser-side step cannot be automated, and it is the only manual action left. Afterwards, have the assistant call `browser_setup` in dsh: it refreshes the extension files, opens the extensions page and copies the path; `browser_status` reports the connection state, whether both halves match, and the single next step at any time. A running dsh hot-loads the plugin, so no restart is needed. See [Detailed installation and usage](#detailed-installation-and-usage) for prerequisites, startup commands, updates, and developer installation.
 
 > [!IMPORTANT]
 > The unscoped [`dsh-browser`](https://www.npmjs.com/package/dsh-browser) package on npm belongs to a different project and is not affiliated with this repository. This project is not currently published as an npm package; use the installer above.
@@ -97,16 +97,16 @@ Requirements: Node.js `^22.19` or `>=24`, Corepack/pnpm, and Chrome 116+. Window
 For a managed installation, run:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/Lum1104/dsh-browser/refs/heads/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/WensH77/dsh-browser/refs/heads/main/scripts/install.sh | bash
 ```
 
 or, on Windows:
 
 ```powershell
-$s="$env:TEMP\dsh-install.ps1"; irm https://raw.githubusercontent.com/Lum1104/dsh-browser/refs/heads/main/scripts/install.ps1 -OutFile $s; powershell -NoProfile -ExecutionPolicy Bypass -File $s
+$s="$env:TEMP\dsh-install.ps1"; irm https://raw.githubusercontent.com/WensH77/dsh-browser/refs/heads/main/scripts/install.ps1 -OutFile $s; powershell -NoProfile -ExecutionPolicy Bypass -File $s
 ```
 
-The installer downloads `main`, builds and registers the bridge plugin, builds the Chrome extension into `~/.dsh/browser-extension`, and opens `chrome://extensions`. On the first install, load that directory as an unpacked extension; on updates, click **Reload**. Restart dsh if it is already running.
+The installer downloads `main`, builds and registers the bridge plugin, builds the Chrome extension into `~/.dsh/browser-extension`, and opens `chrome://extensions`. On the first install, load that directory as an unpacked extension; afterwards a single **Reload** on that page is enough — the plugin re-syncs the extension files into that directory on every start (no installer rerun needed), but the code Chrome already loaded only changes when Chrome reloads it. A running dsh hot-loads the plugin within seconds.
 
 `scripts/install.sh` covers macOS and Linux, and `scripts/install.ps1` covers Windows; both write the same managed workspace and the same install metadata. The installer copies the extension path to the clipboard when a clipboard tool is available (`pbcopy`, `wl-copy`, `xclip`, `xsel`, or PowerShell's `Set-Clipboard`), and prints the path either way. When no Chrome or Chromium install is found, it prints the command that installs one; set `DSH_INSTALL_BROWSER=1` to let the installer attempt that install itself.
 
@@ -115,12 +115,12 @@ The Windows command downloads `install.ps1` and runs it rather than piping it in
 To install the current branch from a source checkout instead:
 
 ```sh
-git clone https://github.com/Lum1104/dsh-browser.git
+git clone https://github.com/WensH77/dsh-browser.git
 cd dsh-browser
 ./scripts/install.sh
 ```
 
-On Windows, run `.\scripts\install.ps1` from the checkout instead. After pulling or switching revisions, rerun the installer and reload the extension.
+On Windows, run `.\scripts\install.ps1` from the checkout instead. After pulling or switching revisions, click **Reload** once on the extensions page; the plugin keeps the extension files and the mirror directory in sync at startup (or have the assistant call `browser_setup`), so rerunning the installer is not required.
 
 ### Skills shipped with this repository
 
@@ -136,13 +136,15 @@ Start the managed installation with:
 cd ~/.dsh/dsh-browser && pnpm start
 ```
 
-From a source checkout, run `pnpm start` in the repository root. The exact supported public runtime is currently the pinned 0.1.5 pre-release:
+From a source checkout, run `pnpm start` in the repository root. The exact supported public runtime is currently the pinned 0.1.7 pre-release:
 
 ```sh
-npx @deepseek-ai/dsh@0.1.5-rc.1 web
+npx @deepseek-ai/dsh@0.1.7-rc.1 web
 ```
 
 Local Chrome use requires no configuration. Open an `http://` or `https://` page, click the DeepSeek whale icon, and wait for **Connected**. Existing tabs are instrumented on the first action; protected browser pages and extension stores are not supported.
+
+When the bridge will not connect or tools are missing, have the assistant call `browser_status` first: it reports whether the extension is connected, whether its build and protocol level match the plugin (and names the fix — reload the extension, or restart dsh), whether the mirrored files are current, and the single next action. On a first install, or when it reports refreshed files, call `browser_setup` to let the assistant prepare the files and open the extensions page.
 
 ## Troubleshooting
 

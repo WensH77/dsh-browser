@@ -205,6 +205,13 @@ export class BridgeClient {
       // test harness) means an empty string, which the protocol treats as
       // "not reported" and the host rejects on that path.
       const extensionId = chrome?.runtime?.id ?? ''
+      // The installed build's own version, so the host can tell "extension is
+      // older than the plugin" (reload it) apart from "protocol mismatch"
+      // (restart dsh) without a second round trip. Same defensive read: a
+      // harness or browser without `getManifest` omits the field entirely
+      // rather than sending an empty string, because the wire contract reads
+      // present-but-empty as malformed and would refuse the whole hello.
+      const extensionVersion = chrome?.runtime?.getManifest?.()?.version ?? ''
       socket.send(JSON.stringify({
         t: 'hello',
         token: this.token,
@@ -213,6 +220,7 @@ export class BridgeClient {
           toolset: BRIDGE_TOOLSET,
           debugger: this.debugEnabled() && visionAvailable(),
           ...extensionId === '' ? {} : { extensionId },
+          ...extensionVersion === '' ? {} : { extensionVersion },
           snapshotMaxChars: DEFAULT_SNAPSHOT_MAX_CHARS,
           maxInteractiveItems: 60,
         },

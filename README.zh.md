@@ -11,7 +11,7 @@
 页面会转换为结构化文本和带编号的交互元素清单，模型通过编号定位元素。`browser_snapshot` 会把这份文本与同一时刻的截图一起返回，`browser_capture` 按需只返回截图——两者都只对支持图片输入的模型生效，且截图只存在内存里：扩展不落盘；纯文本模型会降级为文本快照并说明原因。
 
 > [!IMPORTANT]
-> 当前迁移分支的运行时 pin 为 `0.1.5-rc.1`（2026-09-09 由 `0.1.2-rc.1` 升到 `0.1.5-alpha.1`，2026-09-10 再升到 `0.1.5-rc.1`，详见 [升级记录](docs/dsh-0.1.5-rc-upgrade.md)）；0.1.5 稳定版发布到 npm 后再切到正式 tag。
+> 当前迁移分支的运行时 pin 为 `0.1.7-rc.1`（2026-09-09 由 `0.1.2-rc.1` 升到 `0.1.5-alpha.1`，2026-09-10 再升到 `0.1.5-rc.1`，2026-09-24 升到 `0.1.7-rc.1`，详见 [升级记录](docs/dsh-0.1.7-rc-upgrade.md)）。npm 的 `latest` tag 仍是 `0.1.5-rc.3`，这里有意跟 `next` 线。
 
 ## 快速安装
 
@@ -20,16 +20,16 @@
 macOS 与 Linux：
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/Lum1104/dsh-browser/refs/heads/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/WensH77/dsh-browser/refs/heads/main/scripts/install.sh | bash
 ```
 
 Windows（PowerShell）：
 
 ```powershell
-$s="$env:TEMP\dsh-install.ps1"; irm https://raw.githubusercontent.com/Lum1104/dsh-browser/refs/heads/main/scripts/install.ps1 -OutFile $s; powershell -NoProfile -ExecutionPolicy Bypass -File $s
+$s="$env:TEMP\dsh-install.ps1"; irm https://raw.githubusercontent.com/WensH77/dsh-browser/refs/heads/main/scripts/install.ps1 -OutFile $s; powershell -NoProfile -ExecutionPolicy Bypass -File $s
 ```
 
-安装器打开 `chrome://extensions` 后，请按提示加载或重新加载 **AI 浏览器助手**。如果 dsh 已经在运行，安装完成后请重启。前置要求、启动命令、更新方式和开发者安装详见[详细安装与使用](#详细安装与使用)。
+安装器打开 `chrome://extensions` 后，按提示加载或重新加载一次 **AI 浏览器助手**——浏览器侧这一步无法自动化，是最初唯一要手点的动作。之后在 dsh 里让助手调一次 `browser_setup`，它会自动刷新扩展文件、打开扩展页并把路径放进剪贴板；`browser_status` 随时报告连接状态、两半版本是否匹配、以及唯一的下一步。dsh 正在运行时会热加载插件，不必重启。前置要求、启动命令、更新方式和开发者安装详见[详细安装与使用](#详细安装与使用)。
 
 > [!IMPORTANT]
 > npm 上未加 scope 的 [`dsh-browser`](https://www.npmjs.com/package/dsh-browser) 包属于另一个项目，与本仓库无关。本项目目前没有发布 npm 包，请使用上方安装器。
@@ -97,16 +97,16 @@ scripts/install-skills.mjs
 托管安装请运行：
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/Lum1104/dsh-browser/refs/heads/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/WensH77/dsh-browser/refs/heads/main/scripts/install.sh | bash
 ```
 
 Windows 请运行：
 
 ```powershell
-$s="$env:TEMP\dsh-install.ps1"; irm https://raw.githubusercontent.com/Lum1104/dsh-browser/refs/heads/main/scripts/install.ps1 -OutFile $s; powershell -NoProfile -ExecutionPolicy Bypass -File $s
+$s="$env:TEMP\dsh-install.ps1"; irm https://raw.githubusercontent.com/WensH77/dsh-browser/refs/heads/main/scripts/install.ps1 -OutFile $s; powershell -NoProfile -ExecutionPolicy Bypass -File $s
 ```
 
-安装器会下载 `main`、构建并注册桥插件、把 Chrome 扩展构建到 `~/.dsh/browser-extension`，然后打开 `chrome://extensions`。首次安装时，请把该目录作为已解压扩展加载；更新时点击**重新加载**。如果 dsh 已在运行，请重启。
+安装器会下载 `main`、构建并注册桥插件、把 Chrome 扩展构建到 `~/.dsh/browser-extension`，然后打开 `chrome://extensions`。首次安装时把该目录作为已解压扩展加载；此后更新只需在该页点一次**重新加载**——扩展文件由插件在启动时自动同步到该目录（不再依赖重跑安装器），但已加载的扩展代码要 Chrome 重新载入才生效。dsh 正在运行时插件会在几秒内热加载。
 
 `scripts/install.sh` 覆盖 macOS 与 Linux，`scripts/install.ps1` 覆盖 Windows；两者写入同一个托管工作区和同一份安装元数据。当系统提供剪贴板工具（`pbcopy`、`wl-copy`、`xclip`、`xsel` 或 PowerShell 的 `Set-Clipboard`）时，安装器会把扩展路径复制到剪贴板；无论是否复制成功都会打印该路径。若未检测到 Chrome/Chromium，安装器会打印对应的安装命令；设置 `DSH_INSTALL_BROWSER=1` 可让安装器尝试自动安装。
 
@@ -115,12 +115,12 @@ Windows 命令先下载 `install.ps1` 再执行，而不是管道给 `Invoke-Exp
 如需从源码 checkout 安装当前分支：
 
 ```sh
-git clone https://github.com/Lum1104/dsh-browser.git
+git clone https://github.com/WensH77/dsh-browser.git
 cd dsh-browser
 ./scripts/install.sh
 ```
 
-Windows 请在 checkout 中运行 `.\scripts\install.ps1`。拉取或切换版本后，请重新运行安装器并重新加载扩展。
+Windows 请在 checkout 中运行 `.\scripts\install.ps1`。拉取或切换版本后，在扩展页点一次「重新加载」即可；扩展文件与镜像目录的同步由插件在启动时完成（也可以让助手调一次 `browser_setup`），不必重跑安装器。
 
 ### 随仓库分发的技能
 
@@ -136,13 +136,15 @@ Windows 请在 checkout 中运行 `.\scripts\install.ps1`。拉取或切换版�
 cd ~/.dsh/dsh-browser && pnpm start
 ```
 
-使用源码 checkout 时，请在仓库根目录运行 `pnpm start`。当前受支持的精确公开版本为钉定的 0.1.5 预发布版：
+使用源码 checkout 时，请在仓库根目录运行 `pnpm start`。当前受支持的精确公开版本为钉定的 0.1.7 预发布版：
 
 ```sh
-npx @deepseek-ai/dsh@0.1.5-rc.1 web
+npx @deepseek-ai/dsh@0.1.7-rc.1 web
 ```
 
 Chrome 本机使用无需配置。打开任意 `http://` 或 `https://` 页面，点击 DeepSeek 鲸鱼图标，等待状态面板显示**已连接**。已有标签页会在第一次操作时自动加载；浏览器受保护页面和扩展商店不受支持。
+
+连不上或工具缺失时，先让助手调 `browser_status`：它会报告扩展有没有连上、扩展构建的版本与协议级别是否和插件匹配（不匹配会直接说「重载扩展」还是「重启 dsh」）、镜像文件是否最新，以及唯一的下一步动作。第一次装机或提示扩展文件已更新时，调 `browser_setup` 让助手代劳文件准备与打开扩展页。
 
 ## 故障排查
 
