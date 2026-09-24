@@ -50,6 +50,8 @@
 | 2026-09-24 | **新增两个宿主侧工具**：`browser_status`（连没连、两半的版本与协议级别是否匹配、镜像文件是否最新、唯一下一步动作）与 `browser_setup`（同步扩展文件、打开 `chrome://extensions`、把路径放进剪贴板）。两者都不参与 debug/toolset 裁剪——状态与安装引导在任何连接状态下都必须可用。它们是普通工具调用（归 dsh 自己的工具展示与策略管），不是扩展那套页面动作审批卡。 |
 | 2026-09-24 | **浏览器侧最后一步暂时消不掉（实测）**：本机 Chrome 154 用 `--load-extension`（含配 `--disable-extensions-except`）启动独立 profile 不会加载扩展；Chrome 137 起官方构建已移除该开关。所以「零点击装机」只剩上架 Chrome Web Store 或企业策略强装一条路。**同日决定不做**：本项目内部使用，不进商店——也就不需要双 ID、上架版本与审核延迟那一套；开发者模式 + 加载已解压保留为唯一的浏览器侧手动动作，而它之后的部分（文件同步、状态自检、装机引导）已由 `browser_setup` / `browser_status` 与运行期镜像同步接管。 |
 
+| 2026-09-24 | **新增 `browser_update`（只给命令，不执行）**：更新必须落在用户手里——安装器会写入 `~/.dsh`、替换 Chrome 加载的目录、首次还要在 Chrome 点一次。工具按「托管 / checkout × posix / win32」四种组合打印对应命令，并说明随后要重启 dsh 与点一次「重新加载」。仓库 slug 与分支由 `src/update-source.ts` 单一提供，测试断言它与 `install.sh` / `install.ps1` 的 `REPOSITORY` / `REMOTE_REF` 一致（本次手工改 slug 动过 23 处，就是为了防它再漂）。 |
+
 ## 开放问题
 
 - **O3 协调事件集合**：tab-affinity 交接时机曾依赖 `turn/start|end`，审批瞬时态依赖 `question/*`；砍聊天后 `question/*`（审批作答方变为宿主标准客户端）的去留需逐条核对扩展后台消费。
