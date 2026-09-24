@@ -763,6 +763,23 @@ describe('registerBrowserTools', () => {
       expect(failedOnline).toContain('version skew: consistent')
       expect(lastLine(failedOnline)).toBe('next: run browser_setup to retry refreshing the extension files')
 
+      // And the same for a mirror the plugin cannot see at all: a connected
+      // extension makes every tool answer, so `none — the bridge is ready` under
+      // the "not bundled" line reported a healthy bridge while the files Chrome
+      // loads could no longer be refreshed from this process at all (measured:
+      // the running plugin's repository had been removed and status still said
+      // next: none).
+      const unavailableOnline = await runText(
+        makeHostHarness({ connected: true, version: '0.1.7', caps: CAPS, sync: UNAVAILABLE }).registered,
+        'browser_status',
+      )
+      expect(unavailableOnline).toContain('extension: connected')
+      expect(unavailableOnline).toContain('extension files: not bundled with this plugin')
+      expect(lastLine(unavailableOnline)).toBe(
+        'next: restart dsh from the repository, or build the extension there — this plugin can see no extension build to mirror',
+      )
+      expect(lastLine(unavailableOnline)).not.toContain('none')
+
       // The bigger action still wins: restarting dsh re-syncs the mirror too, so
       // a failed pass must not push the restart out of the next line.
       const failedNewer = await runText(
