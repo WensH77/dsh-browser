@@ -1,8 +1,9 @@
 /**
- * Build all three extension targets sequentially into dist/ (or dist-firefox/
- * with --firefox):
- * background (es|iife) → content (iife) → panel (React). The first target
- * cleans the output; the later ones append. Pass --watch for dev rebuilds.
+ * Build the extension's three targets sequentially into dist/: background
+ * (es) → content (iife) → panel (React) → options (React). The panel page
+ * doubles as the floating status window (chrome.windows.create opens
+ * panel/index.html). The first target cleans the output; the later ones
+ * append. Pass --watch for dev rebuilds.
  */
 
 import { spawn, spawnSync } from 'node:child_process'
@@ -11,15 +12,11 @@ import { fileURLToPath } from 'node:url'
 const root = fileURLToPath(new URL('..', import.meta.url))
 const watch = process.argv.includes('--watch')
 
-// --firefox switches the manifest and background bundle for the Firefox build.
-if (process.argv.includes('--firefox')) {
-  process.env.EXT_TARGET = 'firefox'
-}
-
 const configs = [
   'vite.background.config.ts',
   'vite.content.config.ts',
-  'vite.panel.config.ts',
+  // Both React pages in one build: separate builds each bundled their own React.
+  'vite.ui.config.ts',
 ]
 
 if (watch) {

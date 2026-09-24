@@ -1,11 +1,11 @@
 {
   "extensionName": {
-    "message": "dsh Browser Assistant"
+    "message": "AI Browser Assistant"
   },
   "extensionDescription": {
-    "message": "A Chrome side-panel extension that lets dsh read and operate your browser directly without vision."
+    "message": "A Chrome side-panel extension that lets dsh read and operate your browser directly, in the page you choose."
   },
   "actionTitle": {
-    "message": "Open dsh Browser Assistant"
+    "message": "Open AI Browser Assistant"
   }
 }

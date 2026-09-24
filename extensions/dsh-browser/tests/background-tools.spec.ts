@@ -1,9 +1,31 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { dispatchToolCall, type ToolAnswer, type ToolCall } from '../src/background/tools.ts'
+import { dispatchToolCall, frameArgumentInvalid, frameMissingFailure, invalidationReason, type ToolAnswer, type ToolCall } from '../src/background/tools.ts'
+import type { TabFrame } from '../src/background/frames.ts'
 
 const CALL: ToolCall = { id: 'tool-1', name: 'browser_snapshot', args: {} }
 const OK: ToolAnswer = { ok: true, result: { text: 'page' } }
+
+describe('frame refusals', () => {
+  // These two messages used to be spelled out at five call sites; these
+  // assertions are the contract those copies had to agree on.
+  it('names the frame that went away and points at the next step', () => {
+    expect(frameMissingFailure(3)).toEqual({
+      ok: false,
+      error: {
+        code: 'content-unavailable',
+        message: 'Frame 3 does not exist or has navigated. Call browser_snapshot again.',
+      },
+    })
+  })
+
+  it('refuses a frame argument that is not a non-negative integer', () => {
+    expect(frameArgumentInvalid()).toEqual({
+      ok: false,
+      error: { code: 'action-failed', message: 'frame must be a non-negative integer.' },
+    })
+  })
+})
 
 function mockChrome(options: {
   tab?: { id?: number; url?: string }
@@ -11,6 +33,7 @@ function mockChrome(options: {
   injectionError?: Error
   frames?: Array<{ frameId: number; parentFrameId: number; documentId?: string; url: string }>
   respond?: (message: unknown, frameId: number) => unknown
+  debugger?: unknown
 }) {
   const responses = [...(options.responses ?? [OK])]
   const runtimeListeners = new Set<(message: unknown, sender: chrome.runtime.MessageSender) => void>()
@@ -41,6 +64,7 @@ function mockChrome(options: {
     tabs: { query, sendMessage },
     scripting: { executeScript },
     webNavigation: { getAllFrames },
+    debugger: options.debugger,
     runtime: {
       onMessage: {
         addListener: (listener: (message: unknown, sender: chrome.runtime.MessageSender) => void) => {
@@ -64,6 +88,50 @@ afterEach(() => {
   vi.unstubAllGlobals()
   vi.restoreAllMocks()
 })
+
+/** CDP stub: one 800x600 viewport, one 800x1200 page, one tiny PNG payload. */
+function mockDebuggerApi(overrides: { attachError?: Error; targets?: unknown[] } = {}) {
+  const attach = vi.fn(async () => {
+    if (overrides.attachError !== undefined) throw overrides.attachError
+  })
+  const detach = vi.fn(async () => undefined)
+  const sendCommand = vi.fn(async (_target: unknown, method: string) => {
+    if (method === 'Page.getLayoutMetrics') {
+      return {
+        cssVisualViewport: { clientWidth: 800, clientHeight: 600 },
+        contentSize: { width: 800, height: 1200 },
+      }
+    }
+    return { data: Buffer.from('captured-png').toString('base64') }
+  })
+  const onEvent = { addListener: vi.fn() }
+  const onDetach = { addListener: vi.fn() }
+  const getTargets = vi.fn(async () => overrides.targets ?? [])
+  return { attach, detach, sendCommand, getTargets, onEvent, onDetach }
+}
+
+/**
+ * Stand in for the raster decoder the capture path now runs.
+ *
+ * Every screenshot is decoded before it is reported, so the metadata describes
+ * the raster that came back rather than the clip Chrome was asked for. These
+ * tests assert that metadata, so they need a bitmap to decode to.
+ */
+function stubScreenshotRaster(width = 800, height = 600): void {
+  vi.stubGlobal('createImageBitmap', vi.fn(async () => ({ width, height, close: vi.fn() })))
+  vi.stubGlobal('OffscreenCanvas', class {
+    constructor(readonly width: number, readonly height: number) {}
+    getContext(): unknown { return { drawImage: vi.fn() } }
+    convertToBlob(options?: { type?: string }): Promise<Blob> {
+      const bytes = new Uint8Array(64)
+      return Promise.resolve({
+        size: bytes.length,
+        type: options?.type ?? 'image/png',
+        arrayBuffer: async () => bytes,
+      } as unknown as Blob)
+    }
+  })
+}
 
 describe('dispatchToolCall', () => {
   it('uses an already-loaded content script without injecting', async () => {
@@ -317,6 +385,10 @@ describe('dispatchToolCall', () => {
       args: { delta: false },
       budget: expect.objectContaining({ maxChars: expect.any(Number) }),
     }), { documentId: 'document-after' })
+    // The automatic read is deliberately cheaper than an explicit one: the
+    // model can always ask for more, but a navigation should not cost 32k.
+    const automatic = chromeMock.sendMessage.mock.calls.at(-1)?.[1] as { budget?: { maxChars?: number } }
+    expect(automatic.budget?.maxChars).toBeLessThanOrEqual(8_000)
   })
 
   it('does not wait for or return navigation page content when reads are not automatic', async () => {
@@ -381,6 +453,41 @@ describe('dispatchToolCall', () => {
       origins: ['https://app.example', 'https://embed.example.net'],
     }))
     expect(chromeMock.sendMessage).not.toHaveBeenCalled()
+  })
+
+  it('names what to do when an approval is withdrawn before it is answered', async () => {
+    const chromeMock = mockChrome({ tab: { id: 28, url: 'https://app.example/' } })
+    const authorize = vi.fn(async () => 'cancelled' as const)
+
+    const answer = await dispatchToolCall(
+      { id: 'withdrawn', name: 'browser_press', args: { key: 'Enter' } },
+      'auto',
+      undefined,
+      authorize,
+    )
+
+    expect(answer).toMatchObject({ ok: false, error: { code: 'action-failed' } })
+    expect((answer as { error: { message: string } }).error.message).toContain('Nothing ran')
+    expect((answer as { error: { message: string } }).error.message).toContain('Retry and answer the prompt')
+    expect(chromeMock.sendMessage).not.toHaveBeenCalled()
+  })
+
+  it('performs no page action while an approval is still pending', async () => {
+    const chromeMock = mockChrome({ tab: { id: 27, url: 'https://app.example/' } })
+    let resolveApproval: (value: 'approved') => void = () => {}
+    const authorize = vi.fn(() => new Promise<'approved'>((resolve) => { resolveApproval = resolve }))
+    const call: ToolCall = { id: 'pending-approval', name: 'browser_press', args: { key: 'Enter' } }
+
+    const pending = dispatchToolCall(call, 'auto', undefined, authorize)
+    // Let frame discovery and prompt construction settle without an answer.
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(authorize).toHaveBeenCalledTimes(1)
+    expect(chromeMock.sendMessage).not.toHaveBeenCalled()
+
+    resolveApproval('approved')
+    const answer = await pending
+    expect(answer.ok).toBe(true)
+    expect(chromeMock.sendMessage).toHaveBeenCalledTimes(1)
   })
 
   it('reports when no side panel can receive a state-changing approval', async () => {
@@ -496,6 +603,8 @@ describe('dispatchToolCall', () => {
     )
 
     expect(answer).toMatchObject({ ok: false, error: { message: expect.stringContaining('page changed while approval was pending') } })
+    // The message names what actually changed instead of blaming "the page".
+    expect(answer).toMatchObject({ ok: false, error: { message: expect.stringContaining('new origins: https://evil.example') } })
     expect(chromeMock.sendMessage).not.toHaveBeenCalled()
   })
 
@@ -517,7 +626,30 @@ describe('dispatchToolCall', () => {
     )
 
     expect(answer).toMatchObject({ ok: false, error: { message: expect.stringContaining('page changed while approval was pending') } })
+    expect(answer).toMatchObject({ ok: false, error: { message: expect.stringContaining('navigated (https://app.example/one → https://app.example/two)') } })
     expect(chromeMock.sendMessage).not.toHaveBeenCalled()
+  })
+
+  it('does not mistake a url-only frame listing for a navigation', async () => {
+    // `getAllFrames` can fail transiently and leave a url-only fallback entry.
+    // Comparing that against a document id used to read as a page change and
+    // threw away an approval the user had just granted.
+    const live: Array<{ frameId: number; parentFrameId: number; documentId?: string; url: string }> = []
+    const chromeMock = mockChrome({ tab: { id: 33, url: 'https://app.example/page' }, frames: live })
+    const authorize = vi.fn(async () => {
+      live.push({ frameId: 0, parentFrameId: -1, documentId: 'doc-1', url: 'https://app.example/page' })
+      return 'approved' as const
+    })
+
+    const answer = await dispatchToolCall(
+      { id: 'url-only-frames', name: 'browser_press', args: { key: 'Enter' } },
+      'auto',
+      undefined,
+      authorize,
+    )
+
+    expect(answer).toMatchObject({ ok: true })
+    expect(chromeMock.sendMessage).toHaveBeenCalled()
   })
 
   it('forces a full snapshot for a newly navigated frame before resuming deltas', async () => {
@@ -546,5 +678,225 @@ describe('dispatchToolCall', () => {
     await dispatchToolCall(deltaCall, 'auto')
     expect(seen).toEqual([{ frameId: 0, delta: true }, { frameId: 6, delta: false }])
     expect(chromeMock.getAllFrames).toHaveBeenCalledTimes(3)
+  })
+
+  it('captures a screenshot for browser_capture without touching the content script', async () => {
+    const debuggerApi = mockDebuggerApi()
+    stubScreenshotRaster()
+    const chromeMock = mockChrome({ tab: { id: 41, url: 'https://app.example/visual' }, debugger: debuggerApi })
+
+    const answer = await dispatchToolCall({ id: 'shot', name: 'browser_capture', args: {} }, 'auto')
+
+    expect(answer.ok).toBe(true)
+    const result = answer.result as { text: string; image: { mediaType: string; dataBase64: string; bytes: number } }
+    expect(result.text).toContain('<capture>')
+    expect(result.text).toContain('https://app.example/visual')
+    expect(result.text).toContain('UNTRUSTED_PAGE_CONTENT')
+    expect(result.image.mediaType).toBe('image/png')
+    expect(result.image.bytes).toBeGreaterThan(0)
+    expect(chromeMock.sendMessage).not.toHaveBeenCalled()
+    expect(debuggerApi.attach).toHaveBeenCalledWith({ tabId: 41 }, '1.3')
+    expect(debuggerApi.detach).toHaveBeenCalledWith({ tabId: 41 })
+  })
+
+  it('pairs a snapshot with a same-moment screenshot when the host asks for vision', async () => {
+    const debuggerApi = mockDebuggerApi()
+    stubScreenshotRaster()
+    const chromeMock = mockChrome({ tab: { id: 42, url: 'https://app.example/' }, debugger: debuggerApi })
+
+    const answer = await dispatchToolCall(
+      { id: 'visual-snapshot', name: 'browser_snapshot', args: { visual: true } },
+      'auto',
+    )
+
+    expect(answer.ok).toBe(true)
+    const result = answer.result as { text: string; image?: { mediaType: string } }
+    expect(result.text).toContain('page')
+    expect(result.image?.mediaType).toBe('image/png')
+    expect(chromeMock.sendMessage).toHaveBeenCalledTimes(1)
+    expect(debuggerApi.sendCommand).toHaveBeenCalledWith({ tabId: 42 }, 'Page.captureScreenshot', expect.anything())
+  })
+
+  it('keeps the snapshot text when the page cannot be captured', async () => {
+    const chromeMock = mockChrome({ tab: { id: 43, url: 'https://app.example/' } })
+
+    const answer = await dispatchToolCall(
+      { id: 'visual-snapshot-fallback', name: 'browser_snapshot', args: { visual: true } },
+      'auto',
+    )
+
+    expect(answer.ok).toBe(true)
+    const result = answer.result as { text: string; image?: unknown }
+    expect(result.text).toContain('page')
+    expect(result.text).toContain('screenshot unavailable')
+    expect(result.image).toBeUndefined()
+    expect(chromeMock.sendMessage).toHaveBeenCalledTimes(1)
+  })
+
+  it('answers a console read from the CDP session inside the untrusted boundary', async () => {
+    const debuggerApi = mockDebuggerApi()
+    const chromeMock = mockChrome({ tab: { id: 51, url: 'https://app.example/' }, debugger: debuggerApi })
+
+    const answer = await dispatchToolCall({ id: 'console-read', name: 'browser_console', args: {} }, 'auto')
+
+    expect(answer.ok).toBe(true)
+    const text = (answer.result as { text: string }).text
+    expect(text).toContain('console entries')
+    expect(text).toContain('UNTRUSTED_PAGE_CONTENT')
+    expect(debuggerApi.attach).toHaveBeenCalledWith({ tabId: 51 }, '1.3')
+    expect(debuggerApi.sendCommand).toHaveBeenCalledWith({ tabId: 51 }, 'Runtime.enable')
+    // Tab-level debugging never reaches the page's content script.
+    expect(chromeMock.sendMessage).not.toHaveBeenCalled()
+  })
+
+  it('blocks screenshots when page content sharing is off', async () => {
+    const debuggerApi = mockDebuggerApi()
+    mockChrome({ tab: { id: 44, url: 'https://app.example/' }, debugger: debuggerApi })
+
+    const answer = await dispatchToolCall({ id: 'shot-off', name: 'browser_capture', args: {} }, 'off')
+
+    expect(answer).toMatchObject({ ok: false, error: { code: 'action-failed', message: expect.stringContaining('sharing is disabled') } })
+    expect(debuggerApi.attach).not.toHaveBeenCalled()
+  })
+
+  it('reuses its own session instead of reporting DevTools', async () => {
+    // Chrome reports this string only when *this* extension already holds the
+    // target — the console/network priming hold, in practice. The capture must
+    // reuse it rather than claim DevTools is open.
+    const debuggerApi = mockDebuggerApi({ attachError: new Error('Another debugger is already attached to the tab with id: 45') })
+    stubScreenshotRaster()
+    mockChrome({ tab: { id: 45, url: 'https://app.example/' }, debugger: debuggerApi })
+
+    const answer = await dispatchToolCall({ id: 'shot-reuse', name: 'browser_capture', args: {} }, 'auto')
+
+    expect(answer).toMatchObject({ ok: true })
+    expect(debuggerApi.detach).toHaveBeenCalledWith({ tabId: 45 })
+  })
+
+  it('names DevTools when a foreign client holds the tab', async () => {
+    const debuggerApi = mockDebuggerApi({
+      attachError: new Error('Cannot attach to this target.'),
+      targets: [{ id: 't', tabId: 45, attached: true, type: 'page', title: 'x', url: 'https://app.example/' }],
+    })
+    mockChrome({ tab: { id: 45, url: 'https://app.example/' }, debugger: debuggerApi })
+
+    const answer = await dispatchToolCall({ id: 'shot-conflict', name: 'browser_capture', args: {} }, 'auto')
+
+    expect(answer).toMatchObject({ ok: false, error: { code: 'action-failed', message: expect.stringContaining('Close DevTools') } })
+  })
+})
+
+describe('invalidationReason', () => {
+  const approval = {
+    kind: 'action' as const,
+    action: 'browser_eval',
+    summary: 'run js',
+    origins: ['https://app.example'],
+    canTrust: true,
+  }
+  const frame = (over: Partial<TabFrame> = {}): TabFrame => ({
+    frameId: 0,
+    parentFrameId: -1,
+    documentId: 'doc',
+    url: 'https://app.example/',
+    ...over,
+  })
+
+  it('names added and removed origins when the frame set moved', () => {
+    const reason = invalidationReason(
+      approval,
+      { ...approval, origins: ['https://app.example', 'https://accounts.example'] },
+      { id: 'c', name: 'browser_eval', args: {} },
+      [frame()],
+      [frame(), frame({ frameId: 7, url: 'https://accounts.example/' })],
+    )
+
+    expect(reason).toContain('new origins: https://accounts.example')
+    expect(reason).not.toContain('removed origins')
+  })
+
+  it('names a replaced target document and a vanished frame', () => {
+    expect(invalidationReason(
+      approval,
+      approval,
+      { id: 'c', name: 'browser_eval', args: {} },
+      [frame({ url: 'https://app.example/one' })],
+      [frame({ documentId: 'other', url: 'https://app.example/two' })],
+    )).toBe('frame 0 navigated (https://app.example/one → https://app.example/two)')
+
+    expect(invalidationReason(
+      approval,
+      approval,
+      { id: 'c', name: 'browser_eval', args: { frame: 4 } },
+      [frame(), frame({ frameId: 4, url: 'https://widget.example/' })],
+      [frame()],
+    )).toBe('frame 4 disappeared')
+  })
+
+  it('points at the approval itself when the call no longer needs one', () => {
+    expect(invalidationReason(approval, undefined, { id: 'c', name: 'browser_eval', args: {} }, [frame()], [frame()]))
+      .toBe('the operation no longer needs approval on this page')
+  })
+})
+
+describe('uninjectable targets', () => {
+  const failing = () => new Error('Could not establish connection. Receiving end does not exist.')
+
+  it('tells the model a brand-new tab is still loading, not that the page is unsupported', async () => {
+    // A tab opened by browser_navigate has no committed URL for a moment; the
+    // old copy ("switch to a standard http or https page") sent the model
+    // hunting for another tool instead of retrying.
+    mockChrome({ tab: { id: 40, url: '' }, frames: [], respond: failing })
+
+    const answer = await dispatchToolCall({ id: 'fresh-tab', name: 'browser_wait', args: { ms: 3000 } }, 'auto')
+
+    expect(answer).toMatchObject({ ok: false, error: { message: expect.stringContaining('has not finished loading its first document') } })
+    expect(answer).toMatchObject({ ok: false, error: { message: expect.stringContaining('browser_wait or browser_snapshot again') } })
+  })
+
+  it('keeps the unsupported-page copy for pages the content script may never touch', async () => {
+    mockChrome({ tab: { id: 41, url: 'chrome://extensions/' }, frames: [], respond: failing })
+
+    const answer = await dispatchToolCall({ id: 'chrome-url', name: 'browser_wait', args: {} }, 'auto')
+
+    expect(answer).toMatchObject({ ok: false, error: { message: expect.stringContaining('does not support browser operations') } })
+  })
+})
+
+describe('browser_image dispatch', () => {
+  const PNG_BASE64 = Buffer.from('page-picture-bytes').toString('base64')
+
+  it('reads the page picture into an image result', async () => {
+    mockChrome({
+      tab: { id: 51, url: 'https://app.example/report' },
+      respond: () => ({ ok: true, result: { text: 'image source: img 1338x1722 px', imageSource: { kind: 'img', url: `data:image/png;base64,${PNG_BASE64}` } } }),
+    })
+    vi.stubGlobal('createImageBitmap', vi.fn(async () => ({ width: 1338, height: 1722, close: vi.fn() })))
+
+    const answer = await dispatchToolCall({ id: 'page-image', name: 'browser_image', args: { selector: 'img' } }, 'auto')
+
+    expect(answer).toMatchObject({ ok: true })
+    const result = answer.result as { text: string; image?: { mediaType: string; width: number; height: number } }
+    expect(result.text).toContain('kind: img')
+    expect(result.image).toMatchObject({ mediaType: 'image/png', width: 1338, height: 1722 })
+  })
+
+  it('explains a target that is not a picture', async () => {
+    mockChrome({
+      tab: { id: 52, url: 'https://app.example/report' },
+      respond: () => ({ ok: true, result: { text: 'image source: img' } }),
+    })
+
+    const answer = await dispatchToolCall({ id: 'not-image', name: 'browser_image', args: { selector: '.note' } }, 'auto')
+
+    expect(answer).toMatchObject({ ok: false, error: { code: 'content-unavailable', message: expect.stringContaining('did not report a picture') } })
+  })
+
+  it('stays blocked while page content sharing is off', async () => {
+    mockChrome({ tab: { id: 53, url: 'https://app.example/report' } })
+
+    const answer = await dispatchToolCall({ id: 'off', name: 'browser_image', args: { selector: 'img' } }, 'off')
+
+    expect(answer).toMatchObject({ ok: false, error: { message: expect.stringContaining('Page content sharing is disabled') } })
   })
 })

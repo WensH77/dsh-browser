@@ -100,9 +100,25 @@ function allocateDimension(total: number, childCount: number): { main: number; c
   }
 }
 
-/** A stable key for detecting frame navigation between delta snapshots. */
-export function frameDocumentKey(frame: TabFrame): string {
-  return frame.documentId ?? frame.url
+/**
+ * Whether two observations of one frame are the same document.
+ *
+ * `documentId` identifies a document exactly, but a frame listing may fall back
+ * to URL-only entries when the frame tree is briefly unavailable. Comparing a
+ * `documentId` against a URL — what a naive key comparison does — reports a
+ * navigation that never happened, so only compare ids when both sides have one
+ * and fall back to the URL otherwise.
+ *
+ * @param before - earlier observation, if the frame was listed then.
+ * @param after - later observation, if the frame is listed now.
+ * @returns true when both observations describe the same document.
+ */
+export function sameFrameDocument(before: TabFrame | undefined, after: TabFrame | undefined): boolean {
+  if (before === undefined || after === undefined) return false
+  if (before.documentId !== undefined && after.documentId !== undefined) {
+    return before.documentId === after.documentId
+  }
+  return before.url === after.url
 }
 
 /** Human-readable origin label; unsupported/opaque URLs stay visibly distinct. */

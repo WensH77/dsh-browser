@@ -15,3 +15,4 @@ allowBuilds:
 # 内测版 @deepseek-ai 包需要在发布后立即安装。
 minimumReleaseAgeExclude:
   - '@deepseek-ai/*'
+  - '@types/node@22.20.2'

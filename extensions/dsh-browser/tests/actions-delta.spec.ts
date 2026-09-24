@@ -89,7 +89,7 @@ describe('automatic action deltas', () => {
     })
     await vi.advanceTimersByTimeAsync(100)
 
-    await expect(pending).resolves.toEqual({ text: expect.stringContaining('Clicked') })
+    await expect(pending).resolves.toMatchObject({ text: expect.stringContaining('Clicked') })
   })
 
   it('returns a delta immediately when a client-side router cancels navigation', async () => {

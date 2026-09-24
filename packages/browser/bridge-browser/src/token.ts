@@ -13,6 +13,7 @@ import { randomBytes, timingSafeEqual } from 'node:crypto'
 import { chmod, mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import { dirname } from 'node:path'
 import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
+import { DEFAULT_TOKEN_BYTES } from './protocol.ts'
 
 /** File name of the persisted token inside the dsh home. */
 export const TOKEN_FILE_NAME = 'ext-bridge-token'
@@ -22,7 +23,7 @@ export const TOKEN_FILE_NAME = 'ext-bridge-token'
  * @param bytes - entropy bytes; defaults to DEFAULT_TOKEN_BYTES (256-bit).
  * @returns the hex token string.
  */
-export function generateToken(bytes: number = 32): string {
+export function generateToken(bytes: number = DEFAULT_TOKEN_BYTES): string {
   return randomBytes(bytes).toString('hex')
 }
 
