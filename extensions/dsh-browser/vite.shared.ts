@@ -9,15 +9,10 @@ import { defineConfig } from 'vite'
  * config file; scripts/build.mjs runs them sequentially into one dist/.
  */
 
-/**
- * Build target: `chrome` (default) or `firefox` (set EXT_TARGET=firefox or
- * pass --firefox to scripts/build.mjs). Each target gets its own manifest and
- * output directory so both builds can coexist.
- */
-export const browserTarget = process.env.EXT_TARGET === 'firefox' ? 'firefox' : 'chrome'
-export const targetManifest = browserTarget === 'firefox' ? 'manifest.firefox.json' : 'manifest.json'
+/** The Chrome MV3 manifest copied into the build output. */
+export const targetManifest = 'manifest.json'
 
-export const outDir = resolve(import.meta.dirname, browserTarget === 'firefox' ? 'dist-firefox' : 'dist')
+export const outDir = resolve(import.meta.dirname, 'dist')
 
 /** Copy manifest, locale catalogs, and icons into the target's outDir. */
 export const copyManifest = {
@@ -37,9 +32,6 @@ export const sharedPlugins = [tsconfigPaths({ projects: ['./tsconfig.json'] }), 
 /** Shared build options for the non-panel targets. */
 export function targetBuild(entry: string, format: 'es' | 'iife', entryFileNames: string, emptyOutDir: boolean) {
   return defineConfig({
-    define: {
-      'import.meta.env.EXT_TARGET': JSON.stringify(browserTarget),
-    },
     build: {
       outDir,
       emptyOutDir,

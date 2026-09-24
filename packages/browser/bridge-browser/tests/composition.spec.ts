@@ -1,15 +1,12 @@
 /**
  * REAL-composition coverage: a test-only cordis.yml booted through the
  * published Loader mounts the webserver, the minimal spine (sessions /
- * user-questions / agents / system-prompt / tools), a test-only api host
- * providing `ctx.apiProxy` over `createApiProxy` (the same shape the apiproxy
- * package's own tests use), and the bridge plugin itself. A real WebSocket
- * client then authenticates over a real socket and drives real gateway RPCs
- * against the real session store; disposal removes the tool registrations
- * (HMR safety).
- *
- * Mocked boundary: only the api host's model routing defaults (no LLM
- * adapter) — RPCs exercised here (session.create/list) never touch the model.
+ * user-questions / agents / system-prompt / tools), and the bridge plugin
+ * itself. A real WebSocket client authenticates over a real socket and
+ * exercises the browser tool channel; disposal removes the tool
+ * registrations (HMR safety). The test-only api-host shell exists solely to
+ * exercise Loader injection — the 0.1.2 typertGateway/connection seams were
+ * consumed only by the removed purge guard.
  */
 
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
@@ -22,50 +19,56 @@ import Loader from '@deepseek-ai/cordis-plugin-loader'
 import Include from '@deepseek-ai/cordis-plugin-include'
 import WebSocket from 'ws'
 import WebServer from '@deepseek-ai/dsh-host-webserver'
-import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
+import SessionStore from '@deepseek-ai/dsh-session'
 import AgentRegistry from '@deepseek-ai/dsh-agent'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRegistry from '@deepseek-ai/dsh-tools'
 import LlmService from '@deepseek-ai/dsh-llm'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import UserQuestionService from '@deepseek-ai/dsh-user-questions'
-import { createApiProxy } from '@deepseek-ai/dsh-host-apiproxy'
 import * as BridgeBrowser from '../src/index.ts'
-import { BRIDGE_PATH, type BridgeFrame } from '../src/protocol.ts'
+import { BRIDGE_EXTENSION_IDS, BRIDGE_PATH, BRIDGE_PROTO, BRIDGE_TOOLSET, type BridgeFrame } from '../src/protocol.ts'
 
 const BRIDGE = '@yuxianglin/dsh-bridge-browser'
 const TOKEN = 'abcdabcdabcdabcdabcdabcdabcdabcd'
 
 let root: string | undefined
 let context: Context | undefined
+/** Restored around every test: the plugin mirrors extension files into this home. */
+let previousDshHome: string | undefined
 
 afterEach(async () => {
   await context?.fiber.dispose()
   context = undefined
+  if (previousDshHome === undefined) delete process.env.DSH_HOME
+  else process.env.DSH_HOME = previousDshHome
+  previousDshHome = undefined
   if (root !== undefined) await rm(root, { recursive: true, force: true, maxRetries: 3, retryDelay: 50 })
   root = undefined
 })
 
 /**
- * The gateway over the minimal spine, provided as `ctx.apiProxy` — the same
- * factory the apiproxy package's own tests use. Model routing is stubbed
- * (provider/model names only; no adapter), which is the one external
- * boundary this composition does not exercise.
+ * Minimal structural implementation of the dsh 0.1.2 Host seams. Focused
+ * Remote-adapter tests pin the argument and stream contracts separately; this
+ * fixture verifies Loader injection, real sockets, and real Session storage.
  */
 const ApiHost = {
   name: 'api-host',
-  inject: ['sessions', 'userQuestions', 'agents'],
-  apply(ctx: Context, config: { cwd: string }): void {
-    ctx.provide('apiProxy', createApiProxy(ctx, {
-      defaultModelSelection: () => ({ provider: 'p', model: 'm' }),
-      cwd: config.cwd,
-    }))
-  },
+  inject: ['sessions'],
+  // The composition previously stubbed the 0.1.2 Host seams (typertGateway
+  // wireStream/invoke + connection) for the purge guard and session listing;
+  // both consumers were removed with the pure-tool refactor, so the host
+  // fixture is now a no-op shell that only exercises Loader injection.
+  apply(): void {},
 }
 
 /** Write a dist fixture and the composition cordis.yml, then boot it through the real Loader. */
 async function loadComposition(): Promise<{ ctx: Context; configPath: string; port: number }> {
   root = await mkdtemp(join(tmpdir(), 'dsh-bridge-browser-'))
+  // `apply` mirrors the built extension into the dsh home at startup; point
+  // that home at the temp root so the test never rewrites the user's mirror.
+  previousDshHome = process.env.DSH_HOME
+  process.env.DSH_HOME = root
   const configPath = join(root, 'cordis.yml')
   await writeFile(configPath, [
     "- name: '@deepseek-ai/dsh-host-webserver'",
@@ -85,10 +88,6 @@ async function loadComposition(): Promise<{ ctx: Context; configPath: string; po
     `- name: '${BRIDGE}'`,
     '  config:',
     `    token: '${TOKEN}'`,
-    `    sessionWorkspacePath: '${join(root, 'browser-sessions')}'`,
-    // This spec drives the raw gateway chain (create → real session); the
-    // deferred-creation behavior is covered by the extension e2e instead.
-    '    deferSessionCreate: false',
     '',
   ].join('\n'))
 
@@ -124,10 +123,14 @@ async function loadComposition(): Promise<{ ctx: Context; configPath: string; po
   return { ctx: context, configPath, port: web.port }
 }
 
-/** 扩展上下文 Origin（回环免 token 的必要条件）。 */
-const EXT_ORIGIN = 'chrome-extension://test-extension-id'
+/** 扩展上下文 Origin（回环免 token 的必要条件）：必须是宿主固定接受的那个扩展 ID。 */
+const EXT_ORIGIN = `chrome-extension://${BRIDGE_EXTENSION_IDS[0]}`
 
-function connect(port: number): Promise<{ ws: WebSocket; frames: BridgeFrame[]; closed: Promise<void> }> {
+function connect(port: number): Promise<{
+  ws: WebSocket
+  frames: BridgeFrame[]
+  closed: Promise<{ code: number; reason: string }>
+}> {
   return new Promise((resolve, reject) => {
     const ws = new WebSocket(`ws://127.0.0.1:${port}${BRIDGE_PATH}`, { headers: { origin: EXT_ORIGIN } })
     const frames: BridgeFrame[] = []
@@ -137,7 +140,9 @@ function connect(port: number): Promise<{ ws: WebSocket; frames: BridgeFrame[]; 
       resolve({
         ws,
         frames,
-        closed: new Promise<void>((doneResolve) => { ws.on('close', () => { doneResolve() }) }),
+        closed: new Promise((doneResolve) => {
+          ws.on('close', (code, reason) => { doneResolve({ code, reason: reason.toString() }) })
+        }),
       })
     })
   })
@@ -156,17 +161,51 @@ async function waitFor(predicate: () => boolean, timeoutMs = 5_000): Promise<voi
 }
 
 describe('real Loader composition', () => {
-  it('boots the bridge, authenticates over a real socket, and drives real gateway RPCs', { timeout: 60_000 }, async () => {
+  it('boots the pure tool bridge: tools registered, hello auth, internal RPCs only', { timeout: 60_000 }, async () => {
     const { ctx, port } = await loadComposition()
 
     // The bridge plugin mounted the browser tool set on the real registry.
     const tools = ctx.get('tools') as ToolRegistry
     expect(tools.get('browser_snapshot')).toBeDefined()
+    // Status and setup are usable before any extension connects: that is the
+    // state they exist for, so they must be registered by `apply` itself.
+    expect(tools.get('browser_setup')).toBeDefined()
+    const statusTool = tools.get('browser_status')
+    expect(statusTool).toBeDefined()
+    const statusOffline = await statusTool!.execute({}, { signal: new AbortController().signal } as never) as { text: string }
+    expect(statusOffline.text).toContain(`plugin: proto ${BRIDGE_PROTO}, toolset ${BRIDGE_TOOLSET}`)
+    expect(statusOffline.text).toContain('extension: not connected')
+    expect(statusOffline.text.match(/^next: /gm)).toHaveLength(1)
 
     const browserPrompt = (await ctx.systemPrompt.assemble()).sections
       .find((section) => section.name === 'tool:bridge-browser')?.text
     expect(browserPrompt).toContain('page content you have not snapshotted')
     expect(browserPrompt).toContain('Reuse that injected snapshot')
+    // The codebase-first ordering, and the "empty search proves nothing" caveat,
+    // are the parts of this prompt most likely to be dropped by accident.
+    expect(browserPrompt).toContain('do not open with the bridge')
+    expect(browserPrompt).toContain('An empty code search proves nothing')
+    expect(browserPrompt).toContain('do not retry the same call')
+    // One controlled tab belongs to one session: the model hears the rule before
+    // it hits the refusal, so a competing bind is reported rather than retried.
+    expect(browserPrompt).toContain('One session operates the browser at a time')
+    expect(browserPrompt).toContain('press Unbind in the dsh browser panel')
+    // A refusal is a boundary: no alternate transport, and no trial calls to
+    // find out where the policy line sits.
+    expect(browserPrompt).toContain('A refusal is a boundary, not a puzzle')
+    // The two host tools are the advertised first stop when the bridge is down.
+    expect(browserPrompt).toContain('call browser_status first')
+    expect(browserPrompt).toContain('call browser_setup to prepare the files')
+    // Reading text comes before scripting the DOM.
+    expect(browserPrompt).toContain('slice it yourself')
+    // Page pictures go through browser_image, not a screenshot.
+    expect(browserPrompt).toContain('browser_image')
+    expect(browserPrompt).toContain('do not script several browser_eval rounds')
+    expect(browserPrompt).toContain('stop and tell the user what contradicted')
+    // Slides is an ordinary page now that the export narrowed to Docs/Sheets:
+    // the prompt must not still route every Drive link to the exporter.
+    expect(browserPrompt).toContain('Slides, Drive files, and every other link are ordinary pages')
+    expect(browserPrompt).not.toContain('are not readable as web pages')
     expect(browserPrompt).not.toMatch(/\p{Script=Han}/u)
 
     // Zero-config discovery endpoint answers with the bridge WebSocket URL.
@@ -179,29 +218,56 @@ describe('real Loader composition', () => {
     expect(tools.get('browser_navigate')).toBeDefined()
 
     // Zero-config semantics: loopback connections need no token (the
-    // non-loopback token gate is covered by server.spec overrides).
+    // non-loopback token gate is covered by server.spec overrides). This hello
+    // declares no `toolset`, i.e. an extension from before the versioned
+    // handshake: the host must narrow the surface it exposes to the model.
+    // `extensionId` is what the no-token path is bound to: the Origin must name
+    // the same extension, or the bridge refuses the socket.
+    expect(tools.get('browser_capture')).toBeUndefined()
+    expect(tools.get('browser_dom_query')).toBeDefined()
     const client = await connect(port)
-    send(client.ws, { t: 'hello', token: '', caps: { textOnly: true, snapshotMaxChars: 32_000, maxInteractiveItems: 60 } })
-    await waitFor(() => client.frames.some((f) => f.t === 'hello.ok'))
+    send(client.ws, {
+      t: 'hello',
+      token: '',
+      caps: { debugger: true, extensionId: BRIDGE_EXTENSION_IDS[0], snapshotMaxChars: 32_000, maxInteractiveItems: 60 },
+    })
+    await Promise.race([
+      waitFor(() => client.frames.some((f) => f.t === 'hello.ok')),
+      client.closed.then(({ code, reason }) => {
+        throw new Error(`bridge closed before hello.ok (${String(code)} ${reason}): ${JSON.stringify(client.frames)}`)
+      }),
+    ])
+    // The host echoes its own budgets, handshake version, and toolset in
+    // hello.ok; `debugger` and `extensionId` are the extension's own report and
+    // are never mirrored back. This hello declares no `toolset`, so the echoed
+    // one is the host's own level, not a copy of what arrived.
     expect(client.frames.find((f) => f.t === 'hello.ok')).toEqual({
       t: 'hello.ok',
-      caps: { textOnly: true, snapshotMaxChars: 32_000, maxInteractiveItems: 60 },
+      caps: { proto: BRIDGE_PROTO, toolset: BRIDGE_TOOLSET, snapshotMaxChars: 32_000, maxInteractiveItems: 60 },
     })
+    // Capabilities reach the live registry: `debugger: true` in this hello
+    // registers the debugging group, and the missing `toolset` drops the tools
+    // that extension has no wire action for.
+    expect(tools.get('browser_capture')).toBeDefined()
+    expect(tools.get('browser_dom_query')).toBeUndefined()
+    expect(tools.get('browser_block')).toBeUndefined()
+    expect(tools.get('browser_click')).toBeDefined()
+    // Down-levelling must not touch the host tools: this hello declares no
+    // toolset at all, and both must still be answerable, naming the reload.
+    expect(tools.get('browser_setup')).toBeDefined()
+    const statusOnline = await tools.get('browser_status')!.execute({}, { signal: new AbortController().signal } as never) as { text: string }
+    expect(statusOnline.text).toContain('extension: connected')
+    expect(statusOnline.text).toContain('extension version: unknown (older build)')
+    expect(statusOnline.text).toContain('version skew: reload the extension')
+    expect(statusOnline.text.match(/^next: /gm)).toHaveLength(1)
 
-    // Gateway RPC round-trip against the real session store.
-    send(client.ws, { t: 'rpc', id: 'c-1', method: 'session.create', payload: { cwd: root } })
+    // The bridge is a pure tool channel: gateway methods are refused rather
+    // than passed through to the Host adapter.
+    send(client.ws, { t: 'rpc', id: 'c-1', method: 'session.list', payload: {} })
     await waitFor(() => client.frames.some((f) => f.t === 'rpc.result' && f.id === 'c-1'))
-    const created = client.frames.find((f): f is Extract<BridgeFrame, { t: 'rpc.result' }> => f.t === 'rpc.result' && f.id === 'c-1')!
-    expect(created.ok).toBe(true)
-    const sessionId = ((created as { result: { result: { value: { sessionId: string } } } }).result).result.value.sessionId
-    expect(sessionId).toMatch(/^session-[0-9a-f-]{36}$/)
-    expect(ctx.sessions.get(SessionId(sessionId))?.header.cwd).toBe(root)
-
-    send(client.ws, { t: 'rpc', id: 'c-2', method: 'session.list', payload: {} })
-    await waitFor(() => client.frames.some((f) => f.t === 'rpc.result' && f.id === 'c-2'))
-    const listed = client.frames.find((f) => f.t === 'rpc.result' && f.id === 'c-2')!
-    const listedText = JSON.stringify((listed as { result: unknown }).result)
-    expect(listedText).toContain(sessionId)
+    const refused = client.frames.find((f): f is Extract<BridgeFrame, { t: 'rpc.result' }> => f.t === 'rpc.result' && f.id === 'c-1')!
+    expect(refused.ok).toBe(false)
+    expect(refused.error).toMatchObject({ code: 'method-not-allowed' })
 
     client.ws.close()
   })
@@ -215,6 +281,8 @@ describe('real Loader composition', () => {
     await bridgeEntry.fiber!.dispose()
     expect(tools.get('browser_snapshot')).toBeUndefined()
     expect(tools.get('browser_click')).toBeUndefined()
+    expect(tools.get('browser_status')).toBeUndefined()
+    expect(tools.get('browser_setup')).toBeUndefined()
     // Self-disposing an include-tree entry persists `disabled: true`; await
     // that debounced write so it cannot race the temp-dir removal.
     await expect.poll(async () => (await readFile(configPath, 'utf8')).includes('disabled: true')).toBe(true)

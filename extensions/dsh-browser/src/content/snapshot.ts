@@ -10,7 +10,7 @@
  * @module
  */
 
-import { accessibleName, collectInteractive, isInViewport, mainText, pageText, truncate } from './extract.ts'
+import { accessibleName, collectInteractive, cssEscape, isChromeLandmark, isInViewport, mainText, pageText, truncate } from './extract.ts'
 import { ElementIds } from './ids.ts'
 import { isSensitiveField, maskValue } from './privacy.ts'
 
@@ -43,6 +43,8 @@ interface InventoryItem {
   selected?: boolean
   href?: string
   inViewport: boolean
+  /** Part of persistent page chrome (nav/header/footer) rather than content. */
+  chrome?: boolean
 }
 
 /** One numbered form field with its (masked) value. */
@@ -73,6 +75,19 @@ export interface SnapshotView {
   reindexed: boolean
   /** Budget accounting: characters cut from main text and items/forms dropped by count caps. */
   truncated: { mainChars: number; itemsDropped: number; formsDropped: number }
+  /** Item cap in force for this frame, so a saturated inventory is visible as such. */
+  itemCap: number
+  /**
+   * Chrome items left out of this render because they are byte-identical to the
+   * previous snapshot: their indices still work, the text just is not resent.
+   */
+  collapsedChrome: { count: number; sinceVersion: number } | undefined
+  /**
+   * Highest-ranked controls the item cap dropped, each with a verified unique
+   * CSS selector. They stay reachable through `browser_click { selector }`
+   * without the model having to inspect the DOM itself.
+   */
+  omitted: Array<{ name: string; selector: string }>
   /** 总预算（渲染封顶用）。 */
   budgetChars: number
 }
@@ -122,8 +137,16 @@ export function buildSnapshot(ids: ElementIds, options: SnapshotOptions, last: S
 
   // Measure viewport membership once. Calling getBoundingClientRect from a
   // sort comparator forces repeated layout reads on large pages.
-  const elementViews = elements.map((element) => ({ element, inViewport: isInViewport(element) }))
-  const ordered = [...elementViews].sort((a, b) => Number(b.inViewport) - Number(a.inViewport))
+  const elementViews = elements.map((element) => ({
+    element,
+    inViewport: isInViewport(element),
+    inChrome: isChromeLandmark(element),
+  }))
+  // Rank what the user is looking at, and demote persistent chrome: a sidebar
+  // full of links must not consume the inventory budget the page content needs.
+  const rank = (view: { inViewport: boolean; inChrome: boolean }): number =>
+    (view.inViewport ? 2 : 0) + (view.inChrome ? 0 : 1)
+  const ordered = [...elementViews].sort((a, b) => rank(b) - rank(a))
   const names = new Map<Element, string>()
   const nameOf = (element: Element): string => {
     let name = names.get(element)
@@ -143,6 +166,7 @@ export function buildSnapshot(ids: ElementIds, options: SnapshotOptions, last: S
       role: roleOf(el),
       name: nameOf(el),
       inViewport,
+      ...isChromeLandmark(el) ? { chrome: true } : {},
     }
     if (el instanceof HTMLButtonElement && el.disabled) item.disabled = true
     if (el instanceof HTMLInputElement) {
@@ -155,6 +179,18 @@ export function buildSnapshot(ids: ElementIds, options: SnapshotOptions, last: S
     if (el instanceof HTMLAnchorElement && el.href !== '') item.href = hrefHeadline(el.href)
     items.push(item)
   }
+
+  // Chrome that did not change since the last snapshot is not resent: the model
+  // still holds it, the indices remain valid, and re-reading it is a tool call.
+  const chromeItems = items.filter((item) => item.chrome === true)
+  const previousChrome = last === null ? [] : last.items.filter((item) => item.chrome === true)
+  const chromeUnchanged = last !== null
+    && chromeItems.length > 0
+    && chromeItems.length === previousChrome.length
+    && chromeItems.every((item, at) => sameChromeItem(item, previousChrome[at]!))
+  const collapsedChrome = chromeUnchanged
+    ? { count: chromeItems.length, sinceVersion: last.version }
+    : undefined
 
   // Form controls are already part of the visible interactive inventory, so
   // reuse that scan instead of querying, styling, and measuring them again.
@@ -226,6 +262,12 @@ export function buildSnapshot(ids: ElementIds, options: SnapshotOptions, last: S
     changed: options.delta === true ? [...changed] : [],
     removed: options.delta === true ? removedIds : [],
     reindexed,
+    itemCap: options.budget.maxItems,
+    collapsedChrome,
+    omitted: ordered
+      .slice(options.budget.maxItems, options.budget.maxItems + OMITTED_SELECTOR_HINTS)
+      .map(({ element }) => ({ name: nameOf(element), selector: uniqueSelector(element) }))
+      .filter((entry): entry is { name: string; selector: string } => entry.selector !== undefined),
     truncated: {
       mainChars: main.truncated,
       itemsDropped: Math.max(0, elements.length - options.budget.maxItems),
@@ -274,6 +316,80 @@ function renderItem(item: InventoryItem): string {
   return `  [${item.index}] ${item.role} "${item.name}"${stateText}${hrefText}`
 }
 
+/** How many dropped controls get a ready-made selector line. */
+const OMITTED_SELECTOR_HINTS = 8
+
+/** Escape one attribute value for a CSS string literal. */
+function cssAttributeValue(value: string): string {
+  return value.replace(/\\/g, '\\\\').replace(/"/g, '\\"')
+}
+
+/**
+ * Build a short CSS selector that resolves to exactly this element, or
+ * undefined when no short form is unique. Never returns an unverified
+ * selector: a wrong handle is worse than none.
+ *
+ * @param el - the dropped control.
+ * @returns a unique selector, or undefined.
+ */
+export function uniqueSelector(el: Element): string | undefined {
+  const doc = el.ownerDocument
+  const unique = (selector: string): boolean => {
+    try {
+      return doc.querySelectorAll(selector).length === 1
+    } catch {
+      return false
+    }
+  }
+  // `localName` keeps SVG's case-sensitive tag names (`clipPath`, `foreignObject`)
+  // usable in a selector; `tagName` is upper-cased for HTML but not for SVG.
+  const tag = el.localName
+  const id = el.getAttribute('id')
+  if (id !== null && id.trim() !== '') {
+    const candidate = `#${cssEscape(id.trim())}`
+    if (unique(candidate)) return candidate
+  }
+  // Read the class attribute rather than `className`: on SVG elements that
+  // property is an SVGAnimatedString, so the string check would drop every
+  // class and leave the model without a handle for SVG controls.
+  const classes = (el.getAttribute('class') ?? '').trim().split(/\s+/).filter((name) => name !== '')
+  const candidates: string[] = []
+  if (classes.length > 0) candidates.push(`${tag}.${classes.slice(0, 3).map(cssEscape).join('.')}`)
+  for (const name of classes) candidates.push(`${tag}.${cssEscape(name)}`)
+  for (const attribute of ['name', 'href', 'data-id', 'type', 'value']) {
+    const value = el.getAttribute(attribute)
+    if (value !== null && value !== '') candidates.push(`${tag}[${attribute}="${cssAttributeValue(value)}"]`)
+  }
+  candidates.push(tag)
+  for (const candidate of candidates) {
+    if (unique(candidate)) return candidate
+    const parent = el.parentElement
+    if (parent === null || !el.matches(candidate)) continue
+    const sameTag = [...parent.children].filter((sibling) => sibling.tagName === el.tagName)
+    const position = sameTag.indexOf(el) + 1
+    const scoped = `${candidate}:nth-of-type(${position})`
+    if (unique(scoped)) return scoped
+    const parentId = parent.getAttribute('id')
+    if (parentId !== null && parentId.trim() !== '') {
+      const nested = `#${cssEscape(parentId.trim())} > ${scoped}`
+      if (unique(nested)) return nested
+    }
+  }
+  return undefined
+}
+
+
+/** Whether two chrome entries would render identically. */
+function sameChromeItem(current: InventoryItem, previous: InventoryItem): boolean {
+  return current.index === previous.index
+    && current.role === previous.role
+    && current.name === previous.name
+    && current.disabled === previous.disabled
+    && current.checked === previous.checked
+    && current.selected === previous.selected
+    && current.href === previous.href
+}
+
 function renderForm(form: FormFieldView, includeIdentity: boolean): string {
   const identity = includeIdentity ? `${form.label} (${form.kind}) ` : ''
   const state = form.checked === undefined
@@ -287,7 +403,12 @@ function appendTruncationNotes(lines: string[], view: SnapshotView): void {
   if (view.truncated.mainChars > 0) notes.push(`Main content truncated by ${view.truncated.mainChars} characters`)
   if (view.truncated.itemsDropped > 0) notes.push(`${view.truncated.itemsDropped} additional elements omitted`)
   if (view.truncated.formsDropped > 0) notes.push(`${view.truncated.formsDropped} additional form fields omitted`)
-  if (notes.length > 0) lines.push(`\n(${notes.join('; ')}. Use browser_get_text or specify region for more content.)`)
+  if (notes.length > 0) {
+    const advice = view.truncated.itemsDropped > 0
+      ? `The inventory is capped at ${view.itemCap} numbered items for this frame; dropped controls are listed with selectors below and can be clicked directly. Use browser_get_text or a region for more text.`
+      : 'Use browser_get_text or specify region for more content.'
+    lines.push(`\n(${notes.join('; ')}. ${advice})`)
+  }
 }
 
 export function renderSnapshot(view: SnapshotView, delta: boolean, maxChars: number = view.budgetChars): string {
@@ -332,10 +453,22 @@ export function renderSnapshot(view: SnapshotView, delta: boolean, maxChars: num
     lines.push('Main content:')
     lines.push(view.main)
   }
-  if (view.items.length > 0) {
+  const collapsed = view.collapsedChrome
+  // Collapsed chrome keeps its indices; only the text is withheld.
+  const renderedItems = collapsed === undefined
+    ? view.items
+    : view.items.filter((item) => item.chrome !== true)
+  if (renderedItems.length > 0 || collapsed !== undefined) {
     lines.push('')
-    lines.push('Interactive elements:')
-    for (const item of view.items) lines.push(renderItem(item))
+    lines.push(collapsed === undefined
+      ? 'Interactive elements:'
+      : `Interactive elements (${collapsed.count} unchanged nav/header/footer items from snapshot v${collapsed.sinceVersion} are omitted; their indices still work and browser_dom_query returns their selectors):`)
+    for (const item of renderedItems) lines.push(renderItem(item))
+  }
+  if (view.omitted.length > 0) {
+    lines.push('')
+    lines.push('Omitted by the inventory cap (click them by selector):')
+    for (const entry of view.omitted) lines.push(`  ${entry.name} — selector: ${entry.selector}`)
   }
   if (view.forms.length > 0) {
     lines.push('')
