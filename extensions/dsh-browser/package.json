@@ -1,7 +1,7 @@
 {
   "name": "dsh-browser-extension",
   "description": "Chrome MV3 extension for the dsh browser bridge: status panel, options page and approval popup that read and operate a user-controlled tab",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "author": "Yuxiang Lin",
   "license": "MIT",
   "private": true,
