@@ -181,9 +181,9 @@ describe('response overrides', () => {
   })
 
   it('replaces the response when the same pattern is mocked again', async () => {
-    // Rules are matched first-installed-first, so a second mock for one pattern
-    // has to take the first one's place: appending it left the page on the old
-    // body while the tool reported the new override as active.
+    // A second mock for one pattern has to take the first one's place: appending
+    // it left the page on the old body while the tool reported the new override
+    // as active.
     await harness.devtools.installMock(1, { pattern: '/api/user', body: 'stale' })
     const count = await harness.devtools.installMock(1, { pattern: '/api/user', body: 'fresh' })
 
@@ -197,6 +197,29 @@ describe('response overrides', () => {
       { tabId: 1 },
       'Fetch.fulfillRequest',
       expect.objectContaining({ body: 'c3RhbGU=' }),
+    )
+  })
+
+  it('answers with the most recently installed of two overlapping patterns', async () => {
+    // Overlap is normal (a broad pattern captured first, then a narrower one for
+    // one route). First-match answered such a request from the older, broader
+    // rule while the tool reported the newer one as active.
+    await harness.devtools.installMock(1, { pattern: '/api/', body: 'wide' })
+    await harness.devtools.installMock(1, { pattern: '/api/user', body: 'narrow' })
+
+    harness.emit(1, 'Fetch.requestPaused', { requestId: 'p1', request: { url: 'https://app.example/api/user/7' } })
+    // The broad rule still answers what only it matches — newest-first must not
+    // narrow coverage to the last installed pattern.
+    harness.emit(1, 'Fetch.requestPaused', { requestId: 'p2', request: { url: 'https://app.example/api/orders' } })
+
+    await vi.waitFor(() => {
+      expect(harness.sendCommand).toHaveBeenCalledWith({ tabId: 1 }, 'Fetch.fulfillRequest', expect.objectContaining({ requestId: 'p1', body: 'bmFycm93' }))
+      expect(harness.sendCommand).toHaveBeenCalledWith({ tabId: 1 }, 'Fetch.fulfillRequest', expect.objectContaining({ requestId: 'p2', body: 'd2lkZQ==' }))
+    })
+    expect(harness.sendCommand).not.toHaveBeenCalledWith(
+      { tabId: 1 },
+      'Fetch.fulfillRequest',
+      expect.objectContaining({ requestId: 'p1', body: 'd2lkZQ==' }),
     )
   })
 

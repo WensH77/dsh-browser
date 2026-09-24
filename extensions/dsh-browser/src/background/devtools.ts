@@ -291,14 +291,21 @@ function toUrlPattern(pattern: string): string {
   return pattern.includes('*') ? pattern : `*${pattern}*`
 }
 
-/** Fulfil, fail, or release one paused request according to the installed rules. */
+/**
+ * Fulfil, fail, or release one paused request according to the installed rules.
+ *
+ * The most recently installed matching rule wins. Overlapping patterns are
+ * normal — a broad prefix pattern installed first, then a narrower one for a
+ * single route — and first-match would answer those with the older, broader
+ * rule while the tool reported the newer one as active.
+ */
 async function answerPausedRequest(tabId: number, event: Record<string, unknown>): Promise<void> {
   const requestId = typeof event.requestId === 'string' ? event.requestId : undefined
   if (requestId === undefined) return
   const request = event.request as { url?: unknown } | undefined
   const url = typeof request?.url === 'string' ? request.url : ''
   const session = sessions.get(tabId)
-  const rule = session?.mocks.find((candidate) => matchesPattern(url, candidate.pattern))
+  const rule = lastMatchingRule(session?.mocks ?? [], url)
   try {
     if (rule === undefined) {
       await chrome.debugger.sendCommand({ tabId }, 'Fetch.continueRequest', { requestId })
@@ -339,6 +346,22 @@ function matchesPattern(url: string, pattern: string): boolean {
   } catch {
     return url.includes(pattern)
   }
+}
+
+/**
+ * The last-installed rule matching one URL, or undefined when none does.
+ *
+ * Installed order is the precedence order: a rule installed later was the
+ * user's (or the model's) latest word on that request, so it answers first.
+ * Written as a reverse scan rather than `Array.prototype.findLast` because this
+ * package compiles against the ES2022 lib.
+ */
+function lastMatchingRule(mocks: readonly MockRule[], url: string): MockRule | undefined {
+  for (let index = mocks.length - 1; index >= 0; index -= 1) {
+    const candidate = mocks[index]
+    if (candidate !== undefined && matchesPattern(url, candidate.pattern)) return candidate
+  }
+  return undefined
 }
 
 let listenerInstalled = false
@@ -476,11 +499,11 @@ export async function installMock(tabId: number, rule: MockRule): Promise<number
   await withTabLock(tabId, async () => {
     await holdSession(tabId, {})
     const session = sessionFor(tabId)
-    // Mocking one pattern again replaces its response. Two rules for the same
-    // pattern are answered by the first one installed (`answerPausedRequest`),
-    // so appending the newer rule reported success while the page kept receiving
-    // the older body — measured when a mock was retried with corrected CORS
-    // headers and the response never changed.
+    // Mocking one pattern again replaces its response instead of appending a
+    // rule the matcher may never reach. Distinct patterns keep their install
+    // order, and the most recently installed match answers a request
+    // (`lastMatchingRule`), so retrying a mock with corrected CORS headers — or
+    // narrowing a broad pattern after it — takes effect.
     const installed = session.mocks.findIndex((candidate) => candidate.pattern === rule.pattern)
     if (installed === -1) session.mocks.push(rule)
     else session.mocks[installed] = rule
