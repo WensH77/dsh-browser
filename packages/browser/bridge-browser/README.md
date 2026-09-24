@@ -1,4 +1,4 @@
-# @yuxianglin/dsh-bridge-browser
+# dsh-bridge-browser
 
 English | [中文](README.zh.md)
 
@@ -51,7 +51,7 @@ The installer copies the unpacked extension to `~/.dsh/browser-extension` and op
 
 ## Wire protocol
 
-Frames are JSON objects discriminated by `t`, defined in [`protocol.ts`](src/protocol.ts) — the single source of truth shared with the extension through the workspace package's `./src/*` export. The built package also publishes `@yuxianglin/dsh-bridge-browser/protocol` for external consumers.
+Frames are JSON objects discriminated by `t`, defined in [`protocol.ts`](src/protocol.ts) — the single source of truth shared with the extension through the workspace package's `./src/*` export. The built package also publishes `dsh-bridge-browser/protocol` for external consumers.
 
 - Client → server: `hello` (auth + caps), `rpc` (one of the two GDrive-internal methods), `tool.result`, `pong`.
 - Server → client: `hello.ok` (echoes negotiated caps), `rpc.result`, `tool.call`, `tool.cancel`, `ping`, `error`.

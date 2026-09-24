@@ -10,7 +10,7 @@
  * @module
  */
 
-import { BRIDGE_PROTO, BRIDGE_TOOLSET, declaredProto, type BridgeCaps } from '@yuxianglin/dsh-bridge-browser/src/protocol.ts'
+import { BRIDGE_PROTO, BRIDGE_TOOLSET, declaredProto, type BridgeCaps } from 'dsh-bridge-browser/src/protocol.ts'
 import type { BridgeNotice, BridgeState } from './bridge.ts'
 
 /**

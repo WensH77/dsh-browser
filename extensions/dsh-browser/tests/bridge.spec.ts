@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { BRIDGE_EXTENSION_IDS, BRIDGE_PROTO, BRIDGE_TOOLSET } from '@yuxianglin/dsh-bridge-browser/src/protocol.ts'
+import { BRIDGE_EXTENSION_IDS, BRIDGE_PROTO, BRIDGE_TOOLSET } from 'dsh-bridge-browser/src/protocol.ts'
 import { BridgeClient, handshakeNotice, type BridgeNotice, type BridgeState } from '../src/background/bridge.ts'
 
 /** The extension reports its own ID; assert it against the pinned one. */

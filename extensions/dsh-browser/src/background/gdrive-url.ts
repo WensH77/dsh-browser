@@ -24,7 +24,7 @@ export interface GdriveTarget {
   binary: boolean
 }
 
-import { GDRIVE_UNSUPPORTED_HINT, gdriveExportKind } from '@yuxianglin/dsh-bridge-browser/src/protocol.ts'
+import { GDRIVE_UNSUPPORTED_HINT, gdriveExportKind } from 'dsh-bridge-browser/src/protocol.ts'
 
 export { GDRIVE_UNSUPPORTED_HINT }
 

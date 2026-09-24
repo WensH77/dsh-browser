@@ -31,7 +31,7 @@ status panel / options / popup ◄─runtime messages─► background SW/event 
 - **content script** (`src/content/`): text snapshot (readability main text + numbered interactive inventory + form fields), **stable element numbers** (`data-dsh-el`), delta changes, click/type/press/scroll/navigate actions, and sensitive-field masking.
 - **capture** (`src/background/capture.ts`): Chrome-only screenshots over `chrome.debugger` (`Page.captureScreenshot`). Attach-per-capture, downscale-and-reencode to the host's image limits, detach in `finally`; bytes stay in memory and travel to the host as base64.
 - **panel / options** (`src/panel/`, `src/options/`): minimal React pages — the status panel (also opened as the floating-window popup, per the `statusMode` setting) shows connection state, the controlled tab, recent operations, and pending approvals; the options page manages the bridge URL/token, page sharing, trusted origins, and approval notifications.
-- **Protocol**: `protocol.ts` in the `@yuxianglin/dsh-bridge-browser` workspace package is the single source of truth, shared by both ends through the package's source export.
+- **Protocol**: `protocol.ts` in the `dsh-bridge-browser` workspace package is the single source of truth, shared by both ends through the package's source export.
 
 ## Build
 

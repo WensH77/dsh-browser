@@ -8,7 +8,7 @@
  * @module
  */
 
-import type { BridgeCaps } from '@yuxianglin/dsh-bridge-browser/src/protocol.ts'
+import type { BridgeCaps } from 'dsh-bridge-browser/src/protocol.ts'
 import type { BridgeNotice, BridgeState } from '../background/bridge.ts'
 import type { TabAffinityState } from '../background/tab-affinity.ts'
 import type { ApprovalDecision, ApprovalRequest } from '../security/approval.ts'

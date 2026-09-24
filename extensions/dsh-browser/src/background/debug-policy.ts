@@ -9,7 +9,7 @@
  * @module
  */
 
-import { DEBUG_TOOL_NAMES } from '@yuxianglin/dsh-bridge-browser/src/protocol.ts'
+import { DEBUG_TOOL_NAMES } from 'dsh-bridge-browser/src/protocol.ts'
 import type { ToolAnswer } from './tools.ts'
 
 /** Re-exported so callers and tests keep one import path for the list. */

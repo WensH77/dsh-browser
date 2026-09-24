@@ -13,7 +13,7 @@
  * @module
  */
 
-import type { CaptureLimits, CapturedImage, CapturedImageMediaType } from '@yuxianglin/dsh-bridge-browser/src/protocol.ts'
+import type { CaptureLimits, CapturedImage, CapturedImageMediaType } from 'dsh-bridge-browser/src/protocol.ts'
 import { bytesToBase64 } from '../shared/base64.ts'
 
 /** JPEG quality ladder applied when a raster still exceeds the byte limit. */

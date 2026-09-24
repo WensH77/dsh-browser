@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, expect, it } from 'vitest'
-import { BRIDGE_PROTO, BRIDGE_TOOLSET, LEGACY_PROTO } from '@yuxianglin/dsh-bridge-browser/src/protocol.ts'
+import { BRIDGE_PROTO, BRIDGE_TOOLSET, LEGACY_PROTO } from 'dsh-bridge-browser/src/protocol.ts'
 import { bridgeNotice } from '../src/background/bridge-notice.ts'
 import type { BridgeNotice } from '../src/background/bridge.ts'
 

@@ -5,7 +5,7 @@
 
 ## 背景
 
-本仓库桥插件（`@yuxianglin/dsh-bridge-browser`）的依赖长期 pin 在 dsh `0.1.2-rc.1`
+本仓库桥插件（`dsh-bridge-browser`）的依赖长期 pin 在 dsh `0.1.2-rc.1`
 （peerDeps / devDeps / 根 CLI 统一此线），而实际运行的 harness（本机 GUI 与
 `/opt/homebrew` 全局安装）已是 `0.1.5-alpha.1`。需要核实插件与当前 harness
 的兼容性，并决定依赖是否对齐。

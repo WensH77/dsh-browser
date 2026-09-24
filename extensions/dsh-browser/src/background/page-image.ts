@@ -22,7 +22,7 @@
  */
 
 import { base64ToBytes, bytesToBase64 } from '../shared/base64.ts'
-import type { CaptureLimits, CapturedImage, CapturedImageMediaType } from '@yuxianglin/dsh-bridge-browser/src/protocol.ts'
+import type { CaptureLimits, CapturedImage, CapturedImageMediaType } from 'dsh-bridge-browser/src/protocol.ts'
 import type { PageImageSource } from '../content/actions.ts'
 import {
   RasterError,

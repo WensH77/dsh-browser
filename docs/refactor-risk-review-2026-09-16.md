@@ -1,6 +1,6 @@
 # dsh-browser 重构 / 瘦身 / 风险自查报告
 
-> 范围：整个 workspace（`@yuxianglin/dsh-bridge-browser` + `dsh-browser-extension`），含 `benchmark/`、`scripts/`、文档。
+> 范围：整个 workspace（`dsh-bridge-browser` + `dsh-browser-extension`），含 `benchmark/`、`scripts/`、文档。
 > 基线：分支 `refactor/pure-tool-bridge`，HEAD `85bea36`；排查开始时 `git status` 干净，`lib/` 与 `dist/` 均为同一构建批次（16:43）且与源码一致。（报告成文后 `git status` 显示本文件自身为唯一未跟踪文件。）
 > 性质：**只读诊断，未改动任何业务代码**。所有结论标注证据与置信度；实测与推断分开写。
 > 已读来源：代码（`src/` 两侧）、`docs/pure-tool-bridge-decisions.md`、`docs/devtools-tools-feasibility.md`、`docs/dom-caching-feasibility.md`、`docs/dsh-0.1.5-rc-upgrade.md`、6 份 README、git 历史、`pnpm audit`、上游 CVE 公告。

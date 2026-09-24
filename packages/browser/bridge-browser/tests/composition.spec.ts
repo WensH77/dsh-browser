@@ -29,7 +29,7 @@ import UserQuestionService from '@deepseek-ai/dsh-user-questions'
 import * as BridgeBrowser from '../src/index.ts'
 import { BRIDGE_EXTENSION_IDS, BRIDGE_PATH, BRIDGE_PROTO, BRIDGE_TOOLSET, type BridgeFrame } from '../src/protocol.ts'
 
-const BRIDGE = '@yuxianglin/dsh-bridge-browser'
+const BRIDGE = 'dsh-bridge-browser'
 const TOKEN = 'abcdabcdabcdabcdabcdabcdabcdabcd'
 
 let root: string | undefined
