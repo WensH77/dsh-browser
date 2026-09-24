@@ -389,13 +389,14 @@ if [ "$CLIPBOARD_READY" -eq 1 ]; then
 fi
 
 printf '\n'
-print_pair "只做一次：以后每次更新，在 Chrome 点一次「重新加载」即可；扩展文件的同步由插件在启动时自动完成。" "Once only: each later update needs just one “Reload” in Chrome — the plugin keeps the extension files current at startup."
+print_pair "重启 dsh：cd $ROOT && pnpm start" "Restart dsh: cd $ROOT && pnpm start"
 printf '\n'
-print_pair "启动 dsh：已经在跑就跳过；没在跑 → cd $ROOT && pnpm start" "Start dsh: skip if one is already running; otherwise → cd $ROOT && pnpm start"
-print_pair "  其它方式也行（桌面壳、全局 dsh、npx @deepseek-ai/dsh@0.1.7-rc.1 web）：插件跟着 web profile 走。" "  Any other dsh works too (desktop shell, global dsh, npx @deepseek-ai/dsh@0.1.7-rc.1 web): the plugin rides the web profile."
-printf '\n'
-print_pair "以后更新：git pull → pnpm build → 对助手说「刷新浏览器扩展文件」，再在 Chrome 点一次「重新加载」。" "Later updates: git pull → pnpm build → tell the assistant “refresh the browser extension files”, then one “Reload” in Chrome."
-print_pair "连不上或工具缺失：对助手说「浏览器桥什么状态」，它会给出原因和唯一的下一步。" "Not connecting, or tools missing: tell the assistant “what is the browser bridge status” — it names the cause and the single next step."
-print_pair "扩展与插件自动互相发现，不用填地址或 token。" "Extension and plugin find each other automatically; no address or token to fill in."
+if [ "$INSTALL_MODE" = "managed" ]; then
+  UPDATE_COMMAND="curl -fsSL https://raw.githubusercontent.com/$REPOSITORY/refs/heads/$REMOTE_REF/scripts/install.sh | bash"
+else
+  UPDATE_COMMAND="./scripts/install.sh"
+fi
+print_pair "以后更新：重跑同一条安装命令，再在 Chrome 点一次「重新加载」。" "Later updates: rerun the same install command, then one more “Reload” in Chrome."
+print_pair "   $UPDATE_COMMAND" "   $UPDATE_COMMAND"
 printf '\n'
 print_pair "如果用得顺手，欢迎在 GitHub 点个 Star 支持我们：https://github.com/WensH77/dsh-browser" "If dsh-browser is useful to you, we'd appreciate a Star on GitHub: https://github.com/WensH77/dsh-browser"
