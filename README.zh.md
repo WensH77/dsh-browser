@@ -29,7 +29,7 @@ Windows（PowerShell）：
 $s="$env:TEMP\dsh-install.ps1"; irm https://raw.githubusercontent.com/WensH77/dsh-browser/refs/heads/main/scripts/install.ps1 -OutFile $s; powershell -NoProfile -ExecutionPolicy Bypass -File $s
 ```
 
-安装器打开 `chrome://extensions` 后，按提示加载或重新加载一次 **AI 浏览器助手**——浏览器侧这一步无法自动化，是最初唯一要手点的动作。之后在 dsh 里让助手调一次 `browser_setup`，它会自动刷新扩展文件、打开扩展页并把路径放进剪贴板；`browser_status` 随时报告连接状态、两半版本是否匹配、以及唯一的下一步。dsh 正在运行时会热加载插件，不必重启。前置要求、启动命令、更新方式和开发者安装详见[详细安装与使用](#详细安装与使用)。
+安装器把扩展文件放进 `~/.dsh/browser-extension` 并打开 `chrome://extensions`：在那里加载或重新加载一次 **AI 浏览器助手**——这是浏览器侧唯一要手点的动作，以后每次更新也只需再点一次「重新加载」。启动 dsh 后，扩展文件的同步由插件在启动时自动完成，不必重跑安装器；连不上或工具缺失时，对助手说「浏览器桥什么状态」，它会说明原因和唯一的下一步。dsh 正在运行时会热加载插件，不必重启。前置要求、启动命令、更新方式和开发者安装详见[详细安装与使用](#详细安装与使用)。
 
 > [!IMPORTANT]
 > npm 上未加 scope 的 [`dsh-browser`](https://www.npmjs.com/package/dsh-browser) 包属于另一个项目，与本仓库无关。本项目目前没有发布 npm 包，请使用上方安装器。
@@ -120,7 +120,7 @@ cd dsh-browser
 ./scripts/install.sh
 ```
 
-Windows 请在 checkout 中运行 `.\scripts\install.ps1`。拉取或切换版本后，在扩展页点一次「重新加载」即可；扩展文件与镜像目录的同步由插件在启动时完成（也可以让助手调一次 `browser_setup`），不必重跑安装器。
+Windows 请在 checkout 中运行 `.\scripts\install.ps1`。拉取或切换版本后，在扩展页点一次「重新加载」即可；扩展文件与镜像目录的同步由插件在启动时完成（想立刻刷新并打开扩展页，就对助手说「刷新浏览器扩展文件」），不必重跑安装器。
 
 ### 随仓库分发的技能
 
@@ -144,7 +144,7 @@ npx @deepseek-ai/dsh@0.1.7-rc.1 web
 
 Chrome 本机使用无需配置。打开任意 `http://` 或 `https://` 页面，点击 DeepSeek 鲸鱼图标，等待状态面板显示**已连接**。已有标签页会在第一次操作时自动加载；浏览器受保护页面和扩展商店不受支持。
 
-连不上或工具缺失时，先让助手调 `browser_status`：它会报告扩展有没有连上、扩展构建的版本与协议级别是否和插件匹配（不匹配会直接说「重载扩展」还是「重启 dsh」）、镜像文件是否最新，以及唯一的下一步动作。第一次装机或提示扩展文件已更新时，调 `browser_setup` 让助手代劳文件准备与打开扩展页。
+连不上或工具缺失时，先对助手说「浏览器桥什么状态」：它会报告扩展有没有连上、扩展构建的版本与协议级别是否和插件匹配（并直接说该「重载扩展」还是「重启 dsh」）、镜像文件是否最新，以及唯一的下一步。第一次装机，或它报告文件已更新时，说「刷新浏览器扩展文件」让助手准备文件并打开扩展页。
 
 ## 故障排查
 

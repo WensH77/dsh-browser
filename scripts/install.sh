@@ -389,9 +389,13 @@ if [ "$CLIPBOARD_READY" -eq 1 ]; then
 fi
 
 printf '\n'
-print_pair "启动：cd $ROOT && pnpm start" "Start: cd $ROOT && pnpm start"
-print_pair "  或用精确版本：npx @deepseek-ai/dsh@0.1.7-rc.1 web" "  Or the exact version: npx @deepseek-ai/dsh@0.1.7-rc.1 web"
-print_pair "启动后在 dsh 里让助手调一次 browser_setup：自动刷新扩展文件、打开扩展页并复制路径；" "In dsh, have the assistant call browser_setup once: it refreshes the extension files, opens the extensions page and copies the path;"
-print_pair "随时用 browser_status 查看连接状态与下一步。插件与扩展都会自动发现对方，无需填地址或 token。" "browser_status reports the connection state and the next step at any time. Plugin and extension find each other automatically — no address or token to fill in."
+print_pair "只做一次：以后每次更新，在 Chrome 点一次「重新加载」即可；扩展文件的同步由插件在启动时自动完成。" "Once only: each later update needs just one “Reload” in Chrome — the plugin keeps the extension files current at startup."
+printf '\n'
+print_pair "启动 dsh：已经在跑就跳过；没在跑 → cd $ROOT && pnpm start" "Start dsh: skip if one is already running; otherwise → cd $ROOT && pnpm start"
+print_pair "  其它方式也行（桌面壳、全局 dsh、npx @deepseek-ai/dsh@0.1.7-rc.1 web）：插件跟着 web profile 走。" "  Any other dsh works too (desktop shell, global dsh, npx @deepseek-ai/dsh@0.1.7-rc.1 web): the plugin rides the web profile."
+printf '\n'
+print_pair "以后更新：git pull → pnpm build → 对助手说「刷新浏览器扩展文件」，再在 Chrome 点一次「重新加载」。" "Later updates: git pull → pnpm build → tell the assistant “refresh the browser extension files”, then one “Reload” in Chrome."
+print_pair "连不上或工具缺失：对助手说「浏览器桥什么状态」，它会给出原因和唯一的下一步。" "Not connecting, or tools missing: tell the assistant “what is the browser bridge status” — it names the cause and the single next step."
+print_pair "扩展与插件自动互相发现，不用填地址或 token。" "Extension and plugin find each other automatically; no address or token to fill in."
 printf '\n'
 print_pair "如果用得顺手，欢迎在 GitHub 点个 Star 支持我们：https://github.com/WensH77/dsh-browser" "If dsh-browser is useful to you, we'd appreciate a Star on GitHub: https://github.com/WensH77/dsh-browser"
