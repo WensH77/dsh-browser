@@ -5,7 +5,7 @@
 # No further configuration is required: the extension discovers local dsh automatically and loopback connections require no token.
 set -euo pipefail
 
-REPOSITORY="Lum1104/dsh-browser"
+REPOSITORY="WensH77/dsh-browser"
 REMOTE_REF="main"
 DSH_HOME_DIR="${DSH_HOME:-$HOME/.dsh}"
 MANAGED_ROOT="$DSH_HOME_DIR/dsh-browser"
@@ -14,7 +14,7 @@ ARCHIVE_URL="https://github.com/$REPOSITORY/archive/refs/heads/${REMOTE_REF}.tar
 BOOTSTRAP_TMP=""
 
 print_step() {
-  printf '\n[%s/5] %s\n' "$1" "$2"
+  printf '\n[%s/4] %s\n' "$1" "$2"
   printf '      %s\n' "$3"
 }
 
@@ -318,8 +318,12 @@ require_command pnpm "未找到 pnpm；请先启用 Corepack 或安装 pnpm。" 
 require_command node "未找到 Node.js；请先安装受支持的 Node.js 版本。" "Node.js was not found; install a supported Node.js version first."
 require_command rsync "未找到 rsync；请先安装 rsync。" "rsync was not found; install rsync first."
 
-print_step 1 "构建浏览器桥" "Build the browser bridge"
+print_step 1 "构建 Chrome 扩展与浏览器桥" "Build the Chrome extension and the browser bridge"
 (cd "$ROOT" && pnpm install --frozen-lockfile >/dev/null 2>&1)
+# The extension is built first so the bridge package can copy the fresh dist into
+# itself (`scripts/copy-extension.mjs`, part of its build): the other order leaves
+# the packaged `extension/` one build behind, or missing on a clean checkout.
+(cd "$ROOT" && pnpm --filter dsh-browser-extension run build >/dev/null 2>&1)
 (cd "$ROOT" && pnpm --filter @yuxianglin/dsh-bridge-browser run build >/dev/null 2>&1)
 
 print_step 2 "注册到本机 web profile" "Register with the local web profile"
@@ -328,24 +332,16 @@ if profile_has_dependency "$WEB_PROFILE_MANIFEST" "$LEGACY_PLUGIN"; then
 fi
 (cd "$ROOT" && pnpm exec dsh plugin --profile web add -w "@yuxianglin/dsh-bridge-browser@link:$PLUGIN" >/dev/null)
 
-print_step 3 "构建 Chrome 扩展" "Build the Chrome extension"
-(cd "$ROOT" && pnpm --filter dsh-browser-extension run build >/dev/null 2>&1)
-
-print_step 4 "安装技能（所有工作区可用）" "Install skills (available to every workspace)"
+print_step 3 "安装技能（所有工作区可用）" "Install skills (available to every workspace)"
 # The skills ship in this repository but are read from the user skill root, so a session in
 # another project can use them: see scripts/install-skills.mjs. Failure here costs only the
 # skill, never the extension, so it does not abort the install.
 node "$ROOT/scripts/install-skills.mjs" ||
   print_pair "技能安装失败（不影响扩展使用，可稍后重跑 scripts/install-skills.mjs）" "Skill install failed (the extension still works; rerun scripts/install-skills.mjs later)"
 
-print_step 5 "准备扩展并打开 Chrome" "Prepare the extension and open Chrome"
+print_step 4 "准备扩展并打开 Chrome" "Prepare the extension and open Chrome"
 ensure_chrome || true
 DIST_DIR="$DSH_HOME_DIR/browser-extension"
-if [ -f "$DIST_DIR/manifest.json" ]; then
-  IS_UPDATE=1
-else
-  IS_UPDATE=0
-fi
 mkdir -p "$DIST_DIR"
 rsync -a --delete-after "$EXT/dist/" "$DIST_DIR/"
 if [ -f "$ROOT/.managed-by-install-sh" ]; then
@@ -375,56 +371,27 @@ else
   CHROME_OPENED=0
 fi
 printf '\n'
-if [ "$CHROME_OPENED" -ne 1 ]; then
-  print_pair "无法自动打开 Chrome，请手动打开浏览器并在地址栏输入 chrome://extensions。" "Could not open Chrome automatically; open the browser and type chrome://extensions in the address bar."
-fi
-if [ "$IS_UPDATE" -eq 1 ]; then
-  print_pair "检测到已有扩展目录，文件已安全更新。" "Existing extension directory detected; its files were updated safely."
-  print_pair "打开 Google Chrome（注意不是 Edge/Firefox）：" "Open Google Chrome (not Edge/Firefox):"
-  printf '\n'
-  print_pair "    地址栏输入 chrome://extensions" "    Type chrome://extensions in the address bar"
-  printf '\n'
-  print_pair "如果页面上已有“dsh 浏览器助手”卡片：" "If the “dsh Browser Assistant” card is already listed:"
-  print_pair "  点击卡片上的“重新加载”按钮，让扩展加载新文件。" "  Click “Reload” on that card so it picks up the updated files."
-  printf '\n'
-  print_pair "如果没有该卡片（例如从未加载过）：" "If the card is not listed (e.g. it was never loaded):"
-  print_pair "  打开右上角 “开发者模式”" "  Enable “Developer mode” in the upper-right corner"
-  print_pair "  点左上角 “加载已解压的扩展程序”" "  Click “Load unpacked” in the upper-left corner"
-  print_pair "  选择这个目录：" "  Select this directory:"
-  printf '   %s\n' "$DIST_DIR"
-  printf '\n'
-  print_pair "出现 “dsh 浏览器助手” 卡片即成功。" "When the “dsh Browser Assistant” card appears, it is loaded."
+print_pair "扩展文件已就绪：$DIST_DIR" "Extension files are ready: $DIST_DIR"
+if [ "$CHROME_OPENED" -eq 1 ]; then
+  print_pair "Chrome 扩展页已打开（Google Chrome，不是 Edge/Firefox）。在那里二选一：" "Chrome Extensions is open (Google Chrome, not Edge/Firefox). Do one of these:"
 else
-  if [ "$CHROME_OPENED" -eq 1 ]; then
-    print_pair "Chrome 扩展管理页已打开，请完成以下操作：" "Chrome Extensions is open. Complete these steps:"
-  else
-    print_pair "请在 Chrome 扩展管理页完成以下操作：" "Complete these steps on the Chrome Extensions page:"
-  fi
-  printf '\n'
-  print_pair "1. 开启右上角的“开发者模式”" "Enable “Developer mode” in the upper-right corner"
-  print_pair "2. 点击“加载已解压的扩展程序”" "Click “Load unpacked”"
+  print_pair "无法自动打开 Chrome；请手动打开并在地址栏输入 chrome://extensions，然后二选一：" "Could not open Chrome; open it and type chrome://extensions, then do one of these:"
+fi
+print_pair "  已有「AI 浏览器助手」卡片 → 点卡片上的「重新加载」" "  The “AI Browser Assistant” card is listed → click “Reload” on it"
+print_pair "  没有该卡片 → 开右上角「开发者模式」→「加载已解压的扩展程序」→ 选：" "  No such card → enable “Developer mode” → “Load unpacked” → select:"
+printf '   %s\n' "$DIST_DIR"
+if [ "$CLIPBOARD_READY" -eq 1 ]; then
   if is_macos; then
-    if [ "$CLIPBOARD_READY" -eq 1 ]; then
-      print_pair "3. 按 Cmd+Shift+G，粘贴以下路径（已复制到剪贴板）：" "Press Cmd+Shift+G and paste this path (already copied):"
-    else
-      print_pair "3. 按 Cmd+Shift+G，粘贴以下路径：" "Press Cmd+Shift+G and paste this path:"
-    fi
+    print_pair "  （路径已复制到剪贴板；选目录时按 Cmd+Shift+G 粘贴）" "  (Path copied to your clipboard; press Cmd+Shift+G to paste it)"
   else
-    if [ "$CLIPBOARD_READY" -eq 1 ]; then
-      print_pair "3. 粘贴以下路径（已复制到剪贴板）：" "Paste this path (already copied):"
-    else
-      print_pair "3. 复制并粘贴以下路径：" "Copy and paste this path:"
-    fi
+    print_pair "  （路径已复制到剪贴板）" "  (Path copied to your clipboard)"
   fi
-  printf '   %s\n' "$DIST_DIR"
 fi
 
 printf '\n'
-print_pair "加载完成后：" "After loading the extension:"
-print_pair "• 点击工具栏中的 DeepSeek 鲸鱼图标，打开助手窗（状态侧栏或浮窗，依设置）" "Click the DeepSeek whale icon in the toolbar to open the assistant window (status side panel or floating popup, per settings)"
-print_pair "• 扩展会自动发现本机 dsh，无需填写地址或 token" "The extension discovers local dsh automatically; no address or token is required"
-printf '• 启动固定版本：cd %q && pnpm start\n' "$ROOT"
-printf '   Start the pinned version: cd %q && pnpm start\n' "$ROOT"
-print_pair "• 也可启动精确版本：npx @deepseek-ai/dsh@0.1.5-rc.1 web" "Or start the exact supported version: npx @deepseek-ai/dsh@0.1.5-rc.1 web"
+print_pair "启动：cd $ROOT && pnpm start" "Start: cd $ROOT && pnpm start"
+print_pair "  或用精确版本：npx @deepseek-ai/dsh@0.1.7-rc.1 web" "  Or the exact version: npx @deepseek-ai/dsh@0.1.7-rc.1 web"
+print_pair "启动后在 dsh 里让助手调一次 browser_setup：自动刷新扩展文件、打开扩展页并复制路径；" "In dsh, have the assistant call browser_setup once: it refreshes the extension files, opens the extensions page and copies the path;"
+print_pair "随时用 browser_status 查看连接状态与下一步。插件与扩展都会自动发现对方，无需填地址或 token。" "browser_status reports the connection state and the next step at any time. Plugin and extension find each other automatically — no address or token to fill in."
 printf '\n'
-print_pair "如果用得顺手，欢迎在 GitHub 点个 Star 支持我们：https://github.com/Lum1104/dsh-browser" "If dsh-browser is useful to you, we'd appreciate a Star on GitHub: https://github.com/Lum1104/dsh-browser"
+print_pair "如果用得顺手，欢迎在 GitHub 点个 Star 支持我们：https://github.com/WensH77/dsh-browser" "If dsh-browser is useful to you, we'd appreciate a Star on GitHub: https://github.com/WensH77/dsh-browser"

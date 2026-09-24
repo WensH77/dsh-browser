@@ -360,6 +360,23 @@ export class BridgeServer {
     return this.clientCaps?.debugger === true
   }
 
+  /**
+   * The build version the connected extension reported in its last `hello`, or
+   * undefined when nothing is connected or the build is too old to report one.
+   *
+   * The two undefined cases are deliberately not distinguishable here: the
+   * caller compares the version against this plugin's own, and "no connection"
+   * is already answered by {@link hasConnection}. Sampling it from
+   * `clientCaps` is what gives it {@link clientDebugger}'s lifecycle for free —
+   * cleared on disconnect and on replacement, so a stale version can never be
+   * read against a socket it did not come from.
+   *
+   * @returns the reported version, or undefined.
+   */
+  clientExtensionVersion(): string | undefined {
+    return this.clientCaps?.extensionVersion
+  }
+
   private handleReadyFrame(frame: BridgeFrame): void {
     switch (frame.t) {
       case 'rpc':

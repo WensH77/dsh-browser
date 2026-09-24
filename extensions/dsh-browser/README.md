@@ -50,13 +50,13 @@ The recommended zero-configuration command does not require Git or a local clone
 1. **Build and install the extension**:
 
    ```sh
-   curl -fsSL https://raw.githubusercontent.com/Lum1104/dsh-browser/refs/heads/main/scripts/install.sh | bash
+   curl -fsSL https://raw.githubusercontent.com/WensH77/dsh-browser/refs/heads/main/scripts/install.sh | bash
    ```
 
    On Windows, run this in PowerShell instead:
 
    ```powershell
-   $s="$env:TEMP\dsh-install.ps1"; irm https://raw.githubusercontent.com/Lum1104/dsh-browser/refs/heads/main/scripts/install.ps1 -OutFile $s; powershell -NoProfile -ExecutionPolicy Bypass -File $s
+   $s="$env:TEMP\dsh-install.ps1"; irm https://raw.githubusercontent.com/WensH77/dsh-browser/refs/heads/main/scripts/install.ps1 -OutFile $s; powershell -NoProfile -ExecutionPolicy Bypass -File $s
    ```
 
    The script downloads a managed workspace to `~/.dsh/dsh-browser`, builds the bridge plugin, registers its official bundle in the local dsh `web` profile, builds the extension, copies the output to the stable directory `~/.dsh/browser-extension`, and opens `chrome://extensions`. Enable Developer mode, choose Load unpacked, and select the extension directory. Running the command again updates the managed installation.
@@ -64,7 +64,7 @@ The recommended zero-configuration command does not require Git or a local clone
    A cloned checkout uses the same installer without downloading or overwriting source files:
 
    ```sh
-   git clone https://github.com/Lum1104/dsh-browser.git
+   git clone https://github.com/WensH77/dsh-browser.git
    cd dsh-browser
    ./scripts/install.sh
    ```
@@ -79,10 +79,10 @@ The recommended zero-configuration command does not require Git or a local clone
 
    From a clone, run `pnpm start` in the repository root instead.
 
-   Or the exact supported public runtime (pinned 0.1.5 pre-release):
+   Or the exact supported public runtime (pinned 0.1.7 pre-release):
 
    ```sh
-   npx @deepseek-ai/dsh@0.1.5-rc.1 web
+   npx @deepseek-ai/dsh@0.1.7-rc.1 web
    ```
 
    Both commands load the same bundle from the local `web` profile. Port 3080 is used by default; append `--port <port>` when it is occupied.

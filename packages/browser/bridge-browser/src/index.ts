@@ -29,6 +29,7 @@ import type { WebRoute, WebUpgradeRoute } from '@deepseek-ai/dsh-host-webserver'
 import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
 import { BridgeServer } from './server.ts'
 import { registerBrowserTools } from './tools.ts'
+import { syncBundledExtension } from './extension-assets.ts'
 import { BRIDGE_PROTO, BRIDGE_TOOLSET, declaredToolset, type BridgeCaps } from './protocol.ts'
 import {
   BRIDGE_CONFIG_PATH,
@@ -186,13 +187,32 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   // are never touched. Runs detached from the rest of `apply` so a slow
   // filesystem cannot delay the handshake path.
   void pruneGdriveExports(ctx, gdriveRoot)
+  // Keep the directory Chrome loads in step with this build without rerunning
+  // the installer: a rebuild plus a browser reload is then the whole update.
+  // Detached like the retention pass — a slow or read-only disk must not delay
+  // startup, and syncBundledExtension reports its faults instead of throwing.
+  void syncBundledExtension().then((result) => {
+    if (result.status === 'synced') {
+      ctx.logger.info(`browser bridge: extension mirror refreshed (${result.files} files) at ${result.target}`)
+    } else if (result.status === 'failed') {
+      ctx.logger.warn(`browser bridge: extension mirror refresh failed — ${result.reason ?? 'unknown error'}`)
+    }
+  })
   // Assigned by the tools effect below; the server calls it on every hello,
   // replacement, and disconnect.
   let capabilitiesSync: ((caps: BridgeCaps | undefined) => void) | undefined
+  // Last caps the server negotiated, sampled by `browser_status` for the
+  // extension's own id and declared proto/toolset. `BridgeServer` exposes the
+  // version and the debugger flag only, and this is the same sample those two
+  // read, so it can never describe a socket that is gone.
+  let latestCaps: BridgeCaps | undefined
   const server = new BridgeServer({
     token: tokenRes.token,
     toolTimeoutMs: resolved.toolTimeoutMs,
-    onCapabilities: (caps) => { capabilitiesSync?.(caps) },
+    onCapabilities: (caps) => {
+      latestCaps = caps
+      capabilitiesSync?.(caps)
+    },
     openGDriveFolder: async () => {
       await mkdir(gdriveRoot, { recursive: true })
       await openFolder(gdriveRoot)
@@ -251,6 +271,7 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
       toolTimeoutMs: resolved.toolTimeoutMs,
       snapshotMaxChars: resolved.snapshotMaxChars,
       maxInteractiveItems: resolved.maxInteractiveItems,
+      host: { clientCaps: () => latestCaps },
     })
     // The model only ever sees the debugging tools while the connected
     // extension allows them (its own setting, off by default), and only the
@@ -307,6 +328,8 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
         + 'One session operates the browser at a time: if another session already holds the controlled tab, binding fails and names that session, and so does '
         + 'a first browser_navigate. Nothing runs in that case — ask the user to press Unbind in the dsh browser panel (or to keep working in the other '
         + 'session and bring its answer back here) instead of retrying the call. '
+        + 'When browser tools cannot connect, or a browser tool seems to be missing, call browser_status first: it names the single next action. '
+        + 'On a first install, or when browser_status reports refreshed extension files, call browser_setup to prepare the files and open the extensions page. '
         + 'When a browser tool reports that no page is bound, or that the controlled tab is gone, do not retry the same call: call browser_navigate with the '
         + 'target URL (it opens a new tab and binds this session to it), or browser_bind_interactive to let the user choose among the pages already open. '
         + 'A refused call is not a transient error — follow the route the refusal names instead of retrying variants of it. '

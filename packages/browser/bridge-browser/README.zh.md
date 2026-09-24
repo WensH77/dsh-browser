@@ -20,23 +20,23 @@ dsh 的**纯浏览器工具桥**：在宿主 webserver 上挂载一个 **token �
 远程安装器会下载一个由脚本托管的 workspace，构建插件，并将它的官方 bundle 注册到本机 dsh 的 `web` profile。该方式无需 Git，也无需提前 clone：
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/Lum1104/dsh-browser/refs/heads/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/WensH77/dsh-browser/refs/heads/main/scripts/install.sh | bash
 cd ~/.dsh/dsh-browser && pnpm start
 ```
 
 Windows 请改用 PowerShell 安装器：
 
 ```powershell
-$s="$env:TEMP\dsh-install.ps1"; irm https://raw.githubusercontent.com/Lum1104/dsh-browser/refs/heads/main/scripts/install.ps1 -OutFile $s; powershell -NoProfile -ExecutionPolicy Bypass -File $s
+$s="$env:TEMP\dsh-install.ps1"; irm https://raw.githubusercontent.com/WensH77/dsh-browser/refs/heads/main/scripts/install.ps1 -OutFile $s; powershell -NoProfile -ExecutionPolicy Bypass -File $s
 cd $HOME\.dsh\dsh-browser; pnpm start
 ```
 
 开发者也可以 clone 仓库，在 checkout 中依次运行 `./scripts/install.sh` 和 `pnpm start`。本地模式直接使用当前分支，不会下载或覆盖源码。两种安装模式都会注册同一个 profile bundle；构建工具只从选定的 workspace 解析，绝不读取父 checkout 或父目录的 `node_modules`。
 
-钉定的 0.1.5 预发布版运行时即可加载已注册的 bundle；不支持 0.1.5 之前的运行时：
+钉定的 0.1.7 预发布版运行时即可加载已注册的 bundle；不支持 0.1.2 之前的运行时：
 
 ```sh
-npx @deepseek-ai/dsh@0.1.5-rc.1 web
+npx @deepseek-ai/dsh@0.1.7-rc.1 web
 ```
 
 安装器会把已解压扩展复制到 `~/.dsh/browser-extension` 并打开 `chrome://extensions`。在 Chrome 中加载这个稳定目录，然后使用助手窗（状态侧栏或浮窗，依设置）。扩展会自动发现回环连接，无需输入 token；非回环部署仍需要配置的 bearer token。
@@ -77,6 +77,8 @@ npx @deepseek-ai/dsh@0.1.5-rc.1 web
 | `browser_dialog` | 回应页面的 JS 弹窗——页面被 `alert`/`confirm` 冻住时的唯一出路。 |
 | `browser_eval` | 在页面自身上下文求值（不受页面 CSP 限制）。 |
 | `browser_block` / `browser_headers` | 阻断匹配请求，或改写请求/响应头；session 规则，只作用于受控标签页。 |
+| `browser_status` | 宿主侧自检，扩展连没连都能用：连接状态、扩展 id/构建版本与它声明的 `proto`/`toolset` 对本插件的结论（直接说「重载扩展」还是「重启 dsh」）、镜像的扩展文件是否最新，以及唯一一个下一步动作。不受调试开关与扩展能力级别影响。 |
+| `browser_setup` | 宿主侧装机辅助：把扩展文件重新同步到 `~/.dsh/browser-extension`、打开 `chrome://extensions`、有剪贴板工具时把该路径复制进去，并点明剩下唯一那个手动动作。幂等。 |
 | `browser_bind_interactive` | 列出可绑定的页面、用标准提问让用户选一个，并绑定本会话——模型只需调这一个工具。 |
 | `google_drive_export` | 用已登录会话导出 Google Doc（`/document/d/…`）或 Sheet（`/spreadsheets/d/…`）；其余 Google 链接改用浏览器读。 |
 

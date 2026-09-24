@@ -41,6 +41,15 @@
 | 2026-09-17 | **按压序列单独成工具（工具集级别 4），经验随仓库分发**。起因：Google Slides 胶片栏缩略图与画布控件监听 `mousedown`/`mouseup`，`browser_click` 只发一个 `click`，于是「回报成功、页面没变」（实机三次用 URL hash 前后差确认；bisect：只 `pointerdown` ❌、`pointerdown+pointerup+click` ❌、`pointerdown+mousedown+pointerup+mouseup+click` ✅）。处置：① 新增 `browser_click_pointer { index | selector, frame }`——同样的目标解析与审批，按元素矩形中心派发五件套；**不改公共 `activateElement`**，因为 `click` 覆盖 80–90% 的普通页面，给公共路径补鼠标事件会让普通按钮重复触发（已与用户确认）。② `toolset` 3 → 4，并把原先「顶层即 3」显式化为 `TOOLSET_PAGE_IMAGE=3` / `TOOLSET_POINTER_CLICK=4`；级别 ≤3 的扩展看不到该工具——暴露一个对方没有 wire case 的动作只会变成调用时的 `Unknown action`，而工具面缩小是模型能看见的。③ `hello.ok` 回传宿主自己的 `toolset`，扩展侧 `bridgeNotice` 增加工具集的双向比较（宿主更新 → 重载扩展；宿主更旧 → 重启 dsh）：否则工具面静默变小而无人说明原因。④ 经验随仓库走：新增 `.dsh/skills/google-slides-via-browser/SKILL.md` 作为唯一事实源，`scripts/install-skills.mjs` 把它链接进 `~/.dsh/skills`（Windows 安装器用 `--copy`），安装器第 4 步自动执行——技能文件系统按项目根（优先级 100）与用户根（400）扫描，因此**其它工作区**用 dsh-browser 驱动 Slides 时也能按需加载，且不再靠人肉抄 JS。 |
 | 2026-09-21 | **改回单会话独占绑定（取代 2026-09-02 的「双会话」一行）**：受控标签页同一时刻只属于一个会话。另一个会话想绑定时——显式 `browser_bind_interactive`、无绑定会话的首次工具调用（自动绑当前活动页）、无绑定会话的首次 `browser_navigate`（新开标签页并绑定）——**直接 fail**，返回 `affinityFailureAnswer('taken')`，点名持有者会话与其页面，并说明只有用户能在面板按 Unbind 交出来；判据在 `TabAffinityController.competingBinding`，收敛遗留多绑定在 `dropCompetingBindings`（worker 重启恢复时保留面板当时显示的那个，被释放的会话按 `rebind` 撤回首话授权）。不做抢绑确认弹窗——用户明确选择「工具直接 fail 并提示已被其他会话绑定」。宿主系统提示同步加一句「One session operates the browser at a time…」，让模型先知道规则、撞到 refusal 时报给用户而不是重试。起因：2026-09-21 实测两个 intranet-aio 会话（`cd445d16` 与 `7f6b9abf`）在同一浏览器里并行驱动，面板只显示其中一个会话的操作流与授权，用户既看不到另一个会话在做什么，也不知道「本会话内允许」是给谁的。 |
 
+| 2026-09-24 | **版本线升级到 dsh `0.1.7-rc.1`**：peerDeps/devDeps/root CLI 与 lockfile 统一抬到该线（npm `latest` 仍指 `0.1.5-rc.3`，本次有意跟 `next`）。同时 `@deepseek-ai/dsh-code-runtime` 在该线已改名为 `dsh-ptc-runtime`（root peer 补齐项随之替换），cordis 系顺手对齐到 0.1.7 实际使用的 `4.0.4 / 1.0.9 / 1.0.5`。见 [升级记录](dsh-0.1.7-rc-upgrade.md)。 |
+| 2026-09-24 | **响应替换的重叠 pattern 改为「最近安装的赢」**：`answerPausedRequest` 原用 `find`（先装的赢），于是先装 `*/api/*`、再装 `*/api/user*` 时，后装的窄规则永远不生效，而工具却报「已生效」。改为反向扫描取最后一条匹配（语义即 `findLast`；扩展 tsconfig 是 ES2022 lib，故写成显式倒序循环而非 `Array.prototype.findLast`）。同 pattern 仍走 `installMock` 的就地替换，避免规则表无谓增长。 |
+| 2026-09-24 | **后台入口补上同意门的回归测试**（`tests/background-entry.spec.ts`）：此前所有用例都是模块级的，`coveredBySessionGrant` 只在 `virtualToolGate` 被调用过、主页面工具路径漏接授权这件事没有任何用例能发现。新 spec 用 chrome API 假件 + 假 WebSocket 把 `src/background/index.ts` 真启动一遍（真 `BridgeClient` 握手、真 `tool.call` 路由、真审批卡投递），断言「本会话内允许」后同会话同动作不再弹卡、而换一个动作仍会弹卡。 |
+
+| 2026-09-24 | **派发收敛 P0：产物随包走 + 运行期自同步镜像**。扩展构建产物进入插件包（`files` 加 `extension/`，build 时从 `extensions/dsh-browser/dist` 复制），插件启动时按「排序相对路径 + 内容 sha256」比对并同步镜像目录 `~/.dsh/browser-extension`（保留 `install-info.json`）。首次装机仍由 `install.sh` 的 rsync 铺一次（那时插件还没被加载），此后每次启动由插件接管——2026-09-15 那条「改了源码不重跑安装器，Chrome 里永远是旧构建」的债就此关闭，更新只要「重新构建 + 在扩展页点一次重新加载」。两个安装脚本的输出从约 40 行收到十几行，并去掉按「目录是否已存在」猜首次/更新的分叉（猜错就给出错误的操作指引）。 |
+| 2026-09-24 | **握手增加扩展版本上报**：`BridgeCaps` 加可选 `extensionVersion`（扩展的 `chrome.runtime.getManifest().version`），纯增量、不动 `proto`/`toolset`：有值才能区分「扩展构建旧了」与「协议不匹配」，缺值就报 `unknown (older build)`。 |
+| 2026-09-24 | **新增两个宿主侧工具**：`browser_status`（连没连、两半的版本与协议级别是否匹配、镜像文件是否最新、唯一下一步动作）与 `browser_setup`（同步扩展文件、打开 `chrome://extensions`、把路径放进剪贴板）。两者都不参与 debug/toolset 裁剪——状态与安装引导在任何连接状态下都必须可用。它们是普通工具调用（归 dsh 自己的工具展示与策略管），不是扩展那套页面动作审批卡。 |
+| 2026-09-24 | **浏览器侧最后一步暂时消不掉（实测）**：本机 Chrome 154 用 `--load-extension`（含配 `--disable-extensions-except`）启动独立 profile 不会加载扩展；Chrome 137 起官方构建已移除该开关。所以「零点击装机」只剩上架 Chrome Web Store 或企业策略强装一条路。**同日决定不做**：本项目内部使用，不进商店——也就不需要双 ID、上架版本与审核延迟那一套；开发者模式 + 加载已解压保留为唯一的浏览器侧手动动作，而它之后的部分（文件同步、状态自检、装机引导）已由 `browser_setup` / `browser_status` 与运行期镜像同步接管。 |
+
 ## 开放问题
 
 - **O3 协调事件集合**：tab-affinity 交接时机曾依赖 `turn/start|end`，审批瞬时态依赖 `question/*`；砍聊天后 `question/*`（审批作答方变为宿主标准客户端）的去留需逐条核对扩展后台消费。
@@ -49,4 +58,4 @@
 ## 参考
 
 - 实施范围与阶段划分：git 历史 `refactor/pure-tool-bridge` 提交说明。
-- 运行环境：dsh `0.1.5-rc.1`（peer/devDeps/root CLI 统一此线，2026-09-10 升级）。
+- 运行环境：dsh `0.1.7-rc.1`（peer/devDeps/root CLI 统一此线，2026-09-24 升级）。

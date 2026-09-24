@@ -20,23 +20,23 @@ The **pure browser-tool bridge** for dsh: mounts a token-authenticated WebSocket
 The remote installer downloads an installer-managed workspace, builds the plugin, and registers its official bundle in the local dsh `web` profile. It requires neither Git nor a local clone:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/Lum1104/dsh-browser/refs/heads/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/WensH77/dsh-browser/refs/heads/main/scripts/install.sh | bash
 cd ~/.dsh/dsh-browser && pnpm start
 ```
 
 On Windows, run the PowerShell installer instead:
 
 ```powershell
-$s="$env:TEMP\dsh-install.ps1"; irm https://raw.githubusercontent.com/Lum1104/dsh-browser/refs/heads/main/scripts/install.ps1 -OutFile $s; powershell -NoProfile -ExecutionPolicy Bypass -File $s
+$s="$env:TEMP\dsh-install.ps1"; irm https://raw.githubusercontent.com/WensH77/dsh-browser/refs/heads/main/scripts/install.ps1 -OutFile $s; powershell -NoProfile -ExecutionPolicy Bypass -File $s
 cd $HOME\.dsh\dsh-browser; pnpm start
 ```
 
 Developers can instead clone the repository and run `./scripts/install.sh` followed by `pnpm start` from that checkout. The local mode uses the current branch without downloading or overwriting source files. Both installation modes register the same profile bundle; build tools resolve only from the selected workspace and never from a parent checkout or parent `node_modules` directory.
 
-The pinned 0.1.5 pre-release runtime loads the registered bundle; pre-0.1.2 runtimes are not supported:
+The pinned 0.1.7 pre-release runtime loads the registered bundle; pre-0.1.2 runtimes are not supported:
 
 ```sh
-npx @deepseek-ai/dsh@0.1.5-rc.1 web
+npx @deepseek-ai/dsh@0.1.7-rc.1 web
 ```
 
 The installer copies the unpacked extension to `~/.dsh/browser-extension` and opens `chrome://extensions`. Load that stable directory in Chrome and use the assistant window (status side panel or floating popup, per settings). Loopback connections are discovered automatically and require no token entry; non-loopback deployments still require the configured bearer token.
@@ -79,6 +79,8 @@ Loopback sockets may skip the bearer token, but only for one extension: the `Ori
 | `browser_bind_interactive` | List the bindable pages, ask the user to pick one through the standard question flow, and bind this session to it — one tool for the whole interaction. |
 | `google_drive_export` | Export a Google Doc (`/document/d/…`) or Sheet (`/spreadsheets/d/…`) with the signed-in session; every other Google link is read in the browser instead. |
 | `browser_block` / `browser_headers` | Block matching requests, or rewrite request/response headers; session rules scoped to the controlled tab. |
+| `browser_status` | Host-side self-check, available whether or not the extension is connected: connection state, the extension's id/build version and declared `proto`/`toolset` measured against this plugin's own (naming "reload the extension" or "restart dsh"), whether the mirrored extension files are current, and the single next action. Not affected by the debugging setting or the extension's toolset level. |
+| `browser_setup` | Host-side installer helper: re-syncs the extension files into `~/.dsh/browser-extension`, opens `chrome://extensions`, copies that path to the clipboard when a clipboard tool exists, and names the one remaining manual step. Idempotent. |
 
 ## Model Experience
 
