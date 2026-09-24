@@ -913,10 +913,12 @@ function mirrorLine(result: SyncResult): string {
  * mirror: exactly one step, most blocking fact first.
  *
  * `restart dsh` outranks the mirror on purpose — a restart re-syncs the mirror
- * anyway, so naming the mirror first would send the user on a detour. A failed
- * mirror pass outranks the reload hint for the opposite reason: `next: none`
- * under a failure line reads as "nothing to do" while the retry exists, and the
- * retry (`browser_setup`) also opens the page where the reload happens.
+ * anyway, so naming the mirror first would send the user on a detour. Both other
+ * mirror problems (`failed`, `unavailable`) outrank the reload hint for the same
+ * reason as each other: a line saying the mirror is broken or missing may not sit
+ * above `next: none`, which reads as "nothing to do". A connected extension can
+ * mask that entirely — the bridge answers, every tool works, and the one thing
+ * that cannot happen any more is refreshing the files Chrome loads.
  *
  * @param connected - whether an extension is connected right now.
  * @param skew - the version comparison.
@@ -932,6 +934,7 @@ function nextAction(connected: boolean, skew: Skew, sync: SyncResult): string {
   }
   if (skew.verdict === 'restart-dsh') return 'restart dsh so it loads the newer plugin build'
   if (sync.status === 'failed') return 'run browser_setup to retry refreshing the extension files'
+  if (sync.status === 'unavailable') return 'restart dsh from the repository, or build the extension there — this plugin can see no extension build to mirror'
   if (sync.status === 'synced') return 'reload the extension from chrome://extensions so the refreshed files load'
   if (skew.verdict === 'reload-extension') return 'reload the extension from chrome://extensions'
   return 'none — the bridge is ready'
