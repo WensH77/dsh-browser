@@ -29,7 +29,7 @@ Windows, in PowerShell:
 $s="$env:TEMP\dsh-install.ps1"; irm https://raw.githubusercontent.com/WensH77/dsh-browser/refs/heads/main/scripts/install.ps1 -OutFile $s; powershell -NoProfile -ExecutionPolicy Bypass -File $s
 ```
 
-The installer puts the extension files in `~/.dsh/browser-extension` and opens `chrome://extensions`: load or reload **AI Browser Assistant** there — that is the only browser-side click, and each later update is one more “Reload”. Once dsh runs, the plugin keeps those files current at startup, so the installer does not need to be rerun; when the bridge will not connect or tools are missing, tell the assistant “what is the browser bridge status” and it names the cause and the single next step. A running dsh hot-loads the plugin, so no restart is needed. See [Detailed installation and usage](#detailed-installation-and-usage) for prerequisites, startup commands, updates, and developer installation.
+The installer puts the extension files in `~/.dsh/browser-extension` and opens `chrome://extensions`: load or reload **AI Browser Assistant** there — that is the only browser-side click — then restart dsh once. The plugin keeps those files current at startup, so nothing has to be copied by hand. Each later update: rerun the same install command, then one more “Reload” in Chrome. See [Detailed installation and usage](#detailed-installation-and-usage) for prerequisites, startup commands, updates, and developer installation.
 
 > [!IMPORTANT]
 > The unscoped [`dsh-browser`](https://www.npmjs.com/package/dsh-browser) package on npm belongs to a different project and is not affiliated with this repository. This project is not currently published as an npm package; use the installer above.
@@ -120,7 +120,7 @@ cd dsh-browser
 ./scripts/install.sh
 ```
 
-On Windows, run `.\scripts\install.ps1` from the checkout instead. After pulling or switching revisions, click **Reload** once on the extensions page; the plugin keeps the extension files and the mirror directory in sync at startup (say “refresh the browser extension files” to the assistant when you want that done right away, with the extensions page opened for you), so rerunning the installer is not required.
+On Windows, run `.\scripts\install.ps1` from the checkout instead. After pulling or switching revisions, rerun the install command (or just `pnpm build` — the plugin realigns the extension files at startup), then click **Reload** once on the extensions page.
 
 ### Skills shipped with this repository
 
@@ -144,7 +144,7 @@ npx @deepseek-ai/dsh@0.1.7-rc.1 web
 
 Local Chrome use requires no configuration. Open an `http://` or `https://` page, click the DeepSeek whale icon, and wait for **Connected**. Existing tabs are instrumented on the first action; protected browser pages and extension stores are not supported.
 
-When the bridge will not connect or tools are missing, tell the assistant “what is the browser bridge status” first: it reports whether the extension is connected, whether its build and protocol level match the plugin (and names the fix — reload the extension, or restart dsh), whether the mirrored files are current, and the single next action. On a first install, or when it reports refreshed files, say “refresh the browser extension files” to have the files prepared and the extensions page opened.
+When the bridge will not connect or tools are missing, tell the assistant “what is the browser bridge status”: it reports whether the extension is connected, whether its build and protocol level match the plugin (and names the fix — reload the extension, or restart dsh), whether the mirrored files are current, and the single next action.
 
 ## Troubleshooting
 
