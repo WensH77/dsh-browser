@@ -42,6 +42,14 @@ import {
   type BridgeCaps,
 } from './protocol.ts'
 import { syncBundledExtension, type SyncResult } from './extension-assets.ts'
+import {
+  currentInstallMode,
+  currentPlatform,
+  repoRootDir,
+  updateCommand,
+  type InstallMode,
+  type UpdatePlatform,
+} from './update-source.ts'
 import type { BridgeServer } from './server.ts'
 
 /** Re-exported from the shared wire contract so both halves use one list. */
@@ -810,13 +818,13 @@ const LEGACY_FIND_REFUSAL = 'This build of the browser extension cannot search p
   + 'for the whole page (or a selector) and search it yourself, or ask the user to reload the extension.'
 
 /**
- * The two always-on host tools.
+ * The three always-on host tools.
  *
  * Exported so a caller (or a test) can name them without re-typing the strings;
  * they are deliberately absent from every gated list — see the registration in
  * {@link registerBrowserTools}.
  */
-export const HOST_TOOL_NAMES = ['browser_status', 'browser_setup'] as const
+export const HOST_TOOL_NAMES = ['browser_status', 'browser_setup', 'browser_update'] as const
 
 /** Text `browser_status` prints where a field cannot be known. */
 const UNKNOWN_OLDER_BUILD = 'unknown (older build)'
@@ -975,6 +983,30 @@ export function browserSetupText(sync: SyncResult, opened: boolean, copied: bool
   // is the sentence the model reads to tell the user what to do next.
   lines.push(`next: ${next}`)
   return lines.join('\n')
+}
+
+/**
+ * The full `browser_update` text: which install this is, the command, and the
+ * two steps that follow it.
+ *
+ * The command is printed and never run. The installer writes into `~/.dsh`,
+ * replaces the directory Chrome loads, and its first run still needs a click in
+ * Chrome — so it stays the user's action, and a tool that ran it would be doing
+ * all three behind their back.
+ *
+ * @param mode - managed (the installer owns the copy) or checkout.
+ * @param platform - platform whose installer command to print.
+ * @param root - repository root the running plugin was loaded from.
+ * @returns the tool's text.
+ */
+export function browserUpdateText(mode: InstallMode, platform: UpdatePlatform, root: string): string {
+  return [
+    'browser bridge update',
+    `install: ${mode} at ${root}`,
+    'run this yourself — this tool does not run it:',
+    `  ${updateCommand(mode, platform)}`,
+    'then: restart dsh, and click "Reload" on chrome://extensions',
+  ].join('\n')
 }
 
 /** Resolve true when a spawned command exits 0; never throws and never rejects. */
@@ -1223,7 +1255,19 @@ export function registerBrowserTools(
       return { text: browserSetupText(result, opened, copied) }
     },
   })
-  for (const tool of [status, setup]) disposers.set(tool.name, ctx.tools.register(tool))
+  // Printing the update command is a read-only answer by construction: the tool
+  // formats a string and touches neither the filesystem nor a child process, so
+  // the user's install stays theirs to run.
+  const update = defineTool({
+    name: 'browser_update',
+    description: 'Print the command that updates this bridge installation (plugin and extension) on this machine. '
+      + 'The command is for the user to run — this tool never runs it. Use it when the user asks how to update.',
+    parameters: {},
+    timeoutMs: options.toolTimeoutMs,
+    output: TEXT_OUTPUT,
+    execute: async () => ({ text: browserUpdateText(currentInstallMode(), currentPlatform(), repoRootDir()) }),
+  })
+  for (const tool of [status, setup, update]) disposers.set(tool.name, ctx.tools.register(tool))
 
   return {
     setDebugToolsEnabled(enabled: boolean): void {

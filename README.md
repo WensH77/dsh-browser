@@ -120,7 +120,7 @@ cd dsh-browser
 ./scripts/install.sh
 ```
 
-On Windows, run `.\scripts\install.ps1` from the checkout instead. After pulling or switching revisions, rerun the install command (or just `pnpm build` — the plugin realigns the extension files at startup), then click **Reload** once on the extensions page.
+On Windows, run `.\scripts\install.ps1` from the checkout instead. After pulling or switching revisions, rerun the install command (or just `pnpm build` — the plugin realigns the extension files at startup), then click **Reload** once on the extensions page. Not sure which command that is? Ask the assistant: `browser_update` prints the one for this machine, and does not run it for you.
 
 ### Skills shipped with this repository
 

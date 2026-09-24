@@ -79,6 +79,7 @@ npx @deepseek-ai/dsh@0.1.7-rc.1 web
 | `browser_block` / `browser_headers` | 阻断匹配请求，或改写请求/响应头；session 规则，只作用于受控标签页。 |
 | `browser_status` | 宿主侧自检，扩展连没连都能用：连接状态、扩展 id/构建版本与它声明的 `proto`/`toolset` 对本插件的结论（直接说「重载扩展」还是「重启 dsh」）、镜像的扩展文件是否最新，以及唯一一个下一步动作。不受调试开关与扩展能力级别影响。 |
 | `browser_setup` | 宿主侧装机辅助：把扩展文件重新同步到 `~/.dsh/browser-extension`、打开 `chrome://extensions`、有剪贴板工具时把该路径复制进去，并点明剩下唯一那个手动动作。幂等。 |
+| `browser_update` | 打印更新本机这套安装的命令：托管安装给一行安装器、checkout 给本地脚本、Windows 给 PowerShell 形式。它**不会执行**该命令——更新会写入 `~/.dsh`、替换 Chrome 加载的目录、首次还需要在 Chrome 点一次，所以那是用户的动作。 |
 | `browser_bind_interactive` | 列出可绑定的页面、用标准提问让用户选一个，并绑定本会话——模型只需调这一个工具。 |
 | `google_drive_export` | 用已登录会话导出 Google Doc（`/document/d/…`）或 Sheet（`/spreadsheets/d/…`）；其余 Google 链接改用浏览器读。 |
 

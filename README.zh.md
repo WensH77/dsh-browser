@@ -120,7 +120,7 @@ cd dsh-browser
 ./scripts/install.sh
 ```
 
-Windows 请在 checkout 中运行 `.\scripts\install.ps1`。拉取或切换版本后，重跑安装命令（或只 `pnpm build`——扩展文件由插件在启动时自动对齐），再在扩展页点一次「重新加载」。
+Windows 请在 checkout 中运行 `.\scripts\install.ps1`。拉取或切换版本后，重跑安装命令（或只 `pnpm build`——扩展文件由插件在启动时自动对齐），再在扩展页点一次「重新加载」。不知道确切命令时问助手：它会用 `browser_update` 打印你这台机器该跑的那一条（并且不会替你执行）。
 
 ### 随仓库分发的技能
 

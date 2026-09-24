@@ -330,6 +330,8 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
         + 'session and bring its answer back here) instead of retrying the call. '
         + 'When browser tools cannot connect, or a browser tool seems to be missing, call browser_status first: it names the single next action. '
         + 'On a first install, or when browser_status reports refreshed extension files, call browser_setup to prepare the files and open the extensions page. '
+        + 'When the user asks how to update this installation, call browser_update and hand them the command it prints: it never runs the command itself, '
+        + 'because updating writes into their dsh home and needs a click in Chrome. '
         + 'When a browser tool reports that no page is bound, or that the controlled tab is gone, do not retry the same call: call browser_navigate with the '
         + 'target URL (it opens a new tab and binds this session to it), or browser_bind_interactive to let the user choose among the pages already open. '
         + 'A refused call is not a transient error — follow the route the refusal names instead of retrying variants of it. '

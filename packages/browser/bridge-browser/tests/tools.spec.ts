@@ -973,5 +973,24 @@ describe('registerBrowserTools', () => {
       h.tools.dispose()
       expect(h.registered.some((r) => HOST_TOOL_NAMES.includes(r.name as typeof HOST_TOOL_NAMES[number]))).toBe(false)
     })
+
+    it('prints an update command for this install without running or touching anything', async () => {
+      const h = makeHostHarness()
+      const text = await runText(h.registered, 'browser_update')
+
+      // This spec runs from a checkout, so that is the command the user gets;
+      // the four mode/platform combinations are pinned in update-source.spec.ts.
+      expect(text).toContain('install: checkout at ')
+      expect(text).toContain('  ./scripts/install.sh')
+      expect(text).toContain('does not run it')
+      expect(text).toContain('restart dsh')
+      expect(text).toContain('chrome://extensions')
+      // The whole point of the tool: it answers and stops. None of the seams
+      // that would write the mirror, open a browser, or touch the clipboard may
+      // be reached from it — that is what keeps the update the user's action.
+      expect(h.syncExtension).not.toHaveBeenCalled()
+      expect(h.openExtensionsPage).not.toHaveBeenCalled()
+      expect(h.copyToClipboard).not.toHaveBeenCalled()
+    })
   })
 })

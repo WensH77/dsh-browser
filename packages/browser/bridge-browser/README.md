@@ -81,6 +81,7 @@ Loopback sockets may skip the bearer token, but only for one extension: the `Ori
 | `browser_block` / `browser_headers` | Block matching requests, or rewrite request/response headers; session rules scoped to the controlled tab. |
 | `browser_status` | Host-side self-check, available whether or not the extension is connected: connection state, the extension's id/build version and declared `proto`/`toolset` measured against this plugin's own (naming "reload the extension" or "restart dsh"), whether the mirrored extension files are current, and the single next action. Not affected by the debugging setting or the extension's toolset level. |
 | `browser_setup` | Host-side installer helper: re-syncs the extension files into `~/.dsh/browser-extension`, opens `chrome://extensions`, copies that path to the clipboard when a clipboard tool exists, and names the one remaining manual step. Idempotent. |
+| `browser_update` | Prints the command that updates this installation on this machine: the one-line installer for a managed install, the local script for a checkout, and the PowerShell form on Windows. It never runs the command — updating writes into `~/.dsh` and needs a click in Chrome, so that stays the user's action. |
 
 ## Model Experience
 
