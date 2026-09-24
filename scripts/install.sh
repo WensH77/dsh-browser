@@ -302,6 +302,11 @@ EXT="$ROOT/extensions/dsh-browser"
 PLUGIN="$ROOT/packages/browser/bridge-browser"
 WEB_PROFILE_MANIFEST="$DSH_HOME_DIR/profiles/web/package.json"
 LEGACY_PLUGIN="@deepseek-ai/dsh-bridge-browser"
+# The scope this package carried until it was renamed to `dsh-bridge-browser`. An
+# existing install of it has to go, or the profile would hold both names: the two
+# rows mount the same bridge route, and the old symlink still resolves because the
+# directory on disk never moved.
+RENAMED_PLUGIN="@yuxianglin/dsh-bridge-browser"
 
 profile_has_dependency() {
   local manifest="$1"
@@ -324,13 +329,16 @@ print_step 1 "构建 Chrome 扩展与浏览器桥" "Build the Chrome extension a
 # itself (`scripts/copy-extension.mjs`, part of its build): the other order leaves
 # the packaged `extension/` one build behind, or missing on a clean checkout.
 (cd "$ROOT" && pnpm --filter dsh-browser-extension run build >/dev/null 2>&1)
-(cd "$ROOT" && pnpm --filter @yuxianglin/dsh-bridge-browser run build >/dev/null 2>&1)
+(cd "$ROOT" && pnpm --filter dsh-bridge-browser run build >/dev/null 2>&1)
 
 print_step 2 "注册到本机 web profile" "Register with the local web profile"
 if profile_has_dependency "$WEB_PROFILE_MANIFEST" "$LEGACY_PLUGIN"; then
   (cd "$ROOT" && pnpm exec dsh plugin --profile web remove "$LEGACY_PLUGIN" >/dev/null)
 fi
-(cd "$ROOT" && pnpm exec dsh plugin --profile web add -w "@yuxianglin/dsh-bridge-browser@link:$PLUGIN" >/dev/null)
+if profile_has_dependency "$WEB_PROFILE_MANIFEST" "$RENAMED_PLUGIN"; then
+  (cd "$ROOT" && pnpm exec dsh plugin --profile web remove "$RENAMED_PLUGIN" >/dev/null)
+fi
+(cd "$ROOT" && pnpm exec dsh plugin --profile web add -w "dsh-bridge-browser@link:$PLUGIN" >/dev/null)
 
 print_step 3 "安装技能（所有工作区可用）" "Install skills (available to every workspace)"
 # The skills ship in this repository but are read from the user skill root, so a session in

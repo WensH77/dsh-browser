@@ -1,5 +1,5 @@
 {
-  "name": "@yuxianglin/dsh-bridge-browser",
+  "name": "dsh-bridge-browser",
   "description": "Bridge plugin: token-authenticated WebSocket carrier for the browser extension plus the browser_* tools that drive the user's Chrome via that extension",
   "version": "0.0.4",
   "author": "Yuxiang Lin",

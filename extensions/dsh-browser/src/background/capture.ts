@@ -19,7 +19,7 @@ import type {
   CaptureRequest,
   CapturedImage,
   CapturedImageMediaType,
-} from '@yuxianglin/dsh-bridge-browser/src/protocol.ts'
+} from 'dsh-bridge-browser/src/protocol.ts'
 import { CaptureError, acquireDebuggerSession, cdpFailure, visionAvailable, type DebuggerLease } from './debugger-session.ts'
 import {
   RasterError,

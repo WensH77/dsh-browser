@@ -7,10 +7,10 @@
   "private": true,
   "packageManager": "pnpm@11.7.0",
   "scripts": {
-    "build": "pnpm --filter dsh-browser-extension run build && pnpm --filter @yuxianglin/dsh-bridge-browser run build",
+    "build": "pnpm --filter dsh-browser-extension run build && pnpm --filter dsh-bridge-browser run build",
     "start": "dsh web",
-    "test": "node scripts/check-installers.mjs && pnpm --filter @yuxianglin/dsh-bridge-browser run test && pnpm --filter dsh-browser-extension run test",
-    "typecheck": "pnpm --filter @yuxianglin/dsh-bridge-browser run typecheck && pnpm --filter dsh-browser-extension run typecheck",
+    "test": "node scripts/check-installers.mjs && pnpm --filter dsh-bridge-browser run test && pnpm --filter dsh-browser-extension run test",
+    "typecheck": "pnpm --filter dsh-bridge-browser run typecheck && pnpm --filter dsh-browser-extension run typecheck",
     "skills:install": "node scripts/install-skills.mjs"
   },
   "devDependencies": {

@@ -33,7 +33,7 @@ import {
   MAX_BINDABLE_TABS,
   formatBindableTab,
   type BridgeCaps,
-} from '@yuxianglin/dsh-bridge-browser/src/protocol.ts'
+} from 'dsh-bridge-browser/src/protocol.ts'
 import { BridgeClient, type BridgeNotice, type BridgeState } from './bridge.ts'
 import { bridgeNotice } from './bridge-notice.ts'
 import { approvalFailureAnswer, dispatchToolCall, resetTabSnapshot, type ToolAnswer, type ToolCall } from './tools.ts'

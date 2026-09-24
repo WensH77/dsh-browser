@@ -163,9 +163,9 @@ pnpm run build
 pnpm run typecheck
 pnpm run test
 
-pnpm --filter @yuxianglin/dsh-bridge-browser run build
-pnpm --filter @yuxianglin/dsh-bridge-browser run typecheck
-pnpm --filter @yuxianglin/dsh-bridge-browser run test
+pnpm --filter dsh-bridge-browser run build
+pnpm --filter dsh-bridge-browser run typecheck
+pnpm --filter dsh-bridge-browser run test
 
 pnpm --filter dsh-browser-extension run build
 pnpm --filter dsh-browser-extension run test

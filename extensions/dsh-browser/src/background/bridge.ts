@@ -9,7 +9,7 @@
  * @module
  */
 
-import type { BridgeCaps, ClientFrame, ServerFrame } from '@yuxianglin/dsh-bridge-browser/src/protocol.ts'
+import type { BridgeCaps, ClientFrame, ServerFrame } from 'dsh-bridge-browser/src/protocol.ts'
 import {
   BRIDGE_PROTO,
   EXTENSION_UNVERIFIED_CLOSE_CODE,
@@ -18,7 +18,7 @@ import {
   HANDSHAKE_MISMATCH_CLOSE_CODE,
   isServerFrame,
   parseBridgeFrame,
-} from '@yuxianglin/dsh-bridge-browser/src/protocol.ts'
+} from 'dsh-bridge-browser/src/protocol.ts'
 import { visionAvailable } from './capture.ts'
 
 /** Coarse connection state for the UI. */

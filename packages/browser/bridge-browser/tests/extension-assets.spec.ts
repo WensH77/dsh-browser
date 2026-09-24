@@ -124,7 +124,7 @@ describe('bundledExtensionDir', () => {
     // An installed package has no development tree to trust, even if some
     // unrelated `extensions/dsh-browser/dist` happens to sit three levels up.
     const repo = await tempRoot('installed')
-    const packageRoot = join(repo, 'node_modules', '@yuxianglin', 'dsh-bridge-browser')
+    const packageRoot = join(repo, 'node_modules', 'dsh-bridge-browser')
     await mkdir(packageRoot, { recursive: true })
     await writeTree(join(packageRoot, 'extension'), { 'manifest.json': MANIFEST })
     await writeTree(join(repo, 'extensions', 'dsh-browser', 'dist'), { 'manifest.json': MANIFEST })

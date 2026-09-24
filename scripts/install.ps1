@@ -31,7 +31,12 @@ $ManagedRoot = Join-Path $DshHomeDir 'dsh-browser'
 $ManagedMarker = Join-Path $ManagedRoot '.managed-by-install-sh'
 $ArchiveUrl = "https://github.com/$Repository/archive/refs/heads/$RemoteRef.zip"
 $LegacyPlugin = '@deepseek-ai/dsh-bridge-browser'
-$BridgePlugin = '@yuxianglin/dsh-bridge-browser'
+# The scope this package carried until it was renamed to `dsh-bridge-browser`. An
+# existing install of it has to go, or the profile would hold both names: the two
+# rows mount the same bridge route, and the old symlink still resolves because the
+# directory on disk never moved.
+$RenamedPlugin = '@yuxianglin/dsh-bridge-browser'
+$BridgePlugin = 'dsh-bridge-browser'
 
 function Write-Step {
   param([int]$Number, [string]$Zh, [string]$En)
@@ -398,10 +403,12 @@ Invoke-Quiet -WorkingDirectory $Root -Command 'pnpm' -Arguments @('--filter', $B
   -FailZh "桥插件构建失败。" -FailEn "The bridge plugin build failed."
 
 Write-Step 2 "注册到本机 web profile" "Register with the local web profile"
-if (Test-ProfileDependency -Manifest $WebProfileManifest -PackageName $LegacyPlugin) {
-  Invoke-Quiet -WorkingDirectory $Root -Command 'pnpm' `
-    -Arguments @('exec', 'dsh', 'plugin', '--profile', 'web', 'remove', $LegacyPlugin) `
-    -FailZh "移除旧插件失败。" -FailEn "Removing the legacy plugin failed."
+foreach ($OldName in @($LegacyPlugin, $RenamedPlugin)) {
+  if (Test-ProfileDependency -Manifest $WebProfileManifest -PackageName $OldName) {
+    Invoke-Quiet -WorkingDirectory $Root -Command 'pnpm' `
+      -Arguments @('exec', 'dsh', 'plugin', '--profile', 'web', 'remove', $OldName) `
+      -FailZh "移除旧插件失败。" -FailEn "Removing the legacy plugin failed."
+  }
 }
 # pnpm accepts forward slashes on Windows, and they keep the backslashes in a Windows path
 # from being read as escapes inside the link: specifier.

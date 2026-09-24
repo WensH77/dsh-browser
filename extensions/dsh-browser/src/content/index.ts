@@ -9,7 +9,7 @@
  * @module
  */
 
-import { DEFAULT_SNAPSHOT_MAX_CHARS } from '@yuxianglin/dsh-bridge-browser/src/protocol.ts'
+import { DEFAULT_SNAPSHOT_MAX_CHARS } from 'dsh-bridge-browser/src/protocol.ts'
 import { runAction, ActionError } from './actions.ts'
 import { ElementIds } from './ids.ts'
 import type { SnapshotBudget } from './snapshot.ts'
