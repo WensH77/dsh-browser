@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   acquireDebuggerSession,
   debuggerSessionHeld,
+  foreignFrameOrigins,
   forgetDebuggerSession,
   holdDebuggerSession,
   releaseDebuggerSession,
@@ -122,10 +123,10 @@ describe('acquireDebuggerSession', () => {
     await expect(acquireDebuggerSession(7)).rejects.toMatchObject({ code: 'unsupported', reason: 'restricted-page' })
   })
 
-  it('names another extension\'s page when Chrome refuses it', async () => {
-    // Measured report: a session bound to a chrome-extension:// page produced
-    // nothing but this refusal, and the generic "protected pages" copy never
-    // said which page or what to do about it.
+  it('explains that another extension\'s frame blocks the whole tab', async () => {
+    // Measured report: an ordinary http(s) page failed every attach because its
+    // frame tree contained another extension's page. The refusal names neither
+    // the page nor the frame, so the copy has to.
     mockDebugger({
       attachError: new Error('Cannot access a chrome-extension:// URL of different extension'),
       targets: [],
@@ -134,7 +135,7 @@ describe('acquireDebuggerSession', () => {
     await expect(acquireDebuggerSession(7)).rejects.toMatchObject({
       code: 'unsupported',
       reason: 'restricted-page',
-      message: expect.stringContaining('belongs to another extension'),
+      message: expect.stringContaining('frame tree contains a page of another extension'),
     })
   })
 
@@ -167,5 +168,33 @@ describe('acquireDebuggerSession', () => {
     forgetDebuggerSession(7)
 
     expect(debuggerSessionHeld(7)).toBe(false)
+  })
+})
+
+describe('foreignFrameOrigins', () => {
+  it('names the extension and browser frames a tab carries, without page URLs', () => {
+    expect(foreignFrameOrigins([
+      { url: 'https://ts1.intranet.test6.pro/Experts_display.php?id=2287&token=sensitive' },
+      { url: 'about:blank' },
+      { url: 'blob:https://ts1.intranet.test6.pro/9b1c-4f2a' },
+      { url: 'chrome-extension://abcdefghijklmnop/inject.html?page-text=private#frag' },
+      { url: 'chrome-extension://abcdefghijklmnop/another.html' },
+      { url: 'chrome://settings/' },
+      { url: 'file:///Users/someone/private/notes.txt' },
+    ])).toEqual([
+      // One entry per extension, rid of path and query: enough to identify it.
+      'chrome-extension://abcdefghijklmnop',
+      'chrome://settings',
+      'file://',
+    ])
+  })
+
+  it('stays quiet for a page that carries only its own frames', () => {
+    expect(foreignFrameOrigins([
+      { url: 'https://app.example/orders' },
+      { url: 'about:blank' },
+      { url: '' },
+      {},
+    ])).toEqual([])
   })
 })
