@@ -31,6 +31,12 @@ export type CdpFailureReason =
   | 'foreign-debugger'
   /** The page forbids debugging (chrome://, extension pages, protected pages). */
   | 'restricted-page'
+  /**
+   * Another extension's page sits in the tab's frame tree, so Chrome refuses
+   * the whole tab. Distinct from `restricted-page` because it is the one
+   * refusal the extension can work around: remove those frames, attach again.
+   */
+  | 'foreign-frame'
   /** The session ended between two commands. */
   | 'detached'
   /** The `chrome.debugger` API is unavailable in this extension instance. */
@@ -111,6 +117,16 @@ async function recordForeignFrames(tabId: number): Promise<void> {
   }
 }
 
+/**
+ * The phrase that marks a foreign-frame refusal in a settled tool answer.
+ *
+ * `readConsole` and friends turn their failures into answers rather than
+ * throwing, so the retry that removes the offending frame recognises this
+ * refusal by its words. One constant, used by the message below, keeps the two
+ * ends from drifting apart.
+ */
+export const FOREIGN_FRAME_REFUSAL_MARK = 'frame tree contains a page of another extension'
+
 /** Translate a raw attach/detach/sendCommand failure into one actionable message. */
 export function cdpFailure(error: unknown): CaptureError {
   const message = messageOf(error)
@@ -124,7 +140,7 @@ export function cdpFailure(error: unknown): CaptureError {
     // protected page". Chrome checks the whole frame tree, so this fires for an
     // ordinary http(s) page that merely *contains* another extension's frame —
     // and the refusal itself names neither the page nor the frame.
-    return new CaptureError('unsupported', 'Chrome refuses to debug this tab because its frame tree contains a page of another extension (chrome-extension://…): an embedded extension UI such as a password manager, reader or PDF viewer blocks debugging for the whole tab, even when the page itself is ordinary. The debug log lists the offending frame as scheme//host (foreign-frames); disabling that extension, or operating a tab without it, is the way around it.', 'restricted-page')
+    return new CaptureError('unsupported', `Chrome refuses to debug this tab because its ${FOREIGN_FRAME_REFUSAL_MARK} (chrome-extension://…): an embedded extension UI such as a password manager, reader or PDF viewer blocks debugging for the whole tab, even when the page itself is ordinary. The debug log lists the offending frame as scheme//host (foreign-frames); the bridge also tries removing such frames and attaching again, and reports here only when that did not work.`, 'foreign-frame')
   }
   if (/Cannot access|Cannot attach to this target|chrome:\/\//i.test(message)) {
     return new CaptureError('unsupported', 'This page cannot be debugged: Chrome internal, extension, and protected pages do not allow it.', 'restricted-page')

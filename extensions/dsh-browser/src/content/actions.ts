@@ -39,6 +39,11 @@ export interface ActionResult {
   pageContent?: string
   /** A same-frame document navigation was scheduled after this response. */
   navigationPending?: boolean
+  /**
+   * Non-page frames this action removed (`scheme//host` only). Diagnostic: the
+   * background logs it and never hands it to the model.
+   */
+  foreignOrigins?: string[]
 }
 
 /** How long an action should observe a ready document before returning. */
@@ -283,6 +288,82 @@ function elementOrThrow(ids: ElementIds, index: number): Element {
   return el
 }
 
+/** Scheme prefixes Chrome refuses a debugger on when one appears in a frame. */
+const FOREIGN_FRAME_SCHEME = /^(chrome-extension|chrome|file|devtools):/i
+
+/**
+ * Whether an `about:blank` frame no longer belongs to this document.
+ *
+ * An untouched `about:blank` frame inherits this document's origin, so its
+ * `location` is readable. One that another extension filled with its own
+ * document is cross-origin, and reading it throws — which is the only signal
+ * available, since the element still says `about:blank`.
+ */
+function isFilledBlankFrame(frame: HTMLIFrameElement): boolean {
+  try {
+    void frame.contentWindow?.location.href
+    return false
+  } catch {
+    return true
+  }
+}
+
+/** `scheme//host` of one URL, with its path and query dropped. */
+function frameOriginOf(url: string): string {
+  try {
+    const parsed = new URL(url)
+    return `${parsed.protocol}//${parsed.host}`
+  } catch {
+    return url.slice(0, 60)
+  }
+}
+
+/**
+ * Remove the frames of other extensions that make this tab undebuggable.
+ *
+ * Chrome walks the whole frame tree at attach time, so one
+ * `chrome-extension://` child frame — another extension's injected UI, a PDF
+ * viewer, an `about:blank` frame that extension then filled with its own
+ * document — refuses the *entire* tab even when the page itself is ordinary.
+ * Because the check happens at attach, dropping those frames is enough for the
+ * retry to succeed.
+ *
+ * This is the one action the bridge runs for its own sake rather than the
+ * model's, which is why it is not a tool: it is called only after an attach was
+ * already refused, and the page recovers on reload.
+ */
+function removeForeignFramesAction(): ActionResult {
+  const removed: string[] = []
+  const drop = (element: Element, origin: string): void => {
+    removed.push(origin)
+    element.remove()
+  }
+  for (const frame of [...document.querySelectorAll('iframe')]) {
+    const attribute = (frame.getAttribute('src') ?? '').trim()
+    const resolved = frame.src ?? ''
+    const foreign = FOREIGN_FRAME_SCHEME.test(attribute)
+      || FOREIGN_FRAME_SCHEME.test(resolved)
+      || ((attribute === '' || attribute === 'about:blank') && isFilledBlankFrame(frame))
+    if (!foreign) continue
+    drop(frame, frameOriginOf(resolved === '' ? attribute : resolved))
+  }
+  // `embed`/`object` do not name the viewer: the browser renders a PDF through
+  // Chrome's own viewer extension, whose frame blocks debugging exactly like
+  // another extension's page. The element URL is the document, not the viewer,
+  // so the viewer is named explicitly.
+  for (const plugin of [...document.querySelectorAll('embed[type="application/pdf"], object[type="application/pdf"]')]) {
+    // `src`/`data` as reflected, so the origin is absolute like every other frame's.
+    const source = (plugin as HTMLEmbedElement).src || (plugin as HTMLObjectElement).data || ''
+    drop(plugin, `pdf-embed:${frameOriginOf(source)}`)
+  }
+  return {
+    text: removed.length === 0
+      ? 'No frame belonging to another extension was found in this page.'
+      : `Removed ${removed.length} frame(s) belonging to other extensions.`,
+    ...removed.length === 0 ? {} : { foreignOrigins: removed },
+  }
+}
+
 /** Error carrying a stable wire code. */
 export class ActionError extends Error {
   constructor(
@@ -350,6 +431,8 @@ export async function runAction(action: string, args: Record<string, unknown>, c
       return imageSourceAction(args, ctx)
     case 'browser_wait':
       return waitAction(args, ctx)
+    case 'browser_remove_foreign_frames':
+      return removeForeignFramesAction()
     default:
       throw new ActionError('bad-args', `Unknown action: ${action}`)
   }

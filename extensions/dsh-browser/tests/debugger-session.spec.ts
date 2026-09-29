@@ -134,7 +134,9 @@ describe('acquireDebuggerSession', () => {
 
     await expect(acquireDebuggerSession(7)).rejects.toMatchObject({
       code: 'unsupported',
-      reason: 'restricted-page',
+      // Its own reason, not `restricted-page`: this is the refusal the caller
+      // works around by removing the frame and attaching again.
+      reason: 'foreign-frame',
       message: expect.stringContaining('frame tree contains a page of another extension'),
     })
   })
