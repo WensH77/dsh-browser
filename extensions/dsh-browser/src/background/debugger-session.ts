@@ -57,6 +57,60 @@ function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
+/**
+ * Frames of a tab that belong to something other than the page itself.
+ *
+ * Chrome walks the whole frame tree before attaching, so a single
+ * `chrome-extension://` frame — an embedded extension UI, a PDF viewer, a
+ * password manager's overlay, an `about:blank` frame an extension later fills
+ * with its own document — blocks debugging for the *entire* tab, even when the
+ * page the user bound is an ordinary http(s) one. Chrome's refusal names no
+ * frame, so this is what turns "another extension somewhere" into a name.
+ *
+ * Only `scheme//host` survives: enough to tell which extension it is, without
+ * copying page URLs (and their query strings) into the log.
+ *
+ * @param frames - what `chrome.webNavigation.getAllFrames` returned.
+ * @returns unique `scheme//host` strings, first seen first.
+ */
+export function foreignFrameOrigins(frames: readonly { url?: string }[]): string[] {
+  // The schemes Chrome refuses a debugger on. A page's own `blob:`/`data:`
+  // frames are normal and must not be reported as foreign.
+  const blocking = /^(chrome-extension|chrome|file|view-source|devtools):/i
+  const origins: string[] = []
+  for (const frame of frames) {
+    const url = frame.url ?? ''
+    if (!blocking.test(url)) continue
+    let origin = url.slice(0, 60)
+    try {
+      const parsed = new URL(url)
+      origin = `${parsed.protocol}//${parsed.host}`
+    } catch {
+      // A URL the parser rejects is still worth reporting truncated.
+    }
+    if (!origins.includes(origin)) origins.push(origin)
+  }
+  return origins
+}
+
+/**
+ * Record which non-page frames a tab carries, for an attach that just failed.
+ *
+ * Best effort by construction: it runs on a path that is already failing, and a
+ * missing `webNavigation` (a test fake, an older build) must not change the
+ * failure the caller sees.
+ */
+async function recordForeignFrames(tabId: number): Promise<void> {
+  try {
+    const frames = await chrome.webNavigation.getAllFrames({ tabId })
+    if (frames === null) return
+    const origins = foreignFrameOrigins(frames)
+    if (origins.length > 0) recordDebugEvent('foreign-frames', `tab ${tabId}: ${origins.join(', ')}`)
+  } catch {
+    // Nothing to add; the attach failure already carries Chrome's own words.
+  }
+}
+
 /** Translate a raw attach/detach/sendCommand failure into one actionable message. */
 export function cdpFailure(error: unknown): CaptureError {
   const message = messageOf(error)
@@ -66,11 +120,11 @@ export function cdpFailure(error: unknown): CaptureError {
     return new CaptureError('action-failed', 'This extension already holds a debugging session for this tab; reusing it.', 'own-session')
   }
   if (/chrome-extension:\/\/ URL of different extension/i.test(message)) {
-    // One specific restricted page, worth its own sentence: it is not "some
-    // protected page", it is a page that belongs to another extension, and the
-    // fix is to operate an ordinary one. Measured cause of a session that
-    // produced nothing but attach refusals.
-    return new CaptureError('unsupported', 'This page belongs to another extension (chrome-extension://…), and Chrome refuses a debugger there. A page like that accepts neither content scripts nor chrome.debugger, so bind an ordinary http(s) page instead.', 'restricted-page')
+    // One specific restriction, worth its own sentence: it is not "some
+    // protected page". Chrome checks the whole frame tree, so this fires for an
+    // ordinary http(s) page that merely *contains* another extension's frame —
+    // and the refusal itself names neither the page nor the frame.
+    return new CaptureError('unsupported', 'Chrome refuses to debug this tab because its frame tree contains a page of another extension (chrome-extension://…): an embedded extension UI such as a password manager, reader or PDF viewer blocks debugging for the whole tab, even when the page itself is ordinary. The debug log lists the offending frame as scheme//host (foreign-frames); disabling that extension, or operating a tab without it, is the way around it.', 'restricted-page')
   }
   if (/Cannot access|Cannot attach to this target|chrome:\/\//i.test(message)) {
     return new CaptureError('unsupported', 'This page cannot be debugged: Chrome internal, extension, and protected pages do not allow it.', 'restricted-page')
@@ -210,6 +264,7 @@ export async function acquireDebuggerSession(tabId: number, need: DebuggerDomain
         const failure = await attachRefusal(tabId, error)
         if (failure.reason !== 'own-session') {
           recordDebugEvent('attach-failed', `tab ${tabId}: ${failure.reason}: ${messageOf(error)}`)
+          await recordForeignFrames(tabId)
           throw failure
         }
         // A session this extension opened earlier (bookkeeping lost to a service
