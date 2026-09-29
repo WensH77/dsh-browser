@@ -18,10 +18,12 @@ import {
   type TabFrame,
 } from './frames.ts'
 import { CaptureError, captureTab } from './capture.ts'
+import { FOREIGN_FRAME_REFUSAL_MARK } from './debugger-session.ts'
 import { PageImageError, fetchPageImage, pageImageEnvelope, parsePageImageSource } from './page-image.ts'
 import { clearMocks, evaluateInPage, handleDialog, installMock, parseMockRule, readConsole, readNetwork } from './devtools.ts'
 import { addBlockRule, addHeaderRule, clearTabRules, listTabRules, parseHeaderChanges } from './net-rules.ts'
 import { wrapUntrustedContent, wrapUntrustedResult } from '../security/untrusted.ts'
+import { recordDebugEvent } from './debug-log.ts'
 import { approvalPromptForCall } from './authorization.ts'
 import { waitForNextDocumentReady } from './navigation.ts'
 import type { ApprovalAuthorization, ApprovalPrompt, ApprovalRefusal } from '../security/approval.ts'
@@ -379,13 +381,89 @@ function captureEnvelope(image: CapturedImage, url: string | undefined): string 
 const CAPTURE_ENVELOPE_MAX_CHARS = 2_000
 
 /**
+ * Whether Chrome refused the attach because another extension's frame sits in
+ * the tab's frame tree.
+ */
+function isForeignFrameRefusal(error: unknown): boolean {
+  return error instanceof CaptureError && error.reason === 'foreign-frame'
+}
+
+/**
+ * Ask the page to drop the frames of other extensions, and say which they were.
+ *
+ * Best effort by construction: this runs only after an attach was already
+ * refused, so a page with no reachable content script simply fails again and
+ * the caller reports Chrome's own refusal.
+ */
+async function clearForeignFrames(tabId: number): Promise<string[]> {
+  try {
+    await injectContentScript(tabId)
+    const answer = await chrome.tabs.sendMessage(tabId, {
+      type: 'DSH_ACTION',
+      action: 'browser_remove_foreign_frames',
+      args: {},
+    }, { frameId: 0 }) as { ok?: boolean; result?: { foreignOrigins?: unknown } } | undefined
+    const origins = answer?.ok === true ? answer.result?.foreignOrigins : undefined
+    return Array.isArray(origins) ? origins.filter((value): value is string => typeof value === 'string') : []
+  } catch {
+    return []
+  }
+}
+
+/**
+ * Whether an answer settled with the foreign-frame refusal.
+ *
+ * The debugging readers (`readConsole`, `readNetwork`, `evaluateInPage`) turn
+ * their failures into answers instead of throwing, so the retry has to
+ * recognise the refusal in both shapes.
+ */
+function isForeignFrameAnswer(value: unknown): boolean {
+  const message = (value as { error?: { message?: unknown } } | undefined)?.error?.message
+  return typeof message === 'string' && message.includes(FOREIGN_FRAME_REFUSAL_MARK)
+}
+
+/**
+ * Run one debugging call, retrying it once after removing the frames that made
+ * Chrome refuse it.
+ *
+ * Chrome walks the tab's whole frame tree at attach time, so an ordinary page
+ * that merely *carries* another extension's frame — an injected UI, a PDF
+ * viewer, an `about:blank` frame later filled with that extension's document —
+ * fails every debugging call (screenshots, console, network, evaluation) while
+ * the page itself is fine. Dropping those frames is the way through, and it is
+ * attempted for exactly that refusal. The page recovers on reload.
+ *
+ * @param tabId - the controlled tab.
+ * @param run - the debugging call to attempt.
+ * @returns the call's own result, or its original failure when nothing could be
+ * removed.
+ */
+async function withForeignFrameRetry<T>(tabId: number, run: () => Promise<T>): Promise<T> {
+  const removed = async (): Promise<string[] | undefined> => {
+    const origins = await clearForeignFrames(tabId)
+    if (origins.length === 0) return undefined
+    recordDebugEvent('foreign-frames-removed', `tab ${tabId}: ${origins.join(', ')}`)
+    return origins
+  }
+  try {
+    const first = await run()
+    if (!isForeignFrameAnswer(first)) return first
+    return await removed() === undefined ? first : await run()
+  } catch (error: unknown) {
+    if (!isForeignFrameRefusal(error)) throw error
+    if (await removed() === undefined) throw error
+    return await run()
+  }
+}
+
+/**
  * Answer one screenshot call: capture first, then hand the image back beside its
  * envelope. A capture refusal is a stable tool error, never a silent text-only
  * result the model could misread as "empty page".
  */
 async function captureAnswer(tabId: number, call: ToolCall, frames: TabFrame[], signal?: AbortSignal): Promise<ToolAnswer> {
   try {
-    const image = await captureTab(tabId, captureRequest(call.args), signal)
+    const image = await withForeignFrameRetry(tabId, () => captureTab(tabId, captureRequest(call.args), signal))
     const envelope = captureEnvelope(image, frames.find((frame) => frame.frameId === 0)?.url)
     return { ok: true, result: { text: wrapUntrustedContent(envelope, CAPTURE_ENVELOPE_MAX_CHARS), image } }
   } catch (error: unknown) {
@@ -402,7 +480,7 @@ async function captureAnswer(tabId: number, call: ToolCall, frames: TabFrame[], 
 async function withSnapshotVisual(text: string, tabId: number, call: ToolCall, signal?: AbortSignal): Promise<ToolAnswer> {
   if (call.args.visual === false) return { ok: true, result: { text } }
   try {
-    const image = await captureTab(tabId, { ...captureRequest(call.args), fullPage: false }, signal)
+    const image = await withForeignFrameRetry(tabId, () => captureTab(tabId, { ...captureRequest(call.args), fullPage: false }, signal))
     return { ok: true, result: { text, image } }
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : String(error)
@@ -521,7 +599,7 @@ async function dispatchOnce(
   if (call.name === 'browser_image') return imageAnswer(tabId, call, frames)
   // Tab-level debugging tools: the background answers them over CDP or DNR
   // instead of a content script, under the same approval path taken above.
-  if (call.name === 'browser_console') return wrapPageAnswer(await readConsole(tabId, call.args, budget.maxChars), budget.maxChars)
+  if (call.name === 'browser_console') return wrapPageAnswer(await withForeignFrameRetry(tabId, () => readConsole(tabId, call.args, budget.maxChars)), budget.maxChars)
   if (call.name === 'browser_network') {
     if (call.args.mockClear === true) {
       const removed = await clearMocks(tabId)
@@ -541,10 +619,10 @@ async function dispatchOnce(
       const count = await installMock(tabId, mock)
       return { ok: true, result: { text: `Response override active for "${mock.pattern}" (${count} rule(s)); matching requests are answered from memory, not the network.` } }
     }
-    return wrapPageAnswer(await readNetwork(tabId, call.args, budget.maxChars), budget.maxChars)
+    return wrapPageAnswer(await withForeignFrameRetry(tabId, () => readNetwork(tabId, call.args, budget.maxChars)), budget.maxChars)
   }
-  if (call.name === 'browser_eval') return wrapPageAnswer(await evaluateInPage(tabId, call.args, budget.maxChars), budget.maxChars)
-  if (call.name === 'browser_dialog') return wrapPageAnswer(await handleDialog(tabId, call.args), budget.maxChars)
+  if (call.name === 'browser_eval') return wrapPageAnswer(await withForeignFrameRetry(tabId, () => evaluateInPage(tabId, call.args, budget.maxChars)), budget.maxChars)
+  if (call.name === 'browser_dialog') return wrapPageAnswer(await withForeignFrameRetry(tabId, () => handleDialog(tabId, call.args)), budget.maxChars)
   if (call.name === 'browser_block') return netRuleAnswer(tabId, call, 'block')
   if (call.name === 'browser_headers') return netRuleAnswer(tabId, call, 'headers')
 

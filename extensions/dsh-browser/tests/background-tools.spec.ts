@@ -733,6 +733,48 @@ describe('dispatchToolCall', () => {
     expect(chromeMock.sendMessage).toHaveBeenCalledTimes(1)
   })
 
+  it('drops the foreign frame and retries the attach that frame refused', async () => {
+    // Chrome walks the whole frame tree at attach time, so an ordinary page
+    // carrying another extension's frame fails every debugging call. Removing
+    // that frame is the way through, and it is attempted for that refusal alone.
+    const debuggerApi = mockDebuggerApi()
+    debuggerApi.attach
+      .mockRejectedValueOnce(new Error('Cannot access a chrome-extension:// URL of different extension'))
+      .mockResolvedValue(undefined)
+    const chromeMock = mockChrome({
+      tab: { id: 61, url: 'https://app.example/' },
+      debugger: debuggerApi,
+      respond: (message) => (message as { action?: string }).action === 'browser_remove_foreign_frames'
+        ? { ok: true, result: { text: 'Removed 1 frame.', foreignOrigins: ['chrome-extension://abcdefghijklmnop'] } }
+        : undefined,
+    })
+
+    const answer = await dispatchToolCall({ id: 'console-unblock', name: 'browser_console', args: {} }, 'auto')
+
+    expect(answer.ok).toBe(true)
+    expect(debuggerApi.attach).toHaveBeenCalledTimes(2)
+    // The page was asked once, for the removal — the console read stays on CDP.
+    expect(chromeMock.sendMessage).toHaveBeenCalledTimes(1)
+  })
+
+  it('reports the refusal when there is no foreign frame to remove', async () => {
+    const debuggerApi = mockDebuggerApi({ attachError: new Error('Cannot access a chrome-extension:// URL of different extension') })
+    const chromeMock = mockChrome({
+      tab: { id: 62, url: 'https://app.example/' },
+      debugger: debuggerApi,
+      respond: (message) => (message as { action?: string }).action === 'browser_remove_foreign_frames'
+        ? { ok: true, result: { text: 'No frame belonging to another extension was found in this page.' } }
+        : undefined,
+    })
+
+    const answer = await dispatchToolCall({ id: 'console-still-refused', name: 'browser_console', args: {} }, 'auto')
+
+    expect(answer).toMatchObject({ ok: false, error: { message: expect.stringContaining('frame tree contains a page of another extension') } })
+    // One attach attempt, one removal attempt, no pointless second attach.
+    expect(debuggerApi.attach).toHaveBeenCalledTimes(1)
+    expect(chromeMock.sendMessage).toHaveBeenCalledTimes(1)
+  })
+
   it('answers a console read from the CDP session inside the untrusted boundary', async () => {
     const debuggerApi = mockDebuggerApi()
     const chromeMock = mockChrome({ tab: { id: 51, url: 'https://app.example/' }, debugger: debuggerApi })
