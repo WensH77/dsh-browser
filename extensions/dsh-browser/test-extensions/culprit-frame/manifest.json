@@ -1,0 +1,31 @@
+{
+  "manifest_version": 3,
+  "name": "DSH culprit frame (manual test extension)",
+  "version": "1.0",
+  "description": "Manually loaded test extension: injects its own chrome-extension:// iframes into every frame of every page, to reproduce Chrome refusing chrome.debugger for a whole tab. dsh never loads this; a developer does, on purpose.",
+  "content_scripts": [
+    {
+      "matches": [
+        "http://*/*",
+        "https://*/*"
+      ],
+      "run_at": "document_start",
+      "all_frames": true,
+      "js": [
+        "inject.js"
+      ]
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "frame1.html",
+        "frame2.html"
+      ],
+      "matches": [
+        "http://*/*",
+        "https://*/*"
+      ]
+    }
+  ]
+}

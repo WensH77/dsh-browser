@@ -8,7 +8,7 @@ import { describe, expect, it, vi } from 'vitest'
 function installChromeStorage(): Map<string, unknown> {
   const store = new Map<string, unknown>()
   ;(globalThis as { chrome?: unknown }).chrome = {
-    runtime: { getManifest: () => ({ version: '0.1.3' }) },
+    runtime: { getManifest: () => ({ version: '0.1.4' }) },
     storage: {
       session: {
         get: async (key: string) => (store.has(key) ? { [key]: store.get(key) } : {}),
