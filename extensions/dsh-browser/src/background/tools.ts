@@ -389,55 +389,75 @@ function isForeignFrameRefusal(error: unknown): boolean {
 }
 
 /**
- * Ask every frame of the tab to take out the frames of other extensions, and
- * say which they were.
+ * Tabs whose taken-out frames have not been handed back yet.
  *
- * Every frame, because a culprit can sit inside a nested http frame that the
- * main frame cannot reach. Best effort by construction: this runs only after an
- * attach was already refused, so a page with no reachable content script simply
- * fails again and the caller reports Chrome's own refusal.
+ * The restore runs on the same call that took them out; this remembers the
+ * calls where it could not reach the page, so the next debugging call in that
+ * tab tries again instead of leaving those elements detached for good.
  */
+const pendingForeignFrameRestore = new Set<number>()
+
+/** Take the frames of other extensions out of every frame of the tab. */
 async function clearForeignFrames(tabId: number): Promise<string[]> {
-  return await askEveryFrame(tabId, 'browser_remove_foreign_frames')
+  return await askEveryFrame(tabId, 'browser_remove_foreign_frames') ?? []
 }
 
-/** Put back whatever {@link clearForeignFrames} took out. */
-async function restoreForeignFrames(tabId: number): Promise<void> {
-  await askEveryFrame(tabId, 'browser_restore_foreign_frames')
+/** Put back whatever {@link clearForeignFrames} took out. Undefined when no frame answered. */
+async function restoreForeignFrames(tabId: number): Promise<string[] | undefined> {
+  return await askEveryFrame(tabId, 'browser_restore_foreign_frames')
 }
 
 /**
- * Run one frame-scoped action in every frame and collect what came back.
+ * Run one frame-scoped action in every frame and collect **every** frame's answer.
  *
- * No `frameId` is passed: `tabs.sendMessage` then reaches every frame, and each
- * takes out (or puts back) only what is inside its own document. Chrome answers
- * with the first frame's reply, so the returned origins are a sample of the
- * removals rather than the complete list — enough for the log.
+ * Frames are asked one at a time. A plain broadcast answers with the first
+ * frame's reply alone, so a page whose main frame has nothing to take out
+ * reported "nothing" while a child frame had already taken its own culprit out —
+ * measured, that hid the removal, skipped the retry, and left those frames
+ * detached for good. A frame nothing can be injected into (Chrome's own pages,
+ * another extension's frame) simply does not answer.
+ *
+ * @returns the origins every frame removed or restored, or `undefined` when no
+ * frame answered at all.
  */
-async function askEveryFrame(tabId: number, action: string): Promise<string[]> {
-  const ask = async (): Promise<string[]> => {
-    const answer = await chrome.tabs.sendMessage(tabId, {
-      type: 'DSH_ACTION',
-      action,
-      args: {},
-    }) as { ok?: boolean; result?: { foreignOrigins?: unknown } } | undefined
-    const origins = answer?.ok === true ? answer.result?.foreignOrigins : undefined
-    return Array.isArray(origins) ? origins.filter((value): value is string => typeof value === 'string') : []
-  }
-  try {
-    return await ask()
-  } catch {
-    // No listener yet — a tab opened before the extension was installed or
-    // reloaded. Inject once and ask again. Injecting on the normal path would
-    // re-run the content script and replace its listener, which is what loses
-    // the bookkeeping the restore depends on.
-    try {
-      await injectContentScript(tabId)
-      return await ask()
-    } catch {
-      return []
+async function askEveryFrame(tabId: number, action: string): Promise<string[] | undefined> {
+  const askAll = async (): Promise<{ answered: boolean; origins: string[] }> => {
+    // The frame list is the only way to address each frame separately.
+    const frames = await chrome.webNavigation.getAllFrames({ tabId }).catch(() => null)
+    if (frames === null) return { answered: false, origins: [] }
+    const origins: string[] = []
+    let answered = false
+    for (const frame of frames) {
+      try {
+        const answer = await chrome.tabs.sendMessage(tabId, {
+          type: 'DSH_ACTION',
+          action,
+          args: {},
+        }, { frameId: frame.frameId }) as { ok?: boolean; result?: { foreignOrigins?: unknown } } | undefined
+        answered = true
+        const list = answer?.ok === true ? answer.result?.foreignOrigins : undefined
+        if (Array.isArray(list)) {
+          origins.push(...list.filter((value): value is string => typeof value === 'string'))
+        }
+      } catch {
+        // No listener in this frame: nothing to ask there.
+      }
     }
+    return { answered, origins }
   }
+  const first = await askAll()
+  if (first.answered) return first.origins
+  // Nothing answered anywhere — a tab opened before this extension was
+  // installed or reloaded. Inject once and ask again; the declared content
+  // script already covers every frame (`all_frames`), so this is a recovery
+  // path rather than the normal one.
+  try {
+    await injectContentScript(tabId)
+  } catch {
+    return undefined
+  }
+  const second = await askAll()
+  return second.answered ? second.origins : undefined
 }
 
 /**
@@ -470,16 +490,24 @@ function isForeignFrameAnswer(value: unknown): boolean {
  * taken out.
  */
 async function withForeignFrameRetry<T>(tabId: number, run: () => Promise<T>): Promise<T> {
-  /** Take the frames out, retry, and put them back. Undefined when nothing was taken out. */
+  /** Take the frames out, then retry the call. Undefined when nothing was taken out. */
   const retryWithoutForeignFrames = async (): Promise<T | undefined> => {
     const origins = await clearForeignFrames(tabId)
     if (origins.length === 0) return undefined
+    pendingForeignFrameRestore.add(tabId)
     recordDebugEvent('foreign-frames-removed', `tab ${tabId}: ${origins.join(', ')}`)
-    try {
-      return await run()
-    } finally {
-      // Success or failure, the page gets its own DOM back.
-      await restoreForeignFrames(tabId)
+    return await run()
+  }
+  /** Hand the taken-out frames back, keeping the errand queued if nothing answered. */
+  const putForeignFramesBack = async (): Promise<void> => {
+    if (!pendingForeignFrameRestore.has(tabId)) return
+    const restored = await restoreForeignFrames(tabId)
+    // No frame answered: the page (or its content script) is not reachable yet,
+    // so the next debugging call in this tab tries again.
+    if (restored === undefined) return
+    pendingForeignFrameRestore.delete(tabId)
+    if (restored.length > 0) {
+      recordDebugEvent('foreign-frames-restored', `tab ${tabId}: ${restored.join(', ')}`)
     }
   }
   try {
@@ -492,6 +520,11 @@ async function withForeignFrameRetry<T>(tabId: number, run: () => Promise<T>): P
     const retried = await retryWithoutForeignFrames()
     if (retried === undefined) throw error
     return retried
+  } finally {
+    // Success or failure, the page gets its own DOM back. This also covers the
+    // previous call's failure: measured, four frames stayed out for good
+    // because the one restore that was attempted could not reach the page.
+    await putForeignFramesBack()
   }
 }
 

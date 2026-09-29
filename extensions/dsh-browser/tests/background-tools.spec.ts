@@ -777,6 +777,84 @@ describe('dispatchToolCall', () => {
     expect(chromeMock.sendMessage).toHaveBeenCalledTimes(1)
   })
 
+  it('hands back frames that a restore reaching nobody left behind', async () => {
+    // Measured failure: the one restore attempted could not reach the page, and
+    // four frames stayed detached for good. The errand has to survive the call.
+    const debuggerApi = mockDebuggerApi()
+    debuggerApi.attach
+      .mockRejectedValueOnce(new Error('Cannot access a chrome-extension:// URL of different extension'))
+      .mockResolvedValue(undefined)
+    let pageReachable = false
+    const chromeMock = mockChrome({
+      tab: { id: 64, url: 'https://app.example/' },
+      debugger: debuggerApi,
+      respond: (message) => {
+        const action = (message as { action?: string }).action
+        if (action === 'browser_remove_foreign_frames') {
+          return { ok: true, result: { text: 'Took out 1 frame.', foreignOrigins: ['chrome-extension://abcdefghijklmnop'] } }
+        }
+        if (action === 'browser_restore_foreign_frames') {
+          return pageReachable
+            ? { ok: true, result: { text: 'Put back 1 frame.', foreignOrigins: ['chrome-extension://abcdefghijklmnop'] } }
+            : new Error('Could not establish connection. Receiving end does not exist.')
+        }
+        return undefined
+      },
+    })
+
+    await dispatchToolCall({ id: 'self-heal-1', name: 'browser_console', args: {} }, 'auto')
+    pageReachable = true
+    const second = await dispatchToolCall({ id: 'self-heal-2', name: 'browser_console', args: {} }, 'auto')
+
+    expect(second.ok).toBe(true)
+    const restores = chromeMock.sendMessage.mock.calls
+      .filter((call) => (call[1] as { action?: string }).action === 'browser_restore_foreign_frames')
+    // First call: the direct attempt fails, the injected retry fails as well.
+    // Second call: the queued errand runs again and succeeds.
+    expect(restores).toHaveLength(3)
+  })
+
+  it('counts a child frame\'s removal even when the main frame had nothing to take out', async () => {
+    // Measured: a broadcast answers with the first frame's reply alone, so the
+    // main frame's "nothing here" hid the child's removal — no retry, and the
+    // child's frames stayed detached for good.
+    const debuggerApi = mockDebuggerApi()
+    debuggerApi.attach
+      .mockRejectedValueOnce(new Error('Cannot access a chrome-extension:// URL of different extension'))
+      .mockResolvedValue(undefined)
+    const chromeMock = mockChrome({
+      tab: { id: 65, url: 'https://app.example/' },
+      frames: [
+        { frameId: 0, parentFrameId: -1, documentId: 'top-doc', url: 'https://app.example/' },
+        { frameId: 3, parentFrameId: 0, documentId: 'child-doc', url: 'https://app.example/embed' },
+      ],
+      debugger: debuggerApi,
+      respond: (message, frameId) => {
+        const action = (message as { action?: string }).action
+        if (frameId !== 3) return { ok: true, result: { text: 'No frame belonging to another extension was found in this page.' } }
+        if (action === 'browser_remove_foreign_frames') {
+          return { ok: true, result: { text: 'Took out 1 frame.', foreignOrigins: ['chrome-extension://abcdefghijklmnop'] } }
+        }
+        if (action === 'browser_restore_foreign_frames') {
+          return { ok: true, result: { text: 'Put back 1 frame.', foreignOrigins: ['chrome-extension://abcdefghijklmnop'] } }
+        }
+        return undefined
+      },
+    })
+
+    const answer = await dispatchToolCall({ id: 'child-removal', name: 'browser_console', args: {} }, 'auto')
+
+    expect(answer.ok).toBe(true)
+    // The removal was noticed, so the attach was retried.
+    expect(debuggerApi.attach).toHaveBeenCalledTimes(2)
+    const asked = chromeMock.sendMessage.mock.calls.map((call) => [
+      (call[1] as { action?: string }).action,
+      (call[2] as { frameId?: number } | undefined)?.frameId,
+    ])
+    expect(asked).toContainEqual(['browser_remove_foreign_frames', 3])
+    expect(asked).toContainEqual(['browser_restore_foreign_frames', 3])
+  })
+
   it('answers a console read from the CDP session inside the untrusted boundary', async () => {
     const debuggerApi = mockDebuggerApi()
     const chromeMock = mockChrome({ tab: { id: 51, url: 'https://app.example/' }, debugger: debuggerApi })
