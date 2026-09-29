@@ -58,6 +58,21 @@ describe('removing foreign frames', () => {
     expect(restored.text).toContain('Put back 1 frame')
   })
 
+  it('still puts frames back after the content script is re-injected', async () => {
+    // The background injects content.js into tabs it has no listener in, and
+    // every injection replaces the previous listener — so the list of taken-out
+    // elements has to live where both instances can reach it. Measured failure:
+    // the frame stayed out because the instance that detached it was gone.
+    document.body.innerHTML = '<iframe id="foreign" src="chrome-extension://abc/x.html"></iframe>'
+    await runAction('browser_remove_foreign_frames', {}, context())
+
+    vi.resetModules()
+    const fresh = await import('../src/content/actions.ts')
+    await fresh.runAction('browser_restore_foreign_frames', {}, context())
+
+    expect(document.querySelector('#foreign')).not.toBeNull()
+  })
+
   it('leaves a frame the other extension re-created in the meantime alone', async () => {
     // Inserting the old element as well would duplicate that extension's UI.
     document.body.innerHTML = '<iframe id="foreign" src="chrome-extension://abc/x.html"></iframe>'

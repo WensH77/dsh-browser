@@ -415,8 +415,7 @@ async function restoreForeignFrames(tabId: number): Promise<void> {
  * removals rather than the complete list — enough for the log.
  */
 async function askEveryFrame(tabId: number, action: string): Promise<string[]> {
-  try {
-    await injectContentScript(tabId)
+  const ask = async (): Promise<string[]> => {
     const answer = await chrome.tabs.sendMessage(tabId, {
       type: 'DSH_ACTION',
       action,
@@ -424,8 +423,20 @@ async function askEveryFrame(tabId: number, action: string): Promise<string[]> {
     }) as { ok?: boolean; result?: { foreignOrigins?: unknown } } | undefined
     const origins = answer?.ok === true ? answer.result?.foreignOrigins : undefined
     return Array.isArray(origins) ? origins.filter((value): value is string => typeof value === 'string') : []
+  }
+  try {
+    return await ask()
   } catch {
-    return []
+    // No listener yet — a tab opened before the extension was installed or
+    // reloaded. Inject once and ask again. Injecting on the normal path would
+    // re-run the content script and replace its listener, which is what loses
+    // the bookkeeping the restore depends on.
+    try {
+      await injectContentScript(tabId)
+      return await ask()
+    } catch {
+      return []
+    }
   }
 }
 
