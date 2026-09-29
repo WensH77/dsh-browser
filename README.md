@@ -29,21 +29,10 @@ Windows, in PowerShell:
 $s="$env:TEMP\dsh-install.ps1"; irm https://raw.githubusercontent.com/WensH77/dsh-browser/refs/heads/main/scripts/install.ps1 -OutFile $s; powershell -NoProfile -ExecutionPolicy Bypass -File $s
 ```
 
-The installer puts the extension files in `~/.dsh/browser-extension` and opens `chrome://extensions`: load or reload **AI Browser Assistant** there — that is the only browser-side click — then restart dsh once. The plugin keeps those files current at startup, so nothing has to be copied by hand. Each later update: rerun the same install command, then one more “Reload” in Chrome. See [Detailed installation and usage](#detailed-installation-and-usage) for prerequisites, startup commands, updates, and developer installation.
+The installer puts the extension files in `~/.dsh/browser-extension` and opens `chrome://extensions`: load or reload **AI Browser Assistant** there — that is the only browser-side click — then restart dsh once. The plugin keeps those files current at startup, so nothing has to be copied by hand. Each later update: rerun the same install command, then one more “Reload” in Chrome. See [Detailed installation and usage](#detailed-installation-and-usage) for prerequisites, startup commands, updates, and development commands.
 
 > [!IMPORTANT]
 > The unscoped [`dsh-browser`](https://www.npmjs.com/package/dsh-browser) package on npm belongs to a different project and is not affiliated with this repository. This project is not currently published as an npm package; use the installer above.
-
-## Performance
-
-In a paired 60-run end-to-end benchmark on August 18, 2026, both backends completed all 30 assigned runs successfully, while dsh Browser Control required fewer model/tool round trips and finished faster:
-
-| Backend | Success | Mean end-to-end latency | Mean browser tool calls |
-|---|---:|---:|---:|
-| **dsh Browser Control** | **30/30** | **5.32 s** | **3.4** |
-| Matched Playwright baseline | 30/30 | 6.67 s | 4.7 |
-
-The paired Playwright / extension duration ratio was **1.24** (95% CI **1.16–1.34**): Playwright took about 24% longer, or equivalently, dsh Browser Control reduced latency by about 20% and saved 1.35 seconds per task on average. The suite used six browser tasks, five deterministic seeds, the same DSH profile and model (`deepseek-v4-flash`), and independently validated page state. See the [benchmark methodology and reproduction guide](benchmark/README.md).
 
 ## Core capabilities
 
@@ -112,15 +101,7 @@ The installer downloads `main`, builds and registers the bridge plugin, builds t
 
 The Windows command downloads `install.ps1` and runs it rather than piping it into `Invoke-Expression`: the script is UTF-8 with a byte order mark so Windows PowerShell renders its Chinese output, and `Invoke-Expression` rejects a leading mark.
 
-To install the current branch from a source checkout instead:
-
-```sh
-git clone https://github.com/WensH77/dsh-browser.git
-cd dsh-browser
-./scripts/install.sh
-```
-
-On Windows, run `.\scripts\install.ps1` from the checkout instead. After pulling or switching revisions, rerun the install command (or just `pnpm build` — the plugin realigns the extension files at startup), then click **Reload** once on the extensions page. Not sure which command that is? Ask the assistant: `browser_update` prints the one for this machine, and does not run it for you.
+Updates rerun the command above to pull the newer version, then one more **Reload** on the extensions page. Not sure which command that is? Ask the assistant: `browser_update` prints the one for this machine, and does not run it for you.
 
 ### Skills shipped with this repository
 
@@ -136,7 +117,7 @@ Start the managed installation with:
 cd ~/.dsh/dsh-browser && pnpm start
 ```
 
-From a source checkout, run `pnpm start` in the repository root. The exact supported public runtime is currently the pinned 0.1.7 pre-release:
+The exact supported public runtime is currently the pinned 0.1.7 pre-release:
 
 ```sh
 npx @deepseek-ai/dsh@0.1.7-rc.1 web
