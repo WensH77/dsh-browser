@@ -387,9 +387,10 @@ function withPageDelta(text: string, ctx: ActionContext, label?: string): Action
 }
 
 /**
- * Click one element.
+ * Click one element, or choose one option when the target is a `<select>`.
  *
- * @param args - `index` or `selector` target, plus optional `frame`.
+ * @param args - `index` or `selector` target, plus optional `option` for a
+ *   `<select>` and optional `frame`.
  * @param ctx - action context.
  * @param activate - how to press it; the pointer sequence when a page binds to
  *   the press rather than to `click` (see {@link activateElementAsPointer}).
@@ -401,6 +402,11 @@ async function clickAction(
 ): Promise<ActionResult> {
   const resolved = targetOrThrow(args, ctx.ids)
   const el = resolved.element
+  const option = typeof args.option === 'string' ? args.option.trim() : ''
+  if (el instanceof HTMLSelectElement) return chooseSelectOption(el, option, resolved.label, ctx)
+  if (option !== '') {
+    throw new ActionError('bad-args', `option chooses a value in a <select>, but ${resolved.label} is a <${el.localName}>. Drop option, or target the select itself.`)
+  }
   const label = accessibleName(el)
   el.scrollIntoView({ block: 'center', behavior: 'instant' })
   if (el instanceof HTMLAnchorElement) {
@@ -466,6 +472,75 @@ async function clickAction(
   await activate(el)
   await waitForPageSettled(ACTION_SETTLE)
   return withPageDelta(`Clicked ${resolved.label}.`, ctx, label)
+}
+
+/** How many `<select>` options one `browser_dom_query` answer lists. */
+const SELECT_OPTION_LIMIT = 50
+/** Character ceiling for one select's option list inside a dom-query answer. */
+const SELECT_OPTIONS_CHARS = 600
+
+/**
+ * Choose one option in a native `<select>`.
+ *
+ * A synthetic click cannot open a select's popup: the popup is browser UI, not
+ * a document node, so no event a content script can send reaches its options —
+ * which is why clicking a select reported success and changed nothing. Setting
+ * the choice and dispatching what a real pick dispatches is the only path, the
+ * same one Playwright's `selectOption` takes.
+ */
+async function chooseSelectOption(
+  select: HTMLSelectElement,
+  wanted: string,
+  target: string,
+  ctx: ActionContext,
+): Promise<ActionResult> {
+  if (wanted === '') {
+    throw new ActionError('bad-args', `${target} is a native <select>: a synthetic click cannot open its popup, so nothing changed. Pass option with the visible text or the value to choose; read them with browser_dom_query { fields: ["options"] }.`)
+  }
+  if (select.multiple) {
+    throw new ActionError('action-failed', `${target} is a multiple <select>, which this build cannot set. Choose the value in the page's own UI instead.`)
+  }
+  if (select.disabled) {
+    throw new ActionError('action-failed', `${target} is a disabled <select>; nothing was chosen.`)
+  }
+  const matched = matchSelectOption(select, wanted)
+  if (matched === undefined) {
+    throw new ActionError('action-failed', `No option in ${target} matches ${JSON.stringify(wanted)} by value or visible text. Read the options with browser_dom_query { fields: ["options"] }.`)
+  }
+  select.focus()
+  matched.selected = true
+  // What a real pick fires, in the order a browser fires it.
+  select.dispatchEvent(new Event('input', { bubbles: true, composed: true }))
+  select.dispatchEvent(new Event('change', { bubbles: true, composed: true }))
+  await waitForPageSettled(ACTION_SETTLE)
+  return withPageDelta(`Chose option ${JSON.stringify(wanted)} in ${target}.`, ctx, accessibleName(select))
+}
+
+/** The enabled option a value or a visible label names, exactly before loosely. */
+function matchSelectOption(select: HTMLSelectElement, wanted: string): HTMLOptionElement | undefined {
+  const options = [...select.options].filter((option) => !option.disabled)
+  const text = (option: HTMLOptionElement): string => (option.textContent ?? '').trim()
+  const exact = options.find((option) => option.value === wanted || text(option) === wanted)
+  if (exact !== undefined) return exact
+  const folded = wanted.toLowerCase()
+  return options.find((option) => option.value.toLowerCase() === folded || text(option).toLowerCase() === folded)
+}
+
+/**
+ * One `<select>`'s options for `browser_dom_query { fields: ["options"] }`.
+ *
+ * The leading `*` marks the selected option; every option is page-authored text
+ * and travels inside the untrusted boundary like the rest of a dom-query answer.
+ */
+function selectOptionsField(select: HTMLSelectElement): string {
+  const options = [...select.options]
+  const shown = options.slice(0, SELECT_OPTION_LIMIT)
+  const parts = shown.map((option) => {
+    const text = (option.textContent ?? '').trim()
+    return `${option.selected ? '*' : ''}${text === '' ? '(blank)' : text} (value "${option.value}"${option.disabled ? ', disabled' : ''})`
+  })
+  const more = options.length > shown.length ? ` …(+${options.length - shown.length} more)` : ''
+  return truncate(`${parts.join(' | ')}${more}`, SELECT_OPTIONS_CHARS).text
 }
 
 /**
@@ -599,7 +674,7 @@ async function scrollAction(args: Record<string, unknown>, ctx: ActionContext): 
  */
 const DOM_QUERY_FIELDS = new Set([
   'href', 'src', 'alt', 'value', 'id', 'class', 'title', 'aria-label', 'role', 'name',
-  'type', 'checked', 'disabled', 'visible', 'text', 'placeholder',
+  'type', 'checked', 'disabled', 'visible', 'text', 'placeholder', 'options',
 ])
 
 /** Matches rendered per query, and the character ceiling for one answer. */
@@ -658,6 +733,8 @@ function domQueryAction(args: Record<string, unknown>): ActionResult {
         ? String(element.checked)
         : undefined
       case 'disabled': return 'disabled' in element ? String((element as HTMLInputElement).disabled) : undefined
+      // What a select can be set to; `browser_click { option }` consumes these.
+      case 'options': return element instanceof HTMLSelectElement ? selectOptionsField(element) : undefined
       // A credential field is masked here exactly as it is in a snapshot: a
       // form value has more than one path to the model, so the same gate has to
       // hold on this one. `privacy.ts` states that contract; this is where it

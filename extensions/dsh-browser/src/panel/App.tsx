@@ -16,6 +16,9 @@ const zh = {
   operating: '操作',
   session: '会话',
   settings: '设置',
+  log: '日志',
+  logCopied: '已复制',
+  logFailed: '复制失败',
   reconnect: '重连',
   pendingApprovals: '等待确认的浏览器操作',
   allowOnce: '允许一次',
@@ -75,6 +78,9 @@ const en = {
   operating: 'Operation',
   session: 'Session',
   settings: 'Settings',
+  log: 'Log',
+  logCopied: 'Copied',
+  logFailed: 'Copy failed',
   reconnect: 'Reconnect',
   pendingApprovals: 'Browser actions awaiting approval',
   allowOnce: 'Allow once',
@@ -185,6 +191,22 @@ function opStateLabel(state: string): string | undefined {
 
 export function App(): ReactElement {
   const [ui, setUi] = useState<UiState | null>(null)
+  /** Feedback for the Log button: it copies, so it has to say whether it did. */
+  const [logCopy, setLogCopy] = useState<'idle' | 'copied' | 'failed'>('idle')
+
+  /** Copy the extension's recent debugging events for a bug report. */
+  const copyLog = async (): Promise<void> => {
+    let log = ''
+    try {
+      const answer = await sendUiRequest({ type: 'debug.log' })
+      log = typeof (answer as { log?: unknown } | undefined)?.log === 'string' ? (answer as { log: string }).log : ''
+    } catch {
+      // The failure state below is the answer; nothing else to do with it.
+    }
+    const copied = log !== '' && await copyTextToClipboard(log)
+    setLogCopy(copied ? 'copied' : 'failed')
+    window.setTimeout(() => setLogCopy('idle'), 2_000)
+  }
 
   useEffect(() => {
     let active = true
@@ -379,14 +401,56 @@ export function App(): ReactElement {
             {copy.unbind}
           </button>
         </span>
-        <button
-          type="button"
-          className="btn btn--ghost btn--sm"
-          onClick={() => { void sendUiRequest({ type: 'open-options' }) }}
-        >
-          {copy.settings}
-        </button>
+        <span className="panel__footer-actions">
+          <button
+            type="button"
+            className="btn btn--ghost btn--sm"
+            onClick={() => { void copyLog() }}
+          >
+            {logCopy === 'copied' ? copy.logCopied : logCopy === 'failed' ? copy.logFailed : copy.log}
+          </button>
+          <button
+            type="button"
+            className="btn btn--ghost btn--sm"
+            onClick={() => { void sendUiRequest({ type: 'open-options' }) }}
+          >
+            {copy.settings}
+          </button>
+        </span>
       </footer>
     </div>
   )
+}
+
+/**
+ * Put text on the clipboard from a panel button.
+ *
+ * `navigator.clipboard` is the path Chrome supports; the textarea fallback
+ * covers a side panel whose document Chrome does not treat as focused. Both run
+ * from the click, so the user gesture the write needs is never lost.
+ *
+ * @param text - what to copy.
+ * @returns whether the clipboard took it.
+ */
+async function copyTextToClipboard(text: string): Promise<boolean> {
+  try {
+    await navigator.clipboard.writeText(text)
+    return true
+  } catch {
+    // Fall through to the legacy path.
+  }
+  try {
+    const area = document.createElement('textarea')
+    area.value = text
+    area.setAttribute('readonly', '')
+    area.style.position = 'fixed'
+    area.style.top = '-1000px'
+    document.body.appendChild(area)
+    area.select()
+    const copied = document.execCommand('copy')
+    area.remove()
+    return copied
+  } catch {
+    return false
+  }
 }

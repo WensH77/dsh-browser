@@ -15,6 +15,8 @@
  * @module
  */
 
+import { recordDebugEvent } from './debug-log.ts'
+
 /** CDP version this extension attaches with. */
 const PROTOCOL_VERSION = '1.3'
 
@@ -194,11 +196,18 @@ export async function acquireDebuggerSession(tabId: number, need: DebuggerDomain
       try {
         await chrome.debugger.attach({ tabId }, PROTOCOL_VERSION)
         session.attached = true
+        // The debug banner appears at this line; every later `detach` event
+        // explains how long it stayed and why it went away.
+        recordDebugEvent('attach', `tab ${tabId} attached (CDP ${PROTOCOL_VERSION})`)
       } catch (error: unknown) {
         const failure = await attachRefusal(tabId, error)
-        if (failure.reason !== 'own-session') throw failure
+        if (failure.reason !== 'own-session') {
+          recordDebugEvent('attach-failed', `tab ${tabId}: ${failure.reason}: ${messageOf(error)}`)
+          throw failure
+        }
         // A session this extension opened earlier (bookkeeping lost to a service
         // worker restart) is still usable; the domains it has enabled are unknown.
+        recordDebugEvent('attach-reused', `tab ${tabId}: already attached to this extension (bookkeeping was lost)`)
         session.attached = true
         session.domains.clear()
       }
@@ -209,6 +218,7 @@ export async function acquireDebuggerSession(tabId: number, need: DebuggerDomain
     } catch (error: unknown) {
       session.refs -= 1
       const failure = cdpFailure(error)
+      recordDebugEvent('enable-failed', `tab ${tabId}: ${failure.reason}: ${messageOf(error)}`)
       // A reused session can be gone even though Chrome said it was ours; forget
       // it so the next holder attaches again instead of failing forever.
       if (failure.reason === 'detached' || session.refs === 0) {
@@ -245,6 +255,7 @@ async function detachIfIdle(tabId: number, session: TabSession): Promise<void> {
   if (session.refs > 0) return
   sessions.delete(tabId)
   if (!session.attached) return
+  recordDebugEvent('detach', `tab ${tabId} released by the extension (no holder left)`)
   await chrome.debugger.detach({ tabId }).catch(() => undefined)
 }
 

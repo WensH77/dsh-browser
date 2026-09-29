@@ -72,6 +72,7 @@ import { affinityFailureAnswer } from './affinity-copy.ts'
 import { isExportableGdriveUrl, parseGdriveExportUrl } from './gdrive-url.ts'
 import { waitForTabCommit } from './tab-commit.ts'
 import { clearTabRules } from './net-rules.ts'
+import { readDebugEvents, recentDebugEventsText, recordDebugEvent, renderDebugEvents } from './debug-log.ts'
 import { isExtensionPageSender } from '../shared/message-sender.ts'
 import {
   SETTINGS_DEFAULTS,
@@ -100,6 +101,9 @@ export const STORAGE_KEY = SETTINGS_STORAGE_KEY
  */
 const DISCOVERY_PORTS = [3080, 3081, 3090, 14389, 43189]
 const LEGACY_LOCAL_URL = 'ws://127.0.0.1:3080'
+
+/** Lines the panel's Log button copies: enough for one failure, short enough to paste. */
+const PANEL_LOG_EVENTS = 30
 
 /** 探测本机 dsh 的桥地址：fetch /ext/bridge-config 直到成功。 */
 async function discoverBridge(shouldContinue: () => boolean = () => true): Promise<string | undefined> {
@@ -1342,8 +1346,36 @@ async function handleVirtualTool(call: ToolCall, signal: AbortSignal): Promise<T
 }
 
 /** Route one tool.call frame to the user-approved controlled tab. */
+/**
+ * Keep one refusal in the diagnostic ring.
+ *
+ * The tool result is gone as soon as the conversation moves on, and the machine
+ * that hit the failure is usually not the one reading it — this is the trace
+ * that survives both.
+ */
+function recordToolFailure(call: ToolCall, answer: ToolAnswer): void {
+  if (answer.ok || answer.error === undefined) return
+  recordDebugEvent('tool-error', `${call.name}: ${answer.error.message}`)
+}
+
 function routeToolCall(call: ToolCall): void {
   if (bridge === null) return
+  // Answered here, ahead of the op feed and of every gate: this readout is what
+  // someone runs *because* the debugging tools fail, so it may not depend on a
+  // bound tab, an approval, or a live debugging session.
+  if (call.name === 'browser_debug_log') {
+    void readDebugEvents().then((events) => {
+      bridge?.send({ t: 'tool.result', id: call.id, ok: true, result: { text: renderDebugEvents(events) } })
+    }, (error: unknown) => {
+      bridge?.send({
+        t: 'tool.result',
+        id: call.id,
+        ok: false,
+        error: { code: 'action-failed', message: error instanceof Error ? error.message : String(error) },
+      })
+    })
+    return
+  }
   activeToolCalls.get(call.id)?.abort()
   const controller = new AbortController()
   activeToolCalls.set(call.id, controller)
@@ -1376,6 +1408,7 @@ function routeToolCall(call: ToolCall): void {
       }
       const socket = bridge
       if (socket === null) return
+      recordToolFailure(call, answer)
       if (answer.ok) {
         settleOp(call.id, 'done')
         socket.send({ t: 'tool.result', id: call.id, ok: true, result: answer.result })
@@ -1429,6 +1462,7 @@ function routeToolCall(call: ToolCall): void {
       }
       const socket = bridge
       if (socket === null) return
+      recordToolFailure(call, answer)
       if (answer.ok) {
         if (typeof answer.result === 'object' && answer.result !== null) {
           const label = (answer.result as { label?: unknown }).label
@@ -1455,6 +1489,7 @@ function routeToolCall(call: ToolCall): void {
         return
       }
       settleOp(call.id, 'error')
+      recordDebugEvent('tool-error', `${call.name}: ${error instanceof Error ? error.message : String(error)}`)
       bridge?.send({
         t: 'tool.result',
         id: call.id,
@@ -1601,6 +1636,16 @@ chrome.runtime.onMessage.addListener((message: unknown, sender, sendResponse) =>
       sendUiPush({ type: 'push.ops-cleared' })
       sendResponse({ accepted: true })
       return
+    case 'debug.log':
+      // The panel's Log button: the same ring `browser_status` reads, clipped so
+      // a paste stays readable. Answered from memory plus storage.session, so it
+      // works with nothing bound and with the debugging tools broken — which is
+      // exactly when someone presses it.
+      void recentDebugEventsText(PANEL_LOG_EVENTS).then(
+        (log) => sendResponse({ log }),
+        () => sendResponse({ log: '' }),
+      )
+      return true
     case 'session.unbind': {
       const sessionId = tabAffinity.focusedSession()
       if (sessionId !== null && tabAffinity.unbindSession(sessionId)) {

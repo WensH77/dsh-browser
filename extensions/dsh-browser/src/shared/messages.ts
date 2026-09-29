@@ -71,6 +71,8 @@ export type UiRequest =
   | { type: 'open-export-folder' }
   | { type: 'ops.clear' }
   | { type: 'session.unbind' }
+  /** The panel's Log button: the background answers `{ log: string }`. */
+  | { type: 'debug.log' }
 
 /** Push broadcasts from the background to any open UI page. */
 export type UiPush =

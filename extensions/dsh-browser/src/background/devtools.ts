@@ -20,6 +20,7 @@ import {
   releaseDebuggerSession,
 } from './debugger-session.ts'
 import { shorten } from '../shared/text.ts'
+import { recordDebugEvent } from './debug-log.ts'
 
 /** Console entries retained per tab. */
 const CONSOLE_BUFFER_MAX = 300
@@ -370,8 +371,12 @@ function installListener(): void {
   if (listenerInstalled || typeof chrome === 'undefined' || chrome.debugger === undefined) return
   listenerInstalled = true
   chrome.debugger.onEvent.addListener(onCdpEvent)
-  chrome.debugger.onDetach.addListener((source) => {
+  chrome.debugger.onDetach.addListener((source, reason) => {
     if (source.tabId !== undefined) {
+      // The one fact a remote report cannot supply any other way: Chrome's own
+      // reason for ending the session (canceled_by_user when the debugging
+      // notice is dismissed, target_closed, replaced_with_devtools, …).
+      recordDebugEvent('detach', `tab ${source.tabId} detached by Chrome: ${reason}`)
       // Chrome detached us (notice dismissed, tab closed): drop the shared
       // bookkeeping so the next call attaches again instead of trusting it.
       forgetDebuggerSession(source.tabId)

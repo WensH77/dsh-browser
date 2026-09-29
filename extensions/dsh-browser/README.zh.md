@@ -9,7 +9,7 @@ dsh 的**纯浏览器操作端**：让模型直接读取并操作你在浏览器
 | 能力 | 动作 | 说明 |
 |---|---|---|
 | 读取页面 | `browser_snapshot` | 标题/URL/正文/编号交互清单/表单字段（敏感值掩码）；`delta: true` 只返回变化，省 token |
-| 点击元素 | `browser_click` | 按编号点击（链接/按钮/复选框…），React/Vue 组件兼容 |
+| 点击元素 | `browser_click` | 按编号或 CSS 选择器点击（链接/按钮/复选框…），React/Vue 组件兼容；原生 `<select>` 用 `option` 按值或可见文本选中 |
 | 填写表单 | `browser_type` | 输入文本，`replace` 清空重填 |
 | 按键 | `browser_press` | Enter/Tab/Escape/方向键等 |
 | 滚动 | `browser_scroll` | 视口滚动（up/down/top/bottom） |
@@ -117,6 +117,7 @@ pnpm --filter dsh-browser-extension run test
 - **调试能力默认关闭**：截图、控制台、网络、响应替换与页面内执行 JS 都走 `chrome.debugger`，只有扩展设置里开着「允许 dsh 使用浏览器调试能力」时才注册（首次安装为关）。关闭时宿主根本不注册这些工具，模型看不到也调不到；切换该开关会重连桥，让能力随握手同步过去。
 - **构建错配会明说，不靠猜**：`hello`/`hello.ok` 带 `proto`（握手版本）与 `toolset`（扩展能力级别）。宿主若服务不了本构建，会用可读原因拒绝握手，扩展把该原因原样显示在选项页与侧栏，并给出下一步（重启 dsh，或重载扩展）；宿主若从不回应，也会给出对应提示，而不是一个没有解释的「连接中…」。反方向同理：宿主会按本扩展声明的能力级别收窄模型可见的工具面，旧构建不会拿到它无法解析的 `selector`。
 - **缓冲区随绑定开启**：开着调试能力时，绑定页面就 attach 调试器并打开控制台/网络缓冲，页面自己加载期的请求与早期报错会被记下来，而不是从模型第一次读取才开始。关掉调试、解绑或关闭标签页都会释放会话；用户点掉调试提示条也会被识别，下次 affinity 变化时重新预热。
+- **调试现场留痕**：`src/background/debug-log.ts` 维护一圈最近 60 条调试事件——service worker 的启动、每次 attach 及其失败原因、每次 detach（含 Chrome 自己给出的原因：`canceled_by_user`、`target_closed`、`replaced_with_devtools` 等）、以及失败的工具调用。它存在 `chrome.storage.session`，所以 worker 被重启也不会把证据一起抹掉（worker 重启本身会留下一条启动记录，这正是"调试横幅出现几秒后自己消失"的头号嫌疑）。宿主 `browser_status` 会把这段日志附在自检输出后面，因此别人机器上的失败不需要日志收集工具也能读回来。只有固定的事件种类、Chrome 的错误文本与工具名进这圈缓冲，没有页面内容。
 - **JS 弹窗会冻结页面**：原生 `alert`/`confirm`/`prompt` 阻塞渲染进程主线程，内容脚本类工具与 `Runtime.evaluate` 都会排在它后面，直到有人应答。`browser_dialog` 经 CDP 应答（确认/取消，prompt 可带文本），并回传它关掉的那句文案；弹窗出现时也会作为一条 warning 进控制台缓冲。
 - **调试类工具限定在受控标签页**：控制台/网络缓冲、响应替换与求值依赖 `chrome.debugger`（仅 Chrome，且该标签页开着 DevTools 时不可用）；阻断与改头用带 `tabIds` 的 session 规则，不碰其它标签页，随浏览器会话结束失效。`browser_eval` 默认每次都询问，只有在设置里开启「信任的站点也可直接执行 JS」后才按 origin 免询问；改头始终询问，阻断可被 origin 信任覆盖。无人应答的提示会在受控标签页变化时被撤回，工具会明确说明「什么都没执行」。
 - **先同意、后请求**：会话的首次 `browser_navigate` 先按目的地取信任/审批，批准后才创建标签，被拒绝或未应答的调用不会加载 URL；绑定标签页内的后续导航走同一条「先审批」路径。
@@ -137,3 +138,5 @@ pnpm --filter dsh-browser-extension run test
 - 令牌无自动轮换。
 - `browser_press` 的合成按键不触发浏览器原生默认行为（Tab 焦点移动、方向键、Enter 激活等），仅用于框架内的键盘事件；依赖原生行为的场景请手动操作。
 - `browser_wait` 以加载完成 + 固定静默窗口为准，不观察持续 DOM 更新（连续刷新的 SPA 可能被报为稳定）。
+- 原生 `<select>` 通过设置选中项并派发 `input`/`change` 来操作（合成点击打不开浏览器原生下拉），因此只支持单选：`multiple` 选择框会明确拒绝；依赖下拉打开动画或 `mousedown` 才会展开的页面，其展开动作不会发生。
+- 自绘下拉（把 `<select>` 藏起来、用 div 充当选项的页面）不受此路径影响：显隐由页面自己控制，工具只能操作真正可见的元素。
