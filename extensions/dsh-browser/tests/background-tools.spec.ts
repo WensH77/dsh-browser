@@ -753,8 +753,10 @@ describe('dispatchToolCall', () => {
 
     expect(answer.ok).toBe(true)
     expect(debuggerApi.attach).toHaveBeenCalledTimes(2)
-    // The page was asked once, for the removal — the console read stays on CDP.
-    expect(chromeMock.sendMessage).toHaveBeenCalledTimes(1)
+    // The page was asked to take the frame out and to put it back — the console
+    // read itself stays on CDP, and the other extension's UI survives.
+    expect(chromeMock.sendMessage.mock.calls.map((call) => (call[1] as { action?: string }).action))
+      .toEqual(['browser_remove_foreign_frames', 'browser_restore_foreign_frames'])
   })
 
   it('reports the refusal when there is no foreign frame to remove', async () => {

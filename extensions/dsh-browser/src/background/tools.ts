@@ -389,20 +389,39 @@ function isForeignFrameRefusal(error: unknown): boolean {
 }
 
 /**
- * Ask the page to drop the frames of other extensions, and say which they were.
+ * Ask every frame of the tab to take out the frames of other extensions, and
+ * say which they were.
  *
- * Best effort by construction: this runs only after an attach was already
- * refused, so a page with no reachable content script simply fails again and
- * the caller reports Chrome's own refusal.
+ * Every frame, because a culprit can sit inside a nested http frame that the
+ * main frame cannot reach. Best effort by construction: this runs only after an
+ * attach was already refused, so a page with no reachable content script simply
+ * fails again and the caller reports Chrome's own refusal.
  */
 async function clearForeignFrames(tabId: number): Promise<string[]> {
+  return await askEveryFrame(tabId, 'browser_remove_foreign_frames')
+}
+
+/** Put back whatever {@link clearForeignFrames} took out. */
+async function restoreForeignFrames(tabId: number): Promise<void> {
+  await askEveryFrame(tabId, 'browser_restore_foreign_frames')
+}
+
+/**
+ * Run one frame-scoped action in every frame and collect what came back.
+ *
+ * No `frameId` is passed: `tabs.sendMessage` then reaches every frame, and each
+ * takes out (or puts back) only what is inside its own document. Chrome answers
+ * with the first frame's reply, so the returned origins are a sample of the
+ * removals rather than the complete list — enough for the log.
+ */
+async function askEveryFrame(tabId: number, action: string): Promise<string[]> {
   try {
     await injectContentScript(tabId)
     const answer = await chrome.tabs.sendMessage(tabId, {
       type: 'DSH_ACTION',
-      action: 'browser_remove_foreign_frames',
+      action,
       args: {},
-    }, { frameId: 0 }) as { ok?: boolean; result?: { foreignOrigins?: unknown } } | undefined
+    }) as { ok?: boolean; result?: { foreignOrigins?: unknown } } | undefined
     const origins = answer?.ok === true ? answer.result?.foreignOrigins : undefined
     return Array.isArray(origins) ? origins.filter((value): value is string => typeof value === 'string') : []
   } catch {
@@ -423,36 +442,45 @@ function isForeignFrameAnswer(value: unknown): boolean {
 }
 
 /**
- * Run one debugging call, retrying it once after removing the frames that made
- * Chrome refuse it.
+ * Run one debugging call, retrying it once after the frames that made Chrome
+ * refuse it have been taken out.
  *
  * Chrome walks the tab's whole frame tree at attach time, so an ordinary page
  * that merely *carries* another extension's frame — an injected UI, a PDF
  * viewer, an `about:blank` frame later filled with that extension's document —
  * fails every debugging call (screenshots, console, network, evaluation) while
- * the page itself is fine. Dropping those frames is the way through, and it is
- * attempted for exactly that refusal. The page recovers on reload.
+ * the page itself is fine. The frame only has to be absent for the attach, not
+ * for the session, so it goes back the moment the retry returns: the other
+ * extension's UI disappears for milliseconds.
  *
  * @param tabId - the controlled tab.
  * @param run - the debugging call to attempt.
  * @returns the call's own result, or its original failure when nothing could be
- * removed.
+ * taken out.
  */
 async function withForeignFrameRetry<T>(tabId: number, run: () => Promise<T>): Promise<T> {
-  const removed = async (): Promise<string[] | undefined> => {
+  /** Take the frames out, retry, and put them back. Undefined when nothing was taken out. */
+  const retryWithoutForeignFrames = async (): Promise<T | undefined> => {
     const origins = await clearForeignFrames(tabId)
     if (origins.length === 0) return undefined
     recordDebugEvent('foreign-frames-removed', `tab ${tabId}: ${origins.join(', ')}`)
-    return origins
+    try {
+      return await run()
+    } finally {
+      // Success or failure, the page gets its own DOM back.
+      await restoreForeignFrames(tabId)
+    }
   }
   try {
     const first = await run()
     if (!isForeignFrameAnswer(first)) return first
-    return await removed() === undefined ? first : await run()
+    const retried = await retryWithoutForeignFrames()
+    return retried === undefined ? first : retried
   } catch (error: unknown) {
     if (!isForeignFrameRefusal(error)) throw error
-    if (await removed() === undefined) throw error
-    return await run()
+    const retried = await retryWithoutForeignFrames()
+    if (retried === undefined) throw error
+    return retried
   }
 }
 
