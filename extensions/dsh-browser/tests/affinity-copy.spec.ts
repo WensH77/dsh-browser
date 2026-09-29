@@ -44,4 +44,28 @@ describe('affinityFailureAnswer', () => {
     expect(answer.error?.message).toContain('Do not retry')
     expect(answer.error?.message).not.toContain('browser_bind_interactive')
   })
+
+  it('names the page and every way out when only its own extension may touch it', () => {
+    // Measured: a session auto-bound to another extension's page, where every
+    // tool failed with "Cannot access a chrome-extension:// URL of different
+    // extension". The answer has to say that the page is the problem.
+    const answer = affinityFailureAnswer('unsupported', undefined, 'chrome-extension://abcdefghijklmnop/panel.html')
+
+    expect(answer).toMatchObject({ ok: false, error: { code: 'action-failed' } })
+    expect(answer.error?.message).toContain('chrome-extension://abcdefghijklmnop/panel.html')
+    expect(answer.error?.message).toContain('another extension')
+    expect(answer.error?.message).toContain('Unbind')
+    expect(answer.error?.message).toContain('browser_navigate')
+    expect(answer.error?.message).toContain('browser_bind_interactive')
+    // The bridge is fine; the page is not. Saying otherwise sends the session
+    // off to reconnect a working connection.
+    expect(answer.error?.message).toContain('Nothing else is wrong with the bridge')
+  })
+
+  it('still names the page when the URL is unknown', () => {
+    const answer = affinityFailureAnswer('unsupported')
+
+    expect(answer.error?.message).toContain('The current page')
+    expect(answer.error?.message).toContain('http(s) page')
+  })
 })

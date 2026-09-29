@@ -114,7 +114,7 @@ interface Harness {
 }
 
 /** Boot the worker against the fakes and wait until it is really connected. */
-async function boot(): Promise<Harness> {
+async function boot(activeTab: typeof APP_TAB = APP_TAB): Promise<Harness> {
   FakeSocket.reset()
   const messageListeners: Listener[] = []
   const notifications = vi.fn(async (_id: string, _options?: unknown) => 'notification-1')
@@ -137,10 +137,10 @@ async function boot(): Promise<Harness> {
       session: { get: async () => ({}), set: async () => undefined, remove: async () => undefined },
     },
     tabs: {
-      query: async () => [APP_TAB],
-      get: async () => APP_TAB,
-      update: async () => APP_TAB,
-      create: async () => APP_TAB,
+      query: async () => [activeTab],
+      get: async () => activeTab,
+      update: async () => activeTab,
+      create: async () => activeTab,
       // No content script in this fake. An approved call therefore fails at its
       // action step — which is fine: this spec is about whether a card was
       // raised, not about what the page did.
@@ -323,5 +323,22 @@ describe('background entry consent gate', () => {
     const response = await harness.uiRequest({ type: 'debug.log' }) as { log?: string }
 
     expect(response.log).toContain('worker-start')
+  })
+
+  it('refuses to auto-bind a page that belongs to another extension', async () => {
+    // Measured report: the session auto-bound whichever tab was active, and a
+    // `chrome-extension://` page accepts neither content scripts nor
+    // `chrome.debugger`, so every tool failed with
+    // "Cannot access a chrome-extension:// URL of different extension".
+    const other = await boot({ id: 99, windowId: 1, title: 'Some other extension', url: 'chrome-extension://abcdefghijklmnop/panel.html' })
+    other.call({ id: 'p1', name: 'browser_get_text', args: {}, sessionId: 's1' })
+
+    const frame = await other.settle('p1')
+
+    expect(frame.ok).toBe(false)
+    expect(String((frame.error as { message?: string } | undefined)?.message)).toContain('another extension')
+    expect(String((frame.error as { message?: string } | undefined)?.message)).toContain('Unbind')
+    // Nothing was bound, so there was nothing to approve.
+    expect(other.approvalIds()).toEqual([])
   })
 })

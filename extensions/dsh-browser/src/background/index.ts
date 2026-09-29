@@ -679,6 +679,13 @@ async function ensureInitialTabBinding(sessionId?: string): Promise<ToolAnswer |
     // For a URL-less first call the user should switch to the target page (or
     // let browser_navigate open a fresh, separately approved tab).
     if (isDshPageUrl(summary.url)) return affinityFailureAnswer('missing')
+    // A page Chrome keeps to its own extension — another extension's page, a
+    // chrome:// page, a file:// URL — accepts neither content scripts nor
+    // chrome.debugger, so auto-binding it hands the session a page where every
+    // tool fails. Measured: a bound chrome-extension:// page produced nothing
+    // but "Cannot access a chrome-extension:// URL of different extension"
+    // attach refusals, over and over.
+    if (!isBindableTabUrl(summary.url)) return affinityFailureAnswer('unsupported', undefined, summary.url)
     if (tabAffinity.bindInitial(summary, sessionId)) {
       keepTabAlive(summary.tabId)
       persistTabAffinity()
@@ -723,6 +730,10 @@ async function resolveToolTab(sessionId?: string): Promise<Pick<chrome.tabs.Tab,
       const tab = await chrome.tabs.get(resolution.tab.tabId)
       const summary = summarizeTab(tab)
       if (summary === null) return affinityFailureAnswer('missing')
+      // A tab bound while it still looked ordinary can navigate to a page no
+      // other extension may touch. Saying so beats letting every debugging call
+      // fail on it. A tab mid-navigation (empty URL, about:blank) is left alone.
+      if (isClearlyUnoperablePage(summary.url)) return affinityFailureAnswer('unsupported', undefined, summary.url)
       keepTabAlive(summary.tabId)
       if (tabAffinity.observeTab(summary)) broadcastTabAffinity()
       const current = tabAffinity.resolveTarget(sessionId)
@@ -1231,6 +1242,21 @@ const VIRTUAL_TOOL_NAMES = new Set(['browser_list_tabs', 'browser_bind_tab', 'gd
 /** Chrome-internal or otherwise unbindable pages never enter the list. */
 function isBindableTabUrl(url: string | undefined): boolean {
   return url !== undefined && /^https?:/i.test(url) && !isDshPageUrl(url)
+}
+
+/**
+ * Whether a URL is definitely a page no other extension may operate.
+ *
+ * Stricter than {@link isBindableTabUrl} in one direction, looser in the other:
+ * an empty URL or `about:blank` is *not* judged here, because a tab that has
+ * not committed its first document yet (a fresh `browser_navigate` target)
+ * reads exactly that way and must not be refused.
+ */
+function isClearlyUnoperablePage(url: string | undefined): boolean {
+  if (url === undefined || url === '') return false
+  if (/^https?:/i.test(url)) return false
+  if (/^about:blank$/i.test(url)) return false
+  return true
 }
 
 /**

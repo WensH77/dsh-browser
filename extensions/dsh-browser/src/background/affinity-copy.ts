@@ -19,8 +19,14 @@ import type { ToolAnswer } from './tools.ts'
  *
  * `taken` is the one answer the session cannot fix by itself: the browser is
  * bound to a *different* session, and only the user can hand it over.
+ *
+ * `unsupported` is a page Chrome does not let any other extension touch —
+ * another extension's page (`chrome-extension://…`), a `chrome://` page, a
+ * `file://` URL. Both content scripts and `chrome.debugger` are refused there,
+ * so every tool would fail; saying which page it is beats letting the session
+ * collect attach errors.
  */
-export type AffinityFailureKind = 'handoff' | 'lost' | 'missing' | 'taken'
+export type AffinityFailureKind = 'handoff' | 'lost' | 'missing' | 'taken' | 'unsupported'
 
 /** The other session holding the controlled tab, as the panel shows it. */
 export interface BindingHolder {
@@ -34,11 +40,28 @@ export interface BindingHolder {
  * Build the failure answer for one affinity problem.
  *
  * @param kind - handoff (no session binding and no decided target), lost (tab
- * closed), missing (never bound), taken (bound to another session).
+ * closed), missing (never bound), taken (bound to another session),
+ * unsupported (the page cannot be operated by any other extension).
  * @param holder - the session holding the binding; required for `taken`.
+ * @param pageUrl - the page `unsupported` is about, so the answer can name it.
  * @returns the tool answer to settle the call with.
  */
-export function affinityFailureAnswer(kind: AffinityFailureKind, holder?: BindingHolder): ToolAnswer {
+export function affinityFailureAnswer(kind: AffinityFailureKind, holder?: BindingHolder, pageUrl?: string): ToolAnswer {
+  if (kind === 'unsupported') {
+    const page = pageUrl === undefined || pageUrl === '' ? 'The current page' : pageUrl
+    return {
+      ok: false,
+      error: {
+        code: 'action-failed',
+        message: `${page} cannot be operated. Chrome lets only its own extension touch a page like this `
+          + '(another extension\'s page, a browser-internal page, or a local file): content scripts are refused and '
+          + 'chrome.debugger refuses to attach, so screenshots, console, network and evaluation would all fail on it. '
+          + 'Nothing else is wrong with the bridge. Ask the user to switch to an ordinary http(s) page and press Unbind '
+          + 'in the dsh browser panel if it stays bound, or call browser_navigate with the target URL to open a normal '
+          + 'tab, or browser_bind_interactive to pick one of the ordinary pages already open.',
+      },
+    }
+  }
   if (kind === 'taken') {
     const who = holder === undefined
       ? 'another session'
