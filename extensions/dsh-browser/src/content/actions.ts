@@ -291,18 +291,30 @@ function elementOrThrow(ids: ElementIds, index: number): Element {
 /** Scheme prefixes Chrome refuses a debugger on when one appears in a frame. */
 const FOREIGN_FRAME_SCHEME = /^(chrome-extension|chrome|file|devtools):/i
 
+/** Isolated-world key for what was taken out; shared across injections. */
+const DETACHED_FRAMES_KEY = '__dshBrowserDetachedFrames__'
+
+/** One taken-out element plus where it came from. */
+type DetachedFrame = { element: Element; parent: Node; next: Node | null }
+
 /**
  * Frames taken out for an attach, with where they came from.
  *
- * They exist so the removal lasts one attach instead of until the next reload;
- * the module lives as long as the document, which is exactly how long the
- * elements stay insertable.
+ * Kept on the isolated world's global rather than in a module binding: the
+ * background re-injects this script into tabs that have no listener, and every
+ * injection replaces the previous listener (see `content/index.ts`). A
+ * module-level list would die with the instance that actually took the elements
+ * out, and the page would never get them back.
  */
-const detachedFrames: Array<{ element: Element; parent: Node; next: Node | null }> = []
+function detachedFrames(): DetachedFrame[] {
+  const scope = globalThis as typeof globalThis & { [DETACHED_FRAMES_KEY]?: DetachedFrame[] }
+  scope[DETACHED_FRAMES_KEY] ??= []
+  return scope[DETACHED_FRAMES_KEY]
+}
 
 /** Test hook: forget what was taken out, as a fresh document would. */
 export function resetDetachedFramesForTest(): void {
-  detachedFrames.length = 0
+  detachedFrames().length = 0
 }
 
 /**
@@ -355,7 +367,7 @@ function removeForeignFramesAction(): ActionResult {
     if (parent === null) return
     // Kept, not destroyed: the element is still usable and goes back exactly
     // where it was.
-    detachedFrames.push({ element, parent, next: element.nextSibling })
+    detachedFrames().push({ element, parent, next: element.nextSibling })
     element.remove()
     removed.push(origin)
   }
@@ -398,7 +410,7 @@ function removeForeignFramesAction(): ActionResult {
  */
 function restoreForeignFramesAction(): ActionResult {
   let restored = 0
-  for (const entry of detachedFrames.splice(0)) {
+  for (const entry of detachedFrames().splice(0)) {
     if (entry.element.isConnected) continue
     // The page navigated or re-rendered around it; the element has no home left.
     if (!entry.parent.isConnected) continue
