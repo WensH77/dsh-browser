@@ -125,7 +125,7 @@ Chrome 侧：
 
 ## 六、还没证实的假设（不要当结论用）
 
-- **标签页内导航是否会让 Chrome 断开附加**：`DevToolsAgentHost` 是按 WebContents 建立的，跨文档导航通常保持；Chromium 的 detach 代码里也没有把导航列为独立原因。需要日志确认。
+- **标签页内导航是否会让 Chrome 断开附加**：`DevToolsAgentHost` 是按 WebContents 建立的，跨文档导航通常保持；Chromium 的 detach 代码里也没有把导航列为独立原因。**2026-09-29 的实测日志部分回答了它**：多次出现 `attach` 之后 3–6 ms 就 `detach … detached by Chrome: target_closed`，即附加成功后的毫秒级内 target 被关闭。那段日志里同时有大量导航与标签页操作，**尚不能断定**是哪一种，但它证明"attach 成功"不等于会话稳定；而且 `target_closed` 是 Chrome 主动断开（我们自己的释放会记成 `released by the extension`），两者在日志里可以区分。
 - **`tabAffinity.observeTab()` 在 `tabs.onUpdated` 中更新映射时，是否会短暂把标签页移出 `sessionMap()`**，从而让预热同步误 detach 一个刚建立的会话。这需要日志或针对性测试确认——如果成立，它正好解释"绑定后几秒横幅消失"。
 - `MAX_PRIMED_TABS = 3` 只对同时绑定多个标签页的场景有影响，单会话（当前设计）不受影响。
 

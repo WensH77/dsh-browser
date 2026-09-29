@@ -492,6 +492,13 @@ function isForeignFrameAnswer(value: unknown): boolean {
 async function withForeignFrameRetry<T>(tabId: number, run: () => Promise<T>): Promise<T> {
   /** Take the frames out, then retry the call. Undefined when nothing was taken out. */
   const retryWithoutForeignFrames = async (): Promise<T | undefined> => {
+    // A refused attach proves a culprit exists, so make sure every frame can
+    // answer before asking. A page still loading has frames whose content
+    // script has not run yet, and those are exactly the ones a culprit hides
+    // in: measured, one tab failed eleven calls in a row over fourteen seconds
+    // while the culprit sat in such a frame, and every one of them reported
+    // "nothing was taken out". Injecting here does not wait for document_idle.
+    await injectContentScript(tabId).catch(() => undefined)
     const origins = await clearForeignFrames(tabId)
     if (origins.length === 0) return undefined
     pendingForeignFrameRestore.add(tabId)
