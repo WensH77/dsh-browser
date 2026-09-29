@@ -292,6 +292,20 @@ function elementOrThrow(ids: ElementIds, index: number): Element {
 const FOREIGN_FRAME_SCHEME = /^(chrome-extension|chrome|file|devtools):/i
 
 /**
+ * Frames taken out for an attach, with where they came from.
+ *
+ * They exist so the removal lasts one attach instead of until the next reload;
+ * the module lives as long as the document, which is exactly how long the
+ * elements stay insertable.
+ */
+const detachedFrames: Array<{ element: Element; parent: Node; next: Node | null }> = []
+
+/** Test hook: forget what was taken out, as a fresh document would. */
+export function resetDetachedFramesForTest(): void {
+  detachedFrames.length = 0
+}
+
+/**
  * Whether an `about:blank` frame no longer belongs to this document.
  *
  * An untouched `about:blank` frame inherits this document's origin, so its
@@ -325,18 +339,25 @@ function frameOriginOf(url: string): string {
  * `chrome-extension://` child frame — another extension's injected UI, a PDF
  * viewer, an `about:blank` frame that extension then filled with its own
  * document — refuses the *entire* tab even when the page itself is ordinary.
- * Because the check happens at attach, dropping those frames is enough for the
- * retry to succeed.
+ * Because the check happens at attach, the frames only have to be gone for that
+ * moment: this takes them out and {@link restoreForeignFramesAction} puts them
+ * straight back, so the other extension's UI is missing for milliseconds rather
+ * than until the page is reloaded.
  *
  * This is the one action the bridge runs for its own sake rather than the
  * model's, which is why it is not a tool: it is called only after an attach was
- * already refused, and the page recovers on reload.
+ * already refused.
  */
 function removeForeignFramesAction(): ActionResult {
   const removed: string[] = []
-  const drop = (element: Element, origin: string): void => {
-    removed.push(origin)
+  const detach = (element: Element, origin: string): void => {
+    const parent = element.parentNode
+    if (parent === null) return
+    // Kept, not destroyed: the element is still usable and goes back exactly
+    // where it was.
+    detachedFrames.push({ element, parent, next: element.nextSibling })
     element.remove()
+    removed.push(origin)
   }
   for (const frame of [...document.querySelectorAll('iframe')]) {
     const attribute = (frame.getAttribute('src') ?? '').trim()
@@ -345,23 +366,71 @@ function removeForeignFramesAction(): ActionResult {
       || FOREIGN_FRAME_SCHEME.test(resolved)
       || ((attribute === '' || attribute === 'about:blank') && isFilledBlankFrame(frame))
     if (!foreign) continue
-    drop(frame, frameOriginOf(resolved === '' ? attribute : resolved))
+    detach(frame, frameOriginOf(resolved === '' ? attribute : resolved))
   }
   // `embed`/`object` do not name the viewer: the browser renders a PDF through
   // Chrome's own viewer extension, whose frame blocks debugging exactly like
   // another extension's page. The element URL is the document, not the viewer,
-  // so the viewer is named explicitly.
-  for (const plugin of [...document.querySelectorAll('embed[type="application/pdf"], object[type="application/pdf"]')]) {
+  // so the viewer is named explicitly. A bare `.pdf` source counts too — the
+  // element need not declare the type for Chrome to pick that viewer.
+  const plugins = document.querySelectorAll(
+    'embed[type="application/pdf"], object[type="application/pdf"], embed[src$=".pdf" i], object[data$=".pdf" i]',
+  )
+  for (const plugin of [...plugins]) {
     // `src`/`data` as reflected, so the origin is absolute like every other frame's.
     const source = (plugin as HTMLEmbedElement).src || (plugin as HTMLObjectElement).data || ''
-    drop(plugin, `pdf-embed:${frameOriginOf(source)}`)
+    detach(plugin, `pdf-embed:${frameOriginOf(source)}`)
   }
   return {
     text: removed.length === 0
       ? 'No frame belonging to another extension was found in this page.'
-      : `Removed ${removed.length} frame(s) belonging to other extensions.`,
+      : `Took out ${removed.length} frame(s) belonging to other extensions.`,
     ...removed.length === 0 ? {} : { foreignOrigins: removed },
   }
+}
+
+/**
+ * Put back what {@link removeForeignFramesAction} took out.
+ *
+ * Runs as soon as the attach has been retried, success or not. A frame the
+ * other extension has already re-created is left to it: inserting ours as well
+ * would duplicate its UI.
+ */
+function restoreForeignFramesAction(): ActionResult {
+  let restored = 0
+  for (const entry of detachedFrames.splice(0)) {
+    if (entry.element.isConnected) continue
+    // The page navigated or re-rendered around it; the element has no home left.
+    if (!entry.parent.isConnected) continue
+    if (alreadyBack(entry.element)) continue
+    entry.parent.insertBefore(entry.element, entry.next)
+    restored += 1
+  }
+  return { text: `Put back ${restored} frame(s).` }
+}
+
+/** The URL an element names for the frame it creates, as reflected. */
+function frameSourceOf(element: Element): string {
+  if (element instanceof HTMLIFrameElement || element instanceof HTMLEmbedElement) return element.src
+  if (element instanceof HTMLObjectElement) return element.data
+  return ''
+}
+
+/**
+ * Whether the document holds an equivalent frame again.
+ *
+ * The extension watching its own UI usually re-creates it as a *new* element
+ * while ours sits detached, so "is this element connected" cannot answer that;
+ * the same source can.
+ */
+function alreadyBack(element: Element): boolean {
+  const source = frameSourceOf(element)
+  if (source === '') return false
+  const tag = element.localName === 'iframe' ? 'iframe' : `${element.localName}[type="application/pdf"]`
+  for (const candidate of document.querySelectorAll(tag)) {
+    if (frameSourceOf(candidate) === source) return true
+  }
+  return false
 }
 
 /** Error carrying a stable wire code. */
@@ -433,6 +502,8 @@ export async function runAction(action: string, args: Record<string, unknown>, c
       return waitAction(args, ctx)
     case 'browser_remove_foreign_frames':
       return removeForeignFramesAction()
+    case 'browser_restore_foreign_frames':
+      return restoreForeignFramesAction()
     default:
       throw new ActionError('bad-args', `Unknown action: ${action}`)
   }
