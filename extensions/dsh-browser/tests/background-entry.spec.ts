@@ -101,6 +101,8 @@ interface ToolCallSpec {
 interface Harness {
   /** Deliver a `tool.call` frame the bridge plugin would send. */
   call: (call: ToolCallSpec) => void
+  /** Deliver one UI request the way a panel page would, and await its response. */
+  uiRequest: (message: unknown) => Promise<unknown>
   /** `tool.result` frames the extension has sent back for one call id. */
   results: (id: string) => Frame[]
   /** Wait for one call to settle, then return its result frame. */
@@ -220,6 +222,19 @@ async function boot(): Promise<Harness> {
       expiresAt: Date.now() + 30_000,
       ...call.sessionId === undefined ? {} : { sessionId: call.sessionId },
     }),
+    uiRequest: (message) => new Promise((resolve) => {
+      for (const listener of messageListeners) {
+        (listener as (
+          message: unknown,
+          sender: unknown,
+          sendResponse: (value: unknown) => void,
+        ) => void)(
+          message,
+          { url: `chrome-extension://${EXTENSION_ID}/panel/index.html` },
+          resolve,
+        )
+      }
+    }),
     results,
     settle: async (id) => {
       await vi.waitFor(() => { expect(results(id)).toHaveLength(1) })
@@ -290,5 +305,23 @@ describe('background entry consent gate', () => {
     await harness.settle('c2')
 
     expect(harness.approvalIds()).toHaveLength(2)
+  })
+
+  it('answers the debug-log readout with no tab, no approval and no session', async () => {
+    // This readout is what someone runs *because* the debugging tools fail, so
+    // it must not need a bound tab or a consent card to answer.
+    harness.call({ id: 'log-1', name: 'browser_debug_log', args: {} })
+
+    const frame = await harness.settle('log-1')
+
+    expect(frame.ok).toBe(true)
+    expect(String((frame.result as { text?: string } | undefined)?.text)).toContain('worker-start')
+    expect(harness.approvalIds()).toEqual([])
+  })
+
+  it('answers the panel Log button with the newest events', async () => {
+    const response = await harness.uiRequest({ type: 'debug.log' }) as { log?: string }
+
+    expect(response.log).toContain('worker-start')
   })
 })

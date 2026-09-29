@@ -33,6 +33,7 @@ import {
   TOOLSET_PAGE_IMAGE,
   TOOLSET_POINTER_CLICK,
   TOOLSET_SELECTOR_TARGETS,
+  TOOLSET_SELECT_OPTION,
   TOOLSET_SLIDES_OPEN_PAGE,
   TOOLSET_TEXT_FIND,
   declaredProto,
@@ -805,6 +806,9 @@ export const POINTER_CLICK_TOOL_NAMES = ['browser_click_pointer'] as const
  */
 export const SLIDES_OPEN_PAGE_TOOL_NAMES = ['browser_slides_open_page'] as const
 
+/** Tools whose schema gains the native-`<select>` arguments at `TOOLSET_SELECT_OPTION`. */
+const SELECT_OPTION_TOOL_NAMES = ['browser_click', 'browser_dom_query'] as const
+
 /**
  * Answer a selector click/type aimed at an extension that cannot resolve
  * selectors: it only accepts `index`. Kept as a runtime guard because a swap in
@@ -816,6 +820,15 @@ const LEGACY_SELECTOR_REFUSAL = 'This build of the browser extension predates se
 /** Answer a text search aimed at an extension too old to run one. */
 const LEGACY_FIND_REFUSAL = 'This build of the browser extension cannot search page text: call browser_get_text '
   + 'for the whole page (or a selector) and search it yourself, or ask the user to reload the extension.'
+
+/**
+ * Answer a select-option call aimed at an extension that predates it. Without
+ * this guard the argument reaches the older build, which drops it and reports a
+ * successful click that changed nothing.
+ */
+const LEGACY_SELECT_OPTION_REFUSAL = 'This build of the browser extension predates native select support: '
+  + 'a synthetic click cannot open a <select>, so ask the user to reload the extension, then pass '
+  + 'option (with the value or visible text read via browser_dom_query { fields: ["options"] }).'
 
 /**
  * The three always-on host tools.
@@ -941,6 +954,47 @@ function nextAction(connected: boolean, skew: Skew, sync: SyncResult): string {
 }
 
 /** The full `browser_status` text: every fact, then exactly one next action. */
+/** How much of the extension's event ring one status answer carries. */
+const DEBUG_LOG_MAX_CHARS = 2_500
+
+/**
+ * Append the extension's own recent debugging events to a status answer.
+ *
+ * A report about screenshots or evaluation failing arrives from a machine we
+ * cannot attach to, and the answer is usually one of these lines: Chrome's
+ * reason for ending the session, or the service worker's own start line (a
+ * worker restart takes a live attach with it). Best effort by design — a build
+ * that predates this readout answers an error, and a status answer must never
+ * fail because of it.
+ */
+async function withExtensionDebugLog(
+  text: string,
+  bridge: BridgeServer,
+  exec: Pick<ToolRunContext, 'agent' | 'signal'>,
+  toolTimeoutMs: number,
+  caps: BridgeCaps | undefined,
+): Promise<string> {
+  // Only a debugging-capable extension produces these events at all, and the
+  // ask is a wire case an older build does not know: skip it unless the
+  // handshake said there is something to read.
+  if (caps?.debugger !== true || !bridge.hasConnection()) return text
+  try {
+    const sessionId = exec.agent === undefined ? undefined : String(exec.agent.id)
+    // A status answer is a read, not a call the user waits on: cap it short.
+    const timeout = Math.min(toolTimeoutMs, 2_000)
+    const raw = sessionId === undefined
+      ? await bridge.requestTool('browser_debug_log', {}, exec.signal, timeout)
+      : await bridge.requestTool('browser_debug_log', {}, exec.signal, timeout, sessionId)
+    const log = typeof (raw as { text?: unknown })?.text === 'string' ? (raw as { text: string }).text.trim() : ''
+    if (log === '') return text
+    // The newest lines are the ones that explain the failure; older ones go first.
+    const clipped = log.length > DEBUG_LOG_MAX_CHARS ? `…(older events dropped)\n${log.slice(-DEBUG_LOG_MAX_CHARS)}` : log
+    return `${text}\ndebug log (extension, newest last):\n${clipped}`
+  } catch {
+    return text
+  }
+}
+
 export function browserStatusText(server: BridgeServer, caps: BridgeCaps | undefined, sync: SyncResult): string {
   const connected = server.hasConnection()
   const skew = versionSkew(caps)
@@ -956,10 +1010,29 @@ export function browserStatusText(server: BridgeServer, caps: BridgeCaps | undef
       `extension id: ${caps?.extensionId ?? UNKNOWN_OLDER_BUILD}`,
       `extension version: ${server.clientExtensionVersion() ?? UNKNOWN_OLDER_BUILD}`,
       `extension declares: proto ${declaredProto(caps)}, toolset ${declaredToolset(caps)}`,
+      `debugging: ${debuggingLine(caps)}`,
     )
   }
   lines.push(`version skew: ${skew.text}`, mirrorLine(sync), `next: ${nextAction(connected, skew, sync)}`)
   return lines.join('\n')
+}
+
+/**
+ * What the extension reports about browser debugging, and the fix when it is
+ * off.
+ *
+ * This used to be invisible: with the switch off, screenshots simply arrived
+ * without an image, and the only explanation named the model route. One line
+ * here answers "why can I not see the page" without a debug log.
+ */
+function debuggingLine(caps: BridgeCaps | undefined): string {
+  if (caps?.debugger === true) return 'allowed by the extension (screenshots, console, network, evaluation)'
+  if (caps?.debugger === false) {
+    return 'off — turn on "Allow browser debugging" in the extension options and reload the extension; '
+      + 'until then screenshots, console, network and evaluation are not registered at all. '
+      + 'If it is already on, this Chrome exposes no chrome.debugger to the extension (enterprise policy, or a Chrome older than 116)'
+  }
+  return `${UNKNOWN_OLDER_BUILD}, so debugging is off`
 }
 
 /** The full `browser_setup` text: what was refreshed, then the one manual step. */
@@ -1142,11 +1215,13 @@ export function registerBrowserTools(
   const clientDebugger = () => bridge.clientDebugger()
   // One definition set per feature level, built from the same factories so the
   // surfaces can never drift. A level-1 extension resolves selectors and ships
-  // the DOM/rule tools but cannot search page text.
-  const currentDefinitions = defineTools(ctx, call, callRaw, options, bindRun, clientDebugger, { selectorTargets: true, textFind: true, pageImage: true })
-  const findOnlyDefinitions = defineTools(ctx, call, callRaw, options, bindRun, clientDebugger, { selectorTargets: true, textFind: true, pageImage: false })
-  const selectorOnlyDefinitions = defineTools(ctx, call, callRaw, options, bindRun, clientDebugger, { selectorTargets: true, textFind: false, pageImage: false })
-  const legacyDefinitions = defineTools(ctx, call, callRaw, options, bindRun, clientDebugger, { selectorTargets: false, textFind: false, pageImage: false })
+  // the DOM/rule tools but cannot search page text; a level-5 one predates the
+  // native-`<select>` arguments.
+  const currentDefinitions = defineTools(ctx, call, callRaw, options, bindRun, clientDebugger, { selectorTargets: true, textFind: true, pageImage: true, selectOption: true })
+  const slidesDefinitions = defineTools(ctx, call, callRaw, options, bindRun, clientDebugger, { selectorTargets: true, textFind: true, pageImage: true, selectOption: false })
+  const findOnlyDefinitions = defineTools(ctx, call, callRaw, options, bindRun, clientDebugger, { selectorTargets: true, textFind: true, pageImage: false, selectOption: false })
+  const selectorOnlyDefinitions = defineTools(ctx, call, callRaw, options, bindRun, clientDebugger, { selectorTargets: true, textFind: false, pageImage: false, selectOption: false })
+  const legacyDefinitions = defineTools(ctx, call, callRaw, options, bindRun, clientDebugger, { selectorTargets: false, textFind: false, pageImage: false, selectOption: false })
   const toolsetNames = new Set<string>([
     ...TOOLSET_TOOL_NAMES,
     ...SELECTOR_TARGET_TOOL_NAMES,
@@ -1154,6 +1229,7 @@ export function registerBrowserTools(
     ...PAGE_IMAGE_TOOL_NAMES,
     ...POINTER_CLICK_TOOL_NAMES,
     ...SLIDES_OPEN_PAGE_TOOL_NAMES,
+    ...SELECT_OPTION_TOOL_NAMES,
   ])
   // Tools absent below the level that first ships them.
   const legacyOnly = new Set<string>(TOOLSET_TOOL_NAMES)
@@ -1167,18 +1243,22 @@ export function registerBrowserTools(
   // it reaches. Every row is derived from the same factories, minus the tools
   // that level predates.
   const levelMaps = new Map<number, Map<string, ToolDefinition>>([
-    [TOOLSET_SLIDES_OPEN_PAGE, byName(currentDefinitions)],
-    [TOOLSET_POINTER_CLICK, byName(currentDefinitions.filter(notAt(slidesOpenPageOnly)))],
-    [TOOLSET_PAGE_IMAGE, byName(currentDefinitions.filter(notAt(pointerClickOnly, slidesOpenPageOnly)))],
-    [TOOLSET_TEXT_FIND, byName(findOnlyDefinitions.filter(notAt(pageImageOnly, pointerClickOnly, slidesOpenPageOnly)))],
+    [TOOLSET_SELECT_OPTION, byName(currentDefinitions)],
+    [TOOLSET_SLIDES_OPEN_PAGE, byName(slidesDefinitions.map(guardSelectOption))],
+    [TOOLSET_POINTER_CLICK, byName(slidesDefinitions.filter(notAt(slidesOpenPageOnly)).map(guardSelectOption))],
+    [TOOLSET_PAGE_IMAGE, byName(slidesDefinitions.filter(notAt(pointerClickOnly, slidesOpenPageOnly)).map(guardSelectOption))],
+    [TOOLSET_TEXT_FIND, byName(findOnlyDefinitions.filter(notAt(pageImageOnly, pointerClickOnly, slidesOpenPageOnly)).map(guardSelectOption))],
     [TOOLSET_SELECTOR_TARGETS, byName(selectorOnlyDefinitions
       .filter(notAt(pageImageOnly, pointerClickOnly, slidesOpenPageOnly))
-      .map(guardForLevel))],
+      .map(guardForLevel)
+      .map(guardSelectOption))],
     [LEGACY_TOOLSET, byName(legacyDefinitions
       .filter(notAt(legacyOnly, pageImageOnly, pointerClickOnly, slidesOpenPageOnly))
-      .map(guardForLevel))],
+      .map(guardForLevel)
+      .map(guardSelectOption))],
   ])
   const levelOrder = [
+    TOOLSET_SELECT_OPTION,
     TOOLSET_SLIDES_OPEN_PAGE,
     TOOLSET_POINTER_CLICK,
     TOOLSET_PAGE_IMAGE,
@@ -1232,11 +1312,16 @@ export function registerBrowserTools(
   const status = defineTool({
     name: 'browser_status',
     description: 'Report bridge health: connection, extension id and version, protocol/toolset match, mirror freshness, '
-      + 'and the single next action. Use it first when a browser tool cannot connect.',
+      + 'whether the extension allows debugging, and the single next action. The answer also carries the extension\'s '
+      + 'recent debugging events. Use it first when a browser tool cannot connect or a screenshot arrives without an image.',
     parameters: {},
     timeoutMs: options.toolTimeoutMs,
     output: TEXT_OUTPUT,
-    execute: async () => ({ text: browserStatusText(bridge, clientCaps(), await safeSync(syncExtension)) }),
+    execute: async (_args, exec) => {
+      const caps = clientCaps()
+      const text = browserStatusText(bridge, caps, await safeSync(syncExtension))
+      return { text: await withExtensionDebugLog(text, bridge, exec, options.toolTimeoutMs, caps) }
+    },
   })
   const setup = defineTool({
     name: 'browser_setup',
@@ -1327,6 +1412,32 @@ function guardForLevel(tool: ToolDefinition): ToolDefinition {
 }
 
 /**
+ * Refuse the native-`<select>` arguments aimed at an extension that predates
+ * them.
+ *
+ * The schema for that level already omits `option` and `options`, but a model
+ * may still be holding the newer schema; sending them to the older build would
+ * answer a successful click that changed nothing, which is the failure this
+ * level exists to remove.
+ *
+ * @param tool - a definition built for a level below `TOOLSET_SELECT_OPTION`.
+ * @returns the definition plus the refusal.
+ */
+function guardSelectOption(tool: ToolDefinition): ToolDefinition {
+  if (!(SELECT_OPTION_TOOL_NAMES as readonly string[]).includes(tool.name)) return tool
+  return {
+    ...tool,
+    execute: (args, exec) => {
+      const received = args as { option?: unknown; fields?: unknown }
+      const asksOption = received.option !== undefined
+      const asksOptions = Array.isArray(received.fields) && received.fields.includes('options')
+      if (!asksOption && !asksOptions) return tool.execute(args, exec)
+      return Promise.resolve({ text: LEGACY_SELECT_OPTION_REFUSAL })
+    },
+  }
+}
+
+/**
  * Refuse a text search aimed at an extension that cannot run one, keeping the
  * plain read available.
  *
@@ -1392,9 +1503,9 @@ function defineTools(
   options: BrowserToolsOptions,
   bindRun: BindInteractiveRun,
   clientDebugger: () => boolean,
-  features: { selectorTargets: boolean; textFind: boolean; pageImage: boolean },
+  features: { selectorTargets: boolean; textFind: boolean; pageImage: boolean; selectOption: boolean },
 ): ToolDefinition[] {
-  const { selectorTargets, textFind, pageImage } = features
+  const { selectorTargets, textFind, pageImage, selectOption } = features
   const snapshot = (): ToolDefinition => defineTool({
     name: 'browser_snapshot',
     description: `Read the page and accessible iframes as structured text with numbered action targets, plus a screenshot of the same moment. Use frame for iframe targets, delta=true for changes only, and region to limit tokens. Truncation is reported in the snapshot notes. Pass visual=false for a cheaper text-only read. ${UNTRUSTED_CONTENT_WARNING}`,
@@ -1410,6 +1521,7 @@ function defineTools(
       const a = args as { delta?: boolean; region?: string; maxChars?: number; visual?: boolean }
       const attachments = ctx.get('attachments') as AttachmentsLike | undefined
       const delivery = deliveryLimits(attachments)
+      const debugAllowed = clientDebugger()
       const capable = await imageRouteAvailable(ctx, exec, clientDebugger)
       const wantsVisual = a.visual !== false && capable
       const raw = await callRaw(exec, 'browser_snapshot', {
@@ -1420,9 +1532,17 @@ function defineTools(
         ...wantsVisual ? { limits: captureLimits(attachments) } : {},
         ...wantsVisual && delivery !== undefined ? { deliver: delivery } : {},
       })
+      // Two different reasons produce no image, and the old copy named only the
+      // model route — so a user whose extension had debugging switched off was
+      // told their model cannot see images, which is both wrong and has no fix
+      // they could act on.
       const note = a.visual === false
         ? undefined
-        : capable ? 'the browser extension returned no image' : 'the current model route does not declare image input'
+        : capable
+          ? 'the browser extension returned no image'
+          : debugAllowed
+            ? 'the current model route does not declare image input'
+            : 'the extension reports browser debugging as off, which screenshots need: turn on "Allow browser debugging" in the extension options, then reload the extension. browser_capture, browser_console, browser_network and browser_eval are not registered at all until then; if the switch is already on, this Chrome exposes no chrome.debugger to the extension (enterprise policy, or a Chrome older than 116)'
       return toVisualResult(ctx, raw, 'browser_snapshot', note)
     },
   })
@@ -1546,11 +1666,17 @@ function defineTools(
     name: 'browser_click',
     description: selectorTargets
       ? 'Click one element in the controlled tab: by snapshot index, or by CSS selector when the target has no usable inventory entry (icon-only controls). A selector click still goes through approval and settle detection, so prefer it over clicking inside browser_eval. Include frame for an iframe target.'
+        + (selectOption
+          ? ' For a <select> target, pass option.'
+          : '')
       : 'Click one element in the controlled tab by its snapshot index. Include frame for an iframe target.',
     parameters: {
       index: { type: 'number', description: 'Element index from the browser_snapshot inventory.' },
       ...selectorTargets
         ? { selector: { type: 'string', description: 'CSS selector for the element to click; resolved in the target frame and scrolled into view first.' } }
+        : {},
+      ...selectOption
+        ? { option: { type: 'string', description: 'For a <select> target: the option to choose, by value or by visible text (exact match first, then case-insensitive). Read the options with browser_dom_query { fields: ["options"] }.' } }
         : {},
       frame: FRAME_PARAMETER,
     },
@@ -1673,7 +1799,7 @@ function defineTools(
     description: `Read specific fields off the elements a CSS selector matches: each match reports its tag, its computed accessible name (name=), a verified unique selector (selector=), and any fields you ask for. name= is computed, not an attribute — pass the printed selector= to browser_click rather than building an attribute selector from it. ${UNTRUSTED_CONTENT_WARNING}`,
     parameters: {
       selector: { type: 'string', required: true, description: 'CSS selector to match, resolved in the target frame.' },
-      fields: { type: 'array', items: { type: 'string' }, description: 'Extra fields per match: href, src, alt, value, id, class, title, aria-label, role, name, type, checked, disabled, visible, text, placeholder. name (the computed accessible name) is always reported.' },
+      fields: { type: 'array', items: { type: 'string' }, description: `Extra fields per match: href, src, alt, value, id, class, title, aria-label, role, name, type, checked, disabled, visible, text, placeholder${selectOption ? ', options (a <select>\'s choices, each as text plus value, with the selected one marked *)' : ''}. name (the computed accessible name) is always reported.` },
       limit: { type: 'number', description: 'Maximum matches to report (default 20, max 50).' },
       frame: FRAME_PARAMETER,
     },

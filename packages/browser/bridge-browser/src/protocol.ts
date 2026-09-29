@@ -165,14 +165,18 @@ export const LEGACY_PROTO = 1
  * {@link TOOLSET_TEXT_FIND} adds text search to `browser_get_text`;
  * {@link TOOLSET_PAGE_IMAGE} adds `browser_image` (a page picture by
  * reference); {@link TOOLSET_POINTER_CLICK} adds `browser_click_pointer`;
- * {@link TOOLSET_SLIDES_OPEN_PAGE} adds `browser_slides_open_page`.
+ * {@link TOOLSET_SLIDES_OPEN_PAGE} adds `browser_slides_open_page`;
+ * {@link TOOLSET_SELECT_OPTION} adds the `option` argument to `browser_click`
+ * and the `options` field to `browser_dom_query` (a native `<select>` cannot be
+ * operated by a synthetic click).
  *
  * A tool whose action the old build has no wire case for must be gated at the
  * level that ships it: exposing it to an older extension trades a smaller tool
  * surface, which the model can see, for an "Unknown action" failure, which it
- * cannot anticipate.
+ * cannot anticipate. The same holds for an argument: an older build drops it
+ * silently, so the call reports success and changes nothing.
  */
-export const BRIDGE_TOOLSET = 5
+export const BRIDGE_TOOLSET = 6
 
 /** Level that first resolves CSS `selector` targets and ships the DOM/rule tools. */
 export const TOOLSET_SELECTOR_TARGETS = 1
@@ -188,6 +192,9 @@ export const TOOLSET_POINTER_CLICK = 4
 
 /** Level that first ships `browser_slides_open_page`, a deck jump by page. */
 export const TOOLSET_SLIDES_OPEN_PAGE = 5
+
+/** Level that first chooses a `<select>` option (`browser_click { option }`) and reads one's options (`browser_dom_query { fields: ["options"] }`). */
+export const TOOLSET_SELECT_OPTION = 6
 
 /** Feature level assumed when `caps.toolset` is absent. */
 export const LEGACY_TOOLSET = 0

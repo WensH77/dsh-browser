@@ -17,6 +17,8 @@ import type { BridgeCaps } from '../src/protocol.ts'
 import {
   BRIDGE_PROTO,
   BRIDGE_TOOLSET, LEGACY_TOOLSET, TOOLSET_PAGE_IMAGE, TOOLSET_POINTER_CLICK, TOOLSET_SELECTOR_TARGETS,
+  TOOLSET_SELECT_OPTION,
+  TOOLSET_SLIDES_OPEN_PAGE,
   TOOLSET_TEXT_FIND,
 } from '../src/protocol.ts'
 
@@ -242,6 +244,45 @@ describe('registerBrowserTools', () => {
     expect(Object.keys(params(registered.find((r) => r.name === 'browser_click')!.definition))).not.toContain('selector')
   })
 
+  it('gates the native-select arguments at TOOLSET_SELECT_OPTION', async () => {
+    const { ctx, bridge, requestTool, registered } = makeHarness()
+    const tools = registerBrowserTools(ctx, bridge, { toolTimeoutMs: 1_000, snapshotMaxChars: 12_000, maxInteractiveItems: 60 })
+    const params = (definition: Record<string, unknown>): Record<string, unknown> =>
+      (definition.parameters as { properties: Record<string, unknown> }).properties
+    const exec = { signal: new AbortController().signal }
+    const click = (): Record<string, unknown> => registered.find((r) => r.name === 'browser_click')!.definition
+    const domQuery = (): Record<string, unknown> => registered.find((r) => r.name === 'browser_dom_query')!.definition
+    const run = async (definition: Record<string, unknown>, args: unknown): Promise<unknown> =>
+      await (definition.execute as (a: unknown, e: typeof exec) => Promise<unknown>)(args, exec)
+
+    // Current level: `option` is declared and forwarded, and the dom-query field
+    // that feeds it is advertised.
+    expect(Object.keys(params(click()))).toContain('option')
+    expect(String((params(domQuery()).fields as { description: string }).description)).toContain('options')
+    await run(click(), { index: 3, option: 'Phone' })
+    expect(requestTool).toHaveBeenCalledWith('browser_click', { index: 3, option: 'Phone' }, exec.signal, 1_000)
+
+    // Level 5 predates it: the schema drops the parameter, and an option from a
+    // schema the model read before the swap is refused as a next step instead of
+    // reaching a build that ignores it and reports a click that changed nothing.
+    tools.setClientToolset(TOOLSET_SLIDES_OPEN_PAGE)
+    expect(Object.keys(params(click()))).not.toContain('option')
+    requestTool.mockClear()
+    const refused = await run(click(), { index: 3, option: 'Phone' })
+    expect(requestTool).not.toHaveBeenCalled()
+    expect(String((refused as { text: string }).text)).toContain('predates native select support')
+    const refusedQuery = await run(domQuery(), { selector: 'select', fields: ['options'] })
+    expect(requestTool).not.toHaveBeenCalled()
+    expect(String((refusedQuery as { text: string }).text)).toContain('predates native select support')
+
+    // Everything else on those two tools still runs at that level.
+    await run(click(), { index: 3 })
+    expect(requestTool).toHaveBeenCalledWith('browser_click', { index: 3 }, exec.signal, 1_000)
+    requestTool.mockClear()
+    await run(domQuery(), { selector: 'select', fields: ['value'] })
+    expect(requestTool).toHaveBeenCalledWith('browser_dom_query', { selector: 'select', fields: ['value'] }, exec.signal, 1_000)
+  })
+
   it('tells the capture the size the model will actually receive', async () => {
     // The extension needs the delivery budget to tell a legible full page from a
     // thumbnail of everything; it is optional, and a service without it changes
@@ -350,6 +391,20 @@ describe('registerBrowserTools', () => {
     expect(requestTool).toHaveBeenLastCalledWith('browser_snapshot', { visual: false }, expect.anything(), 1_000, 'session-visual')
     expect(value.image).toBeUndefined()
     expect(value.text).toContain('screenshot unavailable')
+  })
+
+  it('names the extension setting, not the model route, when debugging is what blocks the screenshot', async () => {
+    // Measured complaint: with "Allow browser debugging" switched off, the model
+    // was told the *route* cannot take images — wrong, and it named no action.
+    const { ctx, bridge, requestTool, registered } = makeHarness(visualServices(), false)
+    requestTool.mockResolvedValueOnce({ text: 'snapshot text' })
+    registerBrowserTools(ctx, bridge, { toolTimeoutMs: 1_000, snapshotMaxChars: 12_000, maxInteractiveItems: 60 })
+    const tool = registered.find((r) => r.name === 'browser_snapshot')!
+    const value = await (tool.definition.execute as (a: unknown, e: unknown) => Promise<{ text: string }>)({}, routedExec())
+
+    expect(requestTool).toHaveBeenLastCalledWith('browser_snapshot', { visual: false }, expect.anything(), 1_000, 'session-visual')
+    expect(value.text).toContain('Allow browser debugging')
+    expect(value.text).not.toContain('does not declare image input')
   })
 
   it('reads a page picture without the debugging capability', async () => {
@@ -555,8 +610,11 @@ describe('registerBrowserTools', () => {
     registerBrowserTools(ctx, bridge, { toolTimeoutMs: 5_000, snapshotMaxChars: 12_000, maxInteractiveItems: 60 })
     const descriptionChars = registered.reduce((sum, { definition }) => sum + String(definition.description).length, 0)
     // The surface grew from 13 to 19 tools, so the budget is per tool: no
-    // single description may bloat the always-sent schema payload.
-    expect(descriptionChars / registered.length).toBeLessThan(200)
+    // single description may bloat the always-sent schema payload. Raised from
+    // 200 to 210 when `browser_status` took on the debugging-capability line and
+    // the extension's debug log — that is the copy a model reads to tell a user
+    // why a screenshot has no image, so it is not padding.
+    expect(descriptionChars / registered.length).toBeLessThan(210)
   })
 
   it('exposes optional frame routing on frame-local tools only', () => {
@@ -621,6 +679,8 @@ describe('registerBrowserTools', () => {
       opened?: boolean
       copied?: boolean
       debuggerAllowed?: boolean
+      /** What the extension answers for the `browser_debug_log` readout. */
+      debugLog?: string
     } = {}) {
       const { ctx, registered } = makeHarness({}, options.debuggerAllowed ?? false)
       const syncExtension = vi.fn(async (): Promise<SyncResult> => {
@@ -629,8 +689,11 @@ describe('registerBrowserTools', () => {
       })
       const openExtensionsPage = vi.fn(async () => options.opened ?? true)
       const copyToClipboard = vi.fn(async () => options.copied ?? true)
+      const requestTool = vi.fn(async (name: string) => name === 'browser_debug_log'
+        ? { text: options.debugLog ?? '' }
+        : { text: 'ok' })
       const bridge = {
-        requestTool: vi.fn(async () => ({ text: 'ok' })),
+        requestTool,
         clientDebugger: () => options.debuggerAllowed ?? false,
         hasConnection: () => options.connected ?? false,
         clientExtensionVersion: () => options.version,
@@ -644,7 +707,7 @@ describe('registerBrowserTools', () => {
           copyToClipboard,
         },
       })
-      return { ctx, registered, tools, syncExtension, openExtensionsPage, copyToClipboard }
+      return { ctx, registered, tools, syncExtension, openExtensionsPage, copyToClipboard, requestTool }
     }
 
     /** Run one host tool and return its text. */
@@ -798,6 +861,77 @@ describe('registerBrowserTools', () => {
       const thrown = await runText(makeHostHarness({ syncThrows: true }).registered, 'browser_status')
       expect(thrown).toContain('refresh failed — mirror exploded')
       expect(thrown).toContain('browser bridge status')
+    })
+
+    it('states whether the extension allows debugging, and the fix when it does not', async () => {
+      // The switch being off used to be invisible: screenshots just arrived
+      // without an image, and nothing in status explained why.
+      const allowed = await runText(
+        makeHostHarness({ connected: true, version: '0.1.7', caps: { ...CAPS, debugger: true } }).registered,
+        'browser_status',
+      )
+      expect(allowed).toContain('debugging: allowed by the extension (screenshots, console, network, evaluation)')
+
+      const off = await runText(
+        makeHostHarness({ connected: true, version: '0.1.7', caps: { ...CAPS, debugger: false } }).registered,
+        'browser_status',
+      )
+      expect(off).toContain('debugging: off')
+      expect(off).toContain('Allow browser debugging')
+      expect(off).toContain('enterprise policy')
+
+      // A build that predates the field must not be read as "off by choice".
+      const unknown = await runText(
+        makeHostHarness({ connected: true, version: '0.1.7', caps: { ...CAPS, debugger: undefined } }).registered,
+        'browser_status',
+      )
+      expect(unknown).toContain('unknown (older build), so debugging is off')
+
+      // Nothing is claimed while nothing is connected: the line is about the
+      // extension's own setting, which an absent extension has not reported.
+      const offline = await runText(makeHostHarness({ sync: CURRENT }).registered, 'browser_status')
+      expect(offline).not.toContain('debugging:')
+    })
+
+    it('appends the extension debug log when the extension allows debugging', async () => {
+      // The report that started this: "screenshots fail", "eval does not work",
+      // "the debug banner appeared and vanished after a few seconds" — from a
+      // machine we cannot attach to. Chrome's detach reason and the worker's own
+      // start line are the answer, so status carries them.
+      const h = makeHostHarness({
+        connected: true,
+        version: '0.1.7',
+        caps: { ...CAPS, debugger: true },
+        debugLog: '2026-09-29T00:00:01.000Z attach tab 7 attached (CDP 1.3)\n'
+          + '2026-09-29T00:00:09.000Z detach tab 7 detached by Chrome: canceled_by_user',
+      })
+      const text = await runText(h.registered, 'browser_status')
+
+      expect(h.requestTool).toHaveBeenCalledWith('browser_debug_log', {}, expect.anything(), expect.any(Number))
+      expect(text).toContain('debug log (extension, newest last):')
+      expect(text).toContain('detach tab 7 detached by Chrome: canceled_by_user')
+      // The log is an appendix: the health lines still come first.
+      expect(text.indexOf('version skew:')).toBeLessThan(text.indexOf('debug log (extension'))
+
+      // Debugging off means no debugging sessions, so there is nothing to read
+      // and nothing is asked of the extension.
+      const off = makeHostHarness({
+        connected: true,
+        version: '0.1.7',
+        caps: { ...CAPS, debugger: false },
+        debugLog: 'must not appear',
+      })
+      const offText = await runText(off.registered, 'browser_status')
+      expect(offText).not.toContain('debug log (extension')
+      expect(offText).not.toContain('must not appear')
+      expect(off.requestTool).not.toHaveBeenCalled()
+
+      // A build that predates the readout answers an error: status still answers.
+      const failing = makeHostHarness({ connected: true, version: '0.1.7', caps: { ...CAPS, debugger: true } })
+      failing.requestTool.mockRejectedValueOnce(new Error('Unknown action: browser_debug_log'))
+      const failingText = await runText(failing.registered, 'browser_status')
+      expect(failingText).toContain('browser bridge status')
+      expect(failingText).not.toContain('debug log (extension')
     })
 
     it('refreshes files, opens the extensions page and copies the load path', async () => {

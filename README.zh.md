@@ -44,7 +44,7 @@ $s="$env:TEMP\dsh-install.ps1"; irm https://raw.githubusercontent.com/WensH77/ds
 | 回应用户弹窗 | `browser_dialog` | 确认或取消 `alert` / `confirm` / `prompt`；这类弹窗会冻住页面，回应之前其它工具都会卡住 |
 | 执行页面 JS | `browser_eval` | 在页面自身上下文求值，不受页面 CSP 限制；每次单独审批 |
 | 阻断/改写请求 | `browser_block` / `browser_headers` | 阻断匹配请求，或改写请求/响应头；仅作用于受控标签页、仅当前浏览器会话 |
-| 点击元素 | `browser_click` | 按编号点击链接/按钮/复选框等 |
+| 点击元素 | `browser_click` | 按编号或 CSS 选择器点击链接/按钮/复选框等；目标是原生 `<select>` 时用 `option` 传值或可见文本选中（合成点击打不开原生下拉，选项用 `browser_dom_query { fields: ["options"] }` 读） |
 | 点击绑定在按压上的控件 | `browser_click_pointer` | 在元素矩形中心派发 `pointerdown`、`mousedown`、`pointerup`、`mouseup`、`click`；用于 Google Slides 这类画布/SVG 编辑器——`browser_click` 回报成功但页面没反应时改用它 |
 | 跳到 Slides 某一页 | `browser_slides_open_page` | 按 1 起的页码打开演示文稿的某一页：走编辑器的网格视图，用 URL hash 核对落点，点击无效时按 hash 载入。比自己去点胶片栏缩略图可靠——胶片栏的按压是按坐标判定的 |
 | 填写表单 | `browser_type` | 输入文本（React/Vue 受控组件兼容），`replace` 清空重填 |

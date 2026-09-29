@@ -225,9 +225,23 @@ function summarizeAction(call: ToolCall, locale: UiLocale): string {
   const index = typeof call.args.index === 'number' ? call.args.index : '?'
   const selector = typeof call.args.selector === 'string' && call.args.selector.trim() !== '' ? call.args.selector.trim() : undefined
   switch (call.name) {
-    case 'browser_click': return selector === undefined
-      ? localized(locale, `Click element [${index}]${frame}`, `点击元素 [${index}]${frame}`)
-      : localized(locale, `Click the element matching ${safeInline(selector)}`, `点击匹配 ${safeInline(selector)} 的元素`)
+    case 'browser_click': {
+      // A select-option call is not the click its name suggests: the user must
+      // see the value that will be chosen, not just the element it lands on.
+      const option = typeof call.args.option === 'string' && call.args.option.trim() !== '' ? call.args.option.trim() : undefined
+      const where = selector === undefined ? `element [${index}]${frame}` : `the element matching ${safeInline(selector)}`
+      const whereZh = selector === undefined ? `元素 [${index}]${frame}` : `匹配 ${safeInline(selector)} 的元素`
+      if (option !== undefined) {
+        return localized(
+          locale,
+          `Choose “${safeInline(option)}” in ${where}`,
+          `在${whereZh}中选择「${safeInline(option)}」`,
+        )
+      }
+      return selector === undefined
+        ? localized(locale, `Click element [${index}]${frame}`, `点击元素 [${index}]${frame}`)
+        : localized(locale, `Click the element matching ${safeInline(selector)}`, `点击匹配 ${safeInline(selector)} 的元素`)
+    }
     case 'browser_type': {
       const length = typeof call.args.text === 'string' ? call.args.text.length : 0
       const where = selector === undefined ? `element [${index}]` : `the field matching ${safeInline(selector)}`
