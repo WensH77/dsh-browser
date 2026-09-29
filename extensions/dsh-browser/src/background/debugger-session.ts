@@ -65,6 +65,13 @@ export function cdpFailure(error: unknown): CaptureError {
     // for the target, so the existing session is ours to reuse.
     return new CaptureError('action-failed', 'This extension already holds a debugging session for this tab; reusing it.', 'own-session')
   }
+  if (/chrome-extension:\/\/ URL of different extension/i.test(message)) {
+    // One specific restricted page, worth its own sentence: it is not "some
+    // protected page", it is a page that belongs to another extension, and the
+    // fix is to operate an ordinary one. Measured cause of a session that
+    // produced nothing but attach refusals.
+    return new CaptureError('unsupported', 'This page belongs to another extension (chrome-extension://…), and Chrome refuses a debugger there. A page like that accepts neither content scripts nor chrome.debugger, so bind an ordinary http(s) page instead.', 'restricted-page')
+  }
   if (/Cannot access|Cannot attach to this target|chrome:\/\//i.test(message)) {
     return new CaptureError('unsupported', 'This page cannot be debugged: Chrome internal, extension, and protected pages do not allow it.', 'restricted-page')
   }

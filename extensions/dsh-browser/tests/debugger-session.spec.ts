@@ -122,6 +122,22 @@ describe('acquireDebuggerSession', () => {
     await expect(acquireDebuggerSession(7)).rejects.toMatchObject({ code: 'unsupported', reason: 'restricted-page' })
   })
 
+  it('names another extension\'s page when Chrome refuses it', async () => {
+    // Measured report: a session bound to a chrome-extension:// page produced
+    // nothing but this refusal, and the generic "protected pages" copy never
+    // said which page or what to do about it.
+    mockDebugger({
+      attachError: new Error('Cannot access a chrome-extension:// URL of different extension'),
+      targets: [],
+    })
+
+    await expect(acquireDebuggerSession(7)).rejects.toMatchObject({
+      code: 'unsupported',
+      reason: 'restricted-page',
+      message: expect.stringContaining('belongs to another extension'),
+    })
+  })
+
   it('forgets a reused session that turns out to be gone', async () => {
     const failures: Record<string, Error> = { 'Network.enable': new Error('Debugger is not attached to the tab with id: 7.') }
     const mock = mockDebugger({ failures })
