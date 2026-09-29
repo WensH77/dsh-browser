@@ -409,16 +409,19 @@ function removeForeignFramesAction(): ActionResult {
  * would duplicate its UI.
  */
 function restoreForeignFramesAction(): ActionResult {
-  let restored = 0
+  const restored: string[] = []
   for (const entry of detachedFrames().splice(0)) {
     if (entry.element.isConnected) continue
     // The page navigated or re-rendered around it; the element has no home left.
     if (!entry.parent.isConnected) continue
     if (alreadyBack(entry.element)) continue
     entry.parent.insertBefore(entry.element, entry.next)
-    restored += 1
+    restored.push(frameOriginOf(frameSourceOf(entry.element)))
   }
-  return { text: `Put back ${restored} frame(s).` }
+  return {
+    text: `Put back ${restored.length} frame(s).`,
+    ...restored.length === 0 ? {} : { foreignOrigins: restored },
+  }
 }
 
 /** The URL an element names for the frame it creates, as reflected. */
