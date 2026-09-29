@@ -29,21 +29,10 @@ Windows（PowerShell）：
 $s="$env:TEMP\dsh-install.ps1"; irm https://raw.githubusercontent.com/WensH77/dsh-browser/refs/heads/main/scripts/install.ps1 -OutFile $s; powershell -NoProfile -ExecutionPolicy Bypass -File $s
 ```
 
-安装器把扩展文件放进 `~/.dsh/browser-extension` 并打开 `chrome://extensions`：在那里加载或重新加载一次 **AI 浏览器助手**——这是浏览器侧唯一要手点的动作；然后重启一次 dsh。扩展文件的同步由插件在启动时自动完成，不用手工复制目录。以后每次更新：重跑同一条安装命令，再在 Chrome 点一次「重新加载」。前置要求、启动命令、更新方式和开发者安装详见[详细安装与使用](#详细安装与使用)。
+安装器把扩展文件放进 `~/.dsh/browser-extension` 并打开 `chrome://extensions`：在那里加载或重新加载一次 **AI 浏览器助手**——这是浏览器侧唯一要手点的动作；然后重启一次 dsh。扩展文件的同步由插件在启动时自动完成，不用手工复制目录。以后每次更新：重跑同一条安装命令，再在 Chrome 点一次「重新加载」。前置要求、启动命令、更新方式和开发命令详见[详细安装与使用](#详细安装与使用)。
 
 > [!IMPORTANT]
 > npm 上未加 scope 的 [`dsh-browser`](https://www.npmjs.com/package/dsh-browser) 包属于另一个项目，与本仓库无关。本项目目前没有发布 npm 包，请使用上方安装器。
-
-## 性能基准
-
-在 2026 年 8 月 18 日完成的 60 次配对端到端评测中，两个后端分配到的 30 次运行均全部成功；dsh 浏览器操作使用了更少的模型/工具轮次，并以更短时间完成任务：
-
-| 后端 | 成功率 | 平均端到端耗时 | 平均浏览器工具调用 |
-|---|---:|---:|---:|
-| **dsh 浏览器操作** | **30/30** | **5.32 秒** | **3.4** |
-| 对齐工具契约的 Playwright 基线 | 30/30 | 6.67 秒 | 4.7 |
-
-Playwright / 扩展的配对耗时比为 **1.24**（95% CI **1.16–1.34**）：Playwright 耗时约多 24%；等价地说，dsh 浏览器操作将延迟降低约 20%，每个任务平均节省 1.35 秒。评测使用 6 个浏览器任务、5 个确定性 seed、相同的 DSH profile 与模型（`deepseek-v4-flash`），并通过独立页面状态验证结果。详见[评测方法与复现说明](benchmark/README.md)。
 
 ## 核心能力
 
@@ -112,15 +101,7 @@ $s="$env:TEMP\dsh-install.ps1"; irm https://raw.githubusercontent.com/WensH77/ds
 
 Windows 命令先下载 `install.ps1` 再执行，而不是管道给 `Invoke-Expression`：脚本是带 BOM 的 UTF-8，Windows PowerShell 依赖 BOM 才能正确显示中文，而 `Invoke-Expression` 无法处理开头的 BOM。
 
-如需从源码 checkout 安装当前分支：
-
-```sh
-git clone https://github.com/WensH77/dsh-browser.git
-cd dsh-browser
-./scripts/install.sh
-```
-
-Windows 请在 checkout 中运行 `.\scripts\install.ps1`。拉取或切换版本后，重跑安装命令（或只 `pnpm build`——扩展文件由插件在启动时自动对齐），再在扩展页点一次「重新加载」。不知道确切命令时问助手：它会用 `browser_update` 打印你这台机器该跑的那一条（并且不会替你执行）。
+更新：重跑上面那条命令拉取新版本，再在扩展页点一次「重新加载」。不知道确切命令时问助手：它会用 `browser_update` 打印你这台机器该跑的那一条（并且不会替你执行）。
 
 ### 随仓库分发的技能
 
@@ -136,7 +117,7 @@ Windows 请在 checkout 中运行 `.\scripts\install.ps1`。拉取或切换版�
 cd ~/.dsh/dsh-browser && pnpm start
 ```
 
-使用源码 checkout 时，请在仓库根目录运行 `pnpm start`。当前受支持的精确公开版本为钉定的 0.1.7 预发布版：
+当前受支持的精确公开版本为钉定的 0.1.7 预发布版：
 
 ```sh
 npx @deepseek-ai/dsh@0.1.7-rc.1 web
