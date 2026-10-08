@@ -268,12 +268,30 @@ function onCdpEvent(source: chrome.debugger.Debuggee, method: string, params?: o
       pushNetwork(tabId, { requestId: String(event.requestId ?? ''), endedAt: Date.now() })
       return
     case 'Page.javascriptDialogOpening': {
-      session.dialog = {
-        message: typeof event.message === 'string' ? event.message : '',
-        type: typeof event.type === 'string' ? event.type : 'alert',
-      }
+      const type = typeof event.type === 'string' ? event.type : 'alert'
+      const message = typeof event.message === 'string' ? event.message : ''
+      session.dialog = { message, type }
       // A dialog freezes the page's JS: nothing else can run until it is handled.
-      pushConsole(tabId, 'warning', `[dialog:${session.dialog.type}] ${session.dialog.message}`)
+      pushConsole(tabId, 'warning', `[dialog:${type}] ${message}`)
+      // A `beforeunload` dialog is the page asking whether a navigation may
+      // discard its state. Chrome's own dialog is browser UI, not page DOM, so
+      // no extension can click it; `chrome.debugger` is the only way to answer
+      // it, and leaving it open stalls the navigation the bridge just asked for
+      // and every later call behind the frozen renderer. Answer it the way
+      // "leave" does. alert/confirm/prompt are deliberately left alone: the
+      // model gets to read them and decide with browser_dialog.
+      if (type === 'beforeunload') {
+        void chrome.debugger
+          .sendCommand({ tabId }, 'Page.handleJavaScriptDialog', { accept: true })
+          .then(() => {
+            pushConsole(tabId, 'warning', '[dialog:beforeunload] answered "leave" so the navigation could proceed.')
+          })
+          .catch((error: unknown) => {
+            // The tab may have gone away between the event and this command.
+            const reason = error instanceof Error ? error.message : String(error)
+            pushConsole(tabId, 'warning', `[dialog:beforeunload] could not be answered automatically: ${reason}`)
+          })
+      }
       return
     }
     case 'Page.javascriptDialogClosed':
@@ -437,10 +455,14 @@ function answerError(error: unknown): { ok: false; error: { code: 'unsupported' 
  * model's first read. Best effort: callers swallow failures (DevTools open on
  * that tab, a protected page, or a build without `chrome.debugger`).
  *
+ * `Page` is part of the set for its events, not for screenshots: Chrome only
+ * emits `Page.javascriptDialogOpening` while that domain is enabled, and a
+ * `beforeunload` dialog would otherwise arrive unseen and stall navigation.
+ *
  * @param tabId - the controlled tab to prime.
  */
 export async function primeSession(tabId: number): Promise<void> {
-  await withTabLock(tabId, () => holdSession(tabId, { runtime: true, log: true, network: true }))
+  await withTabLock(tabId, () => holdSession(tabId, { runtime: true, log: true, network: true, page: true }))
 }
 
 /** Whether this tab still holds a live debugging session. */

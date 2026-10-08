@@ -356,6 +356,36 @@ describe('javascript dialogs', () => {
     expect(answer.ok).toBe(false)
     expect(answer.error?.message).toContain('No JavaScript dialog is open')
   })
+
+  it('answers a beforeunload dialog by itself, so a navigation is not left waiting', async () => {
+    await harness.devtools.primeSession(1)
+    harness.emit(1, 'Page.javascriptDialogOpening', { message: '系统可能不会保存您所做的更改。', type: 'beforeunload' })
+
+    expect(harness.sendCommand).toHaveBeenCalledWith({ tabId: 1 }, 'Page.handleJavaScriptDialog', { accept: true })
+
+    const buffered = await harness.devtools.readConsole(1, {}, 32_000)
+    expect(buffered.result?.text).toContain('[dialog:beforeunload]')
+    expect(buffered.result?.text).toContain('answered "leave"')
+  })
+
+  it('leaves an alert for the model to answer', async () => {
+    await harness.devtools.primeSession(1)
+    harness.emit(1, 'Page.javascriptDialogOpening', { message: 'Please select at least one specialist', type: 'alert' })
+
+    expect(harness.sendCommand).not.toHaveBeenCalledWith(
+      { tabId: 1 },
+      'Page.handleJavaScriptDialog',
+      expect.anything(),
+    )
+    const answer = await harness.devtools.handleDialog(1, { action: 'dismiss' })
+    expect(answer.result?.text).toContain('Please select at least one specialist')
+  })
+
+  it('enables the Page domain while priming: Chrome emits no dialog event without it', async () => {
+    await harness.devtools.primeSession(1)
+
+    expect(harness.sendCommand).toHaveBeenCalledWith({ tabId: 1 }, 'Page.enable')
+  })
 })
 
 describe('page evaluation', () => {
