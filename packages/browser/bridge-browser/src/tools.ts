@@ -1625,7 +1625,7 @@ function defineTools(
 
   const dialog = (): ToolDefinition => defineTool({
     name: 'browser_dialog',
-    description: 'Answer the JavaScript dialog (alert / confirm / prompt) the page is showing. Such a dialog freezes the page: every other tool blocks until it is handled, so use this when a call hangs or the page stops responding. Pass action "accept" (OK) or "dismiss" (Cancel). A navigation-triggered beforeunload dialog ("Leave this site?") is not yours to answer: the extension accepts it by itself so the navigation can finish, and says so in the console output.',
+    description: 'Answer the JavaScript dialog (alert / confirm / prompt) the page is showing. Such a dialog freezes the page: page-facing tools either wait on it or come back refused with the dialog quoted, so use this when a call hangs or a refusal names an open dialog. Pass action "accept" (OK) or "dismiss" (Cancel); a prompt also takes "text". A navigation-triggered beforeunload dialog ("Leave this site?") is not yours to answer: the extension accepts it by itself so the navigation can finish, and says so in the console output.',
     parameters: {
       action: { type: 'string', enum: ['accept', 'dismiss'], required: true, description: 'Accept the dialog (OK) or dismiss it (Cancel).' },
       text: { type: 'string', description: 'Text to submit when the dialog is a prompt.' },

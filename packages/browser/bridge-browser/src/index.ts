@@ -319,7 +319,7 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
         + 'To answer "what does this page or section say", read the text once — browser_get_text, optionally with a selector, or with find + context to jump '
         + 'straight to a phrase — and slice it yourself; do not script several browser_eval rounds to hunt through the DOM. Reach for browser_capture when the '
         + 'question is about appearance or when the content is drawn into a canvas or image, and note that a capture needs that tab free of DevTools. '
-        + 'If a call hangs or the page stops responding, a JavaScript dialog is usually holding the renderer: answer it with browser_dialog. '
+        + 'A JavaScript dialog (alert / confirm / prompt) is browser UI that freezes the page it belongs to: page-facing tools are refused while one is open, and the refusal quotes the dialog. Read it and answer with browser_dialog — that call goes over CDP and works while the page is frozen. '
         + 'When the page misbehaves, browser_console and browser_network read the tab\'s console and requests (Chrome builds), '
         + 'browser_network mock replaces a response, browser_eval runs page-context JavaScript, and browser_block / browser_headers '
         + 'block or rewrite matching requests in the controlled tab. '

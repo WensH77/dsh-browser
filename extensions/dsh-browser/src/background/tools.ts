@@ -20,7 +20,7 @@ import {
 import { CaptureError, captureTab } from './capture.ts'
 import { FOREIGN_FRAME_REFUSAL_MARK } from './debugger-session.ts'
 import { PageImageError, fetchPageImage, pageImageEnvelope, parsePageImageSource } from './page-image.ts'
-import { clearMocks, evaluateInPage, handleDialog, installMock, parseMockRule, readConsole, readNetwork } from './devtools.ts'
+import { clearMocks, evaluateInPage, handleDialog, installMock, parseMockRule, pendingDialog, readConsole, readNetwork } from './devtools.ts'
 import { addBlockRule, addHeaderRule, clearTabRules, listTabRules, parseHeaderChanges } from './net-rules.ts'
 import { wrapUntrustedContent, wrapUntrustedResult } from '../security/untrusted.ts'
 import { recordDebugEvent } from './debug-log.ts'
@@ -68,6 +68,26 @@ const NAVIGATION_CANDIDATE_TOOLS = new Set([
   'browser_back',
   'browser_forward',
   'browser_reload',
+])
+/**
+ * Tools that still answer while a JavaScript dialog freezes the page.
+ *
+ * `alert`/`confirm`/`prompt` freeze the renderer, so every page-facing call
+ * sits on it: the content script cannot run, `Runtime.evaluate` cannot return,
+ * and the model sees a call that looks hung until the user clicks the browser's
+ * own dialog (measured on d15a: 69s on `browser_type`, 80s on
+ * `browser_get_text`, against a 90s per-call budget). Those below are answered
+ * by the browser process instead — the console and network buffers come from
+ * CDP events, and block/headers rules are declarativeNetRequest — so they stay
+ * usable. `browser_dialog` is the way out and must never be refused by this
+ * guard. Everything else is refused early with the dialog quoted back.
+ */
+const DIALOG_SAFE_TOOLS = new Set([
+  'browser_dialog',
+  'browser_console',
+  'browser_network',
+  'browser_block',
+  'browser_headers',
 ])
 const NAVIGATION_SNAPSHOT_GUIDANCE = 'Navigation completed and the current page snapshot is included below. Use it directly instead of taking an immediate duplicate snapshot.'
 /**
@@ -148,6 +168,29 @@ function unavailable(message: string): ToolAnswer {
 
 function cancelled(): ToolAnswer {
   return { ok: false, error: { code: 'bridge-closed', message: 'The browser tool call was cancelled.' } }
+}
+
+/** Quote one page-authored dialog message without letting it take over the refusal. */
+function quoteDialogMessage(message: string): string {
+  const text = message.trim()
+  if (text === '') return ''
+  return ` It says: "${text.length > 300 ? `${text.slice(0, 300)}…` : text}".`
+}
+
+/**
+ * Refuse a page-facing call while the tab is frozen on the page's own dialog.
+ *
+ * The model keeps the decision (`alert` has one button, `confirm`/`prompt` have
+ * two), but it gets that decision now instead of after the dialog is clicked
+ * for it — and the quoted message is what `browser_dialog` would otherwise
+ * report only once the wait is over.
+ */
+function dialogHoldFailure(dialog: { message: string; type: string }): ToolAnswer {
+  return unavailable(
+    `A JavaScript ${dialog.type} is open on this page, which freezes it until it is answered, so this call did not run.`
+    + `${quoteDialogMessage(dialog.message)} `
+    + 'Answer it with browser_dialog (action "accept" or "dismiss"; a prompt also takes "text") — that goes over CDP and works while the page is frozen.',
+  )
 }
 
 /**
@@ -819,6 +862,14 @@ export async function dispatchToolCall(
     return { ok: false, error: { code: 'no-active-tab', message: 'No active tab is available for browser operations.' } }
   }
   if (targetStillAllowed?.() === false) return targetChanged()
+  // Before the approval prompt and before any page work: an open dialog makes
+  // the rest of this call unanswerable, and asking the user to approve a click
+  // that cannot run would be a lie. `browser_dialog` and the buffer reads are
+  // exempt (see DIALOG_SAFE_TOOLS).
+  if (!DIALOG_SAFE_TOOLS.has(call.name)) {
+    const dialog = pendingDialog(tab.id)
+    if (dialog !== undefined) return dialogHoldFailure(dialog)
+  }
   const effectiveBudget = budget ?? { maxItems: 60, maxChars: DEFAULT_SNAPSHOT_MAX_CHARS }
   const frames = await listTabFrames(tab.id, tab.url)
   if (isCancelled(call, signal)) return cancelled()
