@@ -386,6 +386,32 @@ describe('javascript dialogs', () => {
 
     expect(harness.sendCommand).toHaveBeenCalledWith({ tabId: 1 }, 'Page.enable')
   })
+
+  // `pendingDialog` is what makes a page-facing call refuse instead of waiting
+  // out the freeze, so its lifetime has to follow Chrome's, not the model's.
+  it('reports the dialog while it is open and forgets it once Chrome closes it', async () => {
+    await harness.devtools.primeSession(1)
+    expect(harness.devtools.pendingDialog(1)).toBeUndefined()
+
+    harness.emit(1, 'Page.javascriptDialogOpening', { message: 'Please enter a duration', type: 'alert' })
+    expect(harness.devtools.pendingDialog(1)).toEqual({ message: 'Please enter a duration', type: 'alert' })
+
+    harness.emit(1, 'Page.javascriptDialogClosed', {})
+    expect(harness.devtools.pendingDialog(1)).toBeUndefined()
+  })
+
+  it('drops the entry when Chrome says no dialog is showing, so the hold cannot outlive it', async () => {
+    await harness.devtools.primeSession(1)
+    harness.emit(1, 'Page.javascriptDialogOpening', { message: 'Please enter a duration', type: 'alert' })
+    harness.sendCommand.mockRejectedValueOnce(new Error('No dialog is showing'))
+
+    const answer = await harness.devtools.handleDialog(1, { action: 'accept' })
+
+    expect(answer.ok).toBe(false)
+    // The user answered it while this tab was detached; a kept entry would
+    // refuse every later call on the tab.
+    expect(harness.devtools.pendingDialog(1)).toBeUndefined()
+  })
 })
 
 describe('page evaluation', () => {

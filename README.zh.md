@@ -41,7 +41,7 @@ $s="$env:TEMP\dsh-install.ps1"; irm https://raw.githubusercontent.com/WensH77/ds
 | 读取页面 | `browser_snapshot` | 结构化文本快照：标题/URL/正文/编号交互清单/表单字段（敏感值掩码）；`delta: true` 只返回变化；默认附带同刻截图，`visual: false` 可关 |
 | 截取页面 † | `browser_capture` | 返回视口截图（`fullPage: true` 为整页），仅内存、不落盘。优先用视口——长页面的整页截图会被压到模型图像预算内，文字不可读 |
 | 读控制台与网络 † | `browser_console` / `browser_network` | 控制台消息与未捕获错误（带 cursor 增量）；请求列表含状态与耗时、按 id 取响应体、内存内响应替换 |
-| 回应用户弹窗 † | `browser_dialog` | 确认或取消 `alert` / `confirm` / `prompt`；这类弹窗会冻住页面，回应之前其它工具都会卡住。`beforeunload`（「离开此网站?」）不交给模型：扩展自己应答，导航不会卡在它上面 |
+| 回应用户弹窗 † | `browser_dialog` | 确认或取消 `alert` / `confirm` / `prompt`；这类弹窗会冻住页面，弹窗在时其它面向页面的工具会被直接拒绝，并把弹窗内容原样带回（模型先读、再决定）。`browser_console` / `browser_network` 与阻断、改头规则照常可用，`browser_dialog` 自身也不受这条拒绝影响。`beforeunload`（「离开此网站?」）不交给模型：扩展自己应答，导航不会卡在它上面 |
 | 执行页面 JS † | `browser_eval` | 在页面自身上下文求值，不受页面 CSP 限制；每次单独审批 |
 | 阻断/改写请求 | `browser_block` / `browser_headers` | 阻断匹配请求，或改写请求/响应头；仅作用于受控标签页、仅当前浏览器会话 |
 | 点击元素 | `browser_click` | 按编号或 CSS 选择器点击链接/按钮/复选框等；目标是原生 `<select>` 时用 `option` 传值或可见文本选中（合成点击打不开原生下拉，选项用 `browser_dom_query { fields: ["options"] }` 读） |

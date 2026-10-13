@@ -583,10 +583,34 @@ export async function handleDialog(
   } catch (error: unknown) {
     const failure = error instanceof CaptureError ? error : cdpFailure(error)
     if (/No dialog is showing|no dialog/i.test(failure.message)) {
+      // Chrome is the authority on whether a dialog exists: it answered the
+      // event stream once, but the dialog is gone now (answered by the user
+      // while this tab was detached, or the entry was left behind). Drop it,
+      // because `pendingDialog` refuses page-facing calls while it is set.
+      const stale = sessions.get(tabId)
+      if (stale !== undefined) stale.dialog = undefined
       return { ok: false, error: { code: 'action-failed', message: 'No JavaScript dialog is open on this tab right now, so there is nothing to answer.' } }
     }
     return { ok: false, error: { code: failure.code, message: failure.message } }
   }
+}
+
+/**
+ * The JavaScript dialog this tab is showing right now, if any.
+ *
+ * `alert`/`confirm`/`prompt` are browser UI, not DOM: while one is open the
+ * tab's renderer is frozen, so a page-facing call waits on it with nothing to
+ * show for the wait (measured on d15a: an app-raised `alert` held a
+ * `browser_type` for 69s and a `browser_get_text` for 80s, against a 90s
+ * per-call budget). Dispatch reads this first and hands the model the dialog
+ * instead of the wait; the answer travels over CDP (`handleDialog`), which
+ * works while the page is frozen.
+ *
+ * @param tabId - the controlled tab.
+ * @returns the dialog's message and type, or undefined when none is open.
+ */
+export function pendingDialog(tabId: number): { message: string; type: string } | undefined {
+  return sessions.get(tabId)?.dialog
 }
 
 /** Drop every response-override rule for one tab and stop intercepting. */
