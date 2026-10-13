@@ -29,7 +29,7 @@ Windows（PowerShell）：
 $s="$env:TEMP\dsh-install.ps1"; irm https://raw.githubusercontent.com/WensH77/dsh-browser/refs/heads/main/scripts/install.ps1 -OutFile $s; powershell -NoProfile -ExecutionPolicy Bypass -File $s
 ```
 
-安装器把扩展文件放进 `~/.dsh/browser-extension` 并打开 `chrome://extensions`：在那里加载或重新加载一次 **AI 浏览器助手**——这是浏览器侧唯一要手点的动作；然后重启一次 dsh。扩展文件的同步由插件在启动时自动完成，不用手工复制目录。扩展设置里的「允许浏览器调试」默认关闭，截图、控制台、网络、执行页面 JS 和 `browser_dialog` 这几个工具需要它，见[核心能力](#核心能力)的表注。以后每次更新：重跑同一条安装命令，再在 Chrome 点一次「重新加载」。前置要求、启动命令、更新方式和开发命令详见[详细安装与使用](#详细安装与使用)。
+安装器把扩展文件放进 `~/.dsh/browser-extension` 并打开 `chrome://extensions`：在那里加载或重新加载一次 **AI 浏览器助手**——这是浏览器侧唯一要手点的动作；然后重启一次 dsh。扩展文件的同步由插件在启动时自动完成，不用手工复制目录。扩展设置里的「允许浏览器调试」默认关闭，截图、控制台、网络、执行页面 JS、`browser_dialog` 和 `browser_debug` 这几个工具需要它，见[核心能力](#核心能力)的表注。以后每次更新：重跑同一条安装命令，再在 Chrome 点一次「重新加载」。前置要求、启动命令、更新方式和开发命令详见[详细安装与使用](#详细安装与使用)。
 
 > [!IMPORTANT]
 > npm 上未加 scope 的 [`dsh-browser`](https://www.npmjs.com/package/dsh-browser) 包属于另一个项目，与本仓库无关。本项目目前没有发布 npm 包，请使用上方安装器。
@@ -43,6 +43,7 @@ $s="$env:TEMP\dsh-install.ps1"; irm https://raw.githubusercontent.com/WensH77/ds
 | 读控制台与网络 † | `browser_console` / `browser_network` | 控制台消息与未捕获错误（带 cursor 增量）；请求列表含状态与耗时、按 id 取响应体、内存内响应替换 |
 | 回应用户弹窗 † | `browser_dialog` | 确认或取消 `alert` / `confirm` / `prompt`；这类弹窗会冻住页面，弹窗在时其它面向页面的工具会被直接拒绝，并把弹窗内容原样带回（模型先读、再决定）。`browser_console` / `browser_network` 与阻断、改头规则照常可用，`browser_dialog` 自身也不受这条拒绝影响。`beforeunload`（「离开此网站?」）不交给模型：扩展自己应答，导航不会卡在它上面 |
 | 执行页面 JS † | `browser_eval` | 在页面自身上下文求值，不受页面 CSP 限制；每次单独审批 |
+| 调试 JavaScript † | `browser_debug` | 下断点（行断点 `url` 或 `urlRegex` + 0 基 `lineNumber`，可加 `condition`；XHR/fetch 断点用 `kind: "xhr"`）、列出与删除断点、暂停、恢复、单步、读暂停现场（`action: "wait"`，含调用帧与变量）、在暂停的调用帧里求值（`action: "eval"`）。暂停会冻住页面的 JS，期间的页面类工具会被直接拒绝并带上暂停位置，直到恢复。断点随会话存在，随标签页关闭、调试提示条被点掉、开关关闭或 `unbreak { all: true }` 一起消失。每次调用单独审批，审批卡可给「本会话内允许」——这样一轮调试（读现场、看变量、恢复）不会连弹五张卡 |
 | 阻断/改写请求 | `browser_block` / `browser_headers` | 阻断匹配请求，或改写请求/响应头；仅作用于受控标签页、仅当前浏览器会话 |
 | 点击元素 | `browser_click` | 按编号或 CSS 选择器点击链接/按钮/复选框等；目标是原生 `<select>` 时用 `option` 传值或可见文本选中（合成点击打不开原生下拉，选项用 `browser_dom_query { fields: ["options"] }` 读） |
 | 点击绑定在按压上的控件 | `browser_click_pointer` | 在元素矩形中心派发 `pointerdown`、`mousedown`、`pointerup`、`mouseup`、`click`；用于 Google Slides 这类画布/SVG 编辑器——`browser_click` 回报成功但页面没反应时改用它 |
@@ -61,7 +62,7 @@ $s="$env:TEMP\dsh-install.ps1"; irm https://raw.githubusercontent.com/WensH77/ds
 | 打印更新命令 | `browser_update` | 只打印这台机器该跑的更新命令，不替你执行 |
 | 等待稳定 | `browser_wait` | 页面加载与渲染稳定检测 |
 
-† 这五个工具走 Chrome 的 `chrome.debugger`，由扩展设置里的**「允许浏览器调试」**控制，该项首次安装时是关闭的：关着的时候插件根本不会注册它们，模型看不到也调不到，需要时在 options 页打开（改完桥会重连，能力随握手带过来）。`browser_snapshot` 本身不受影响，但它默认附带的那张同刻截图同样要经过 `chrome.debugger`：关着时结果里只有文本，并附一句截图不可用的原因。同一标签页开着 DevTools 时 Chrome 拒绝第二个调试器，工具会直接说明这一点。
+† 这六个工具走 Chrome 的 `chrome.debugger`，由扩展设置里的**「允许浏览器调试」**控制，该项首次安装时是关闭的：关着的时候插件根本不会注册它们，模型看不到也调不到，需要时在 options 页打开（改完桥会重连，能力随握手带过来）。`browser_snapshot` 本身不受影响，但它默认附带的那张同刻截图同样要经过 `chrome.debugger`：关着时结果里只有文本，并附一句截图不可用的原因。同一标签页开着 DevTools 时 Chrome 拒绝第二个调试器，工具会直接说明这一点。`browser_debug` 还额外要求扩展的工具集级别 ≥ 7；更旧的构建保留其余五个。
 
 ## 组成
 
@@ -140,9 +141,13 @@ Chrome 本机使用无需配置。点击工具栏上的 DeepSeek 鲸鱼图标会
 - 确认桥接已加载：浏览器打开 `http://127.0.0.1:3080/ext/bridge-config`，应返回类似 `{"wsUrl":"ws://127.0.0.1:3080/ext/bridge"}` 的 JSON。如果返回的是网页而不是 JSON，说明当前运行的 dsh 早于桥接注册——重启 dsh 并刷新页面即可，扩展会自动重连。
 - 扩展会自动探测 3080/3081/3090/14389/43189（dsh Desktop）端口。若 dsh 运行在其它端口，或使用 `--host 0.0.0.0` 远程部署，请在扩展设置页中填写地址与桥接 token。
 
-**截图、控制台、网络、执行 JS、`browser_dialog` 这些工具不存在**
+**截图、控制台、网络、执行 JS、`browser_dialog`、`browser_debug` 这些工具不存在**
 
-它们走 `chrome.debugger`，由扩展设置里的「允许浏览器调试」控制，该项首次安装时关闭；关着的时候插件不注册这些工具，模型看不到。打开后桥会重连，能力随握手带到模型面前。
+它们走 `chrome.debugger`，由扩展设置里的「允许浏览器调试」控制，该项首次安装时关闭；关着的时候插件不注册这些工具，模型看不到。打开后桥会重连，能力随握手带到模型面前。`browser_debug` 还要求扩展的工具集级别 ≥ 7（见 `browser_status`）：它是唯一一个旧构建没有对应动作的调试工具。
+
+**页面类工具回报「页面停在断点上」**
+
+`browser_debug` 下的断点命中了，页面 JavaScript 停住，任何面向页面的工具都跑不了。拒绝文案里带着停在哪个文件哪一行。先 `browser_debug { action: "wait" }` 读现场（或用 `action: "eval"` 在某个调用帧里求值），再 `action: "resume"` 恢复，或用 `step` 逐条前进。页面停住期间 `browser_console` / `browser_network` 照常可用；每次 `browser_debug` 调用都要单独审批。
 
 **调试类工具报「另一个调试器已附加」**
 
@@ -180,7 +185,7 @@ pnpm --filter dsh-browser-extension run test
 - 桥路径在 `/api` 信任栅栏之外，自带 bearer token 认证。
 - Chrome 扩展的本地 Origin 保留零配置回环访问。
 - 特权网关方法（`settings.*`/`credentials.*`/`host.open*`）对非回环来源一律拒绝。
-- 单活动连接；页面读取默认走文本，模型路由声明支持图片输入时 `browser_snapshot` 会附带截图。走 `chrome.debugger` 的能力（截图、控制台、网络、执行页面 JS、`browser_dialog`）默认关闭，关着时插件不注册这些工具；附加调试器期间 Chrome 会显示它的调试提示条，截图只存在内存中、不写磁盘。密码和卡号值永不回传。
+- 单活动连接；页面读取默认走文本，模型路由声明支持图片输入时 `browser_snapshot` 会附带截图。走 `chrome.debugger` 的能力（截图、控制台、网络、执行页面 JS、`browser_dialog`、`browser_debug`）默认关闭，关着时插件不注册这些工具；附加调试器期间 Chrome 会显示它的调试提示条，截图只存在内存中、不写磁盘。密码和卡号值永不回传。
 - 助手开始操作页面时，会在首次浏览器工具调用时绑定当时的活动标签页，此后一直操作**这个**标签页：你切去看别的页面（包括 Gmail）不会打断它，也不会撤掉正在等待你确认的弹窗——弹窗就在 dsh 页面里，你得能切过去点它。受控标签页关闭后才会暂停，直到下一次调用显式选择页面；扩展也绝不静默改绑到别的标签页。一个扩展连接同时只服务一个会话，第二个会话的绑定会被拒绝并报出占用者的会话 id，而不是抢走标签页。
 - 网页文字会标记为不可信输入。默认「自动共享」只按需读取受控标签页且不额外弹窗；对隐私敏感时可选择「每次询问」，或用「关闭」完全阻断读取。在「每次询问」模式下，读取弹窗可以仅允许一次，也可以持久切回自动读取；之后仍可在设置中关闭。读取的页面文字会发送给当前选择的模型。
 - 点击、输入、按键、导航、历史跳转和刷新默认失败关闭，必须由用户批准。会话的首次 `browser_navigate` 也是在批准之后才创建新标签，被拒绝或未应答的调用不会发出任何请求。默认策略下 `browser_navigate` 只能去当前受控页面所在的主机（换主机要先绑定或首次导航），要放开得在扩展设置里打开「允许跨域导航」；设置里另有一份禁用 origin 黑名单，命中即拒绝读取与操作。Google Drive 导出走同一套审批：按文档所在 origin 授权，信任该 origin 后不再询问；Docs/Sheets 也不接受页面工具，只能用导出工具读。可以信任某个 origin 用于当前会话；永久信任需在扩展设置页中显式管理。

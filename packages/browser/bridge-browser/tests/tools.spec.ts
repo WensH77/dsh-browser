@@ -244,6 +244,47 @@ describe('registerBrowserTools', () => {
     expect(Object.keys(params(registered.find((r) => r.name === 'browser_click')!.definition))).not.toContain('selector')
   })
 
+  it('gates browser_debug on both the debugging capability and its own level', async () => {
+    const { ctx, bridge, requestTool, registered } = makeHarness()
+    const tools = registerBrowserTools(ctx, bridge, { toolTimeoutMs: 1_000, snapshotMaxChars: 12_000, maxInteractiveItems: 60 })
+    const params = (definition: Record<string, unknown>): Record<string, unknown> =>
+      (definition.parameters as { properties: Record<string, unknown> }).properties
+    const exec = { signal: new AbortController().signal }
+
+    // Debugging off: the tool does not exist, whatever the level says.
+    expect(tools.names()).not.toContain('browser_debug')
+
+    tools.setDebugToolsEnabled(true)
+    expect(tools.names()).toContain('browser_debug')
+    const debug = (): Record<string, unknown> => registered.find((r) => r.name === 'browser_debug')!.definition
+    expect(Object.keys(params(debug()))).toEqual(expect.arrayContaining([
+      'action', 'kind', 'url', 'urlRegex', 'lineNumber', 'condition', 'id', 'all', 'cursor', 'timeoutMs', 'frameIndex', 'expression',
+    ]))
+    expect(String(debug().description)).toContain('breakpoint')
+
+    await (debug().execute as (a: unknown, e: typeof exec) => Promise<unknown>)({ action: 'resume' }, exec)
+    expect(requestTool).toHaveBeenCalledWith('browser_debug', { action: 'resume' }, exec.signal, 1_000)
+
+    // A build below the level that ships the wire case must not be offered it:
+    // it would answer "Unknown action", which the model cannot anticipate.
+    tools.setClientToolset(TOOLSET_SELECT_OPTION)
+    expect(tools.names()).not.toContain('browser_debug')
+    // The other debugging tools are level-independent and stay.
+    expect(tools.names()).toContain('browser_eval')
+
+    tools.setClientToolset(BRIDGE_TOOLSET)
+    expect(tools.names()).toContain('browser_debug')
+    tools.setDebugToolsEnabled(false)
+    expect(tools.names()).not.toContain('browser_debug')
+
+    // The real-world order: an older extension connects first, then the user
+    // turns debugging on. The level gate has to survive that ordering too.
+    tools.setClientToolset(TOOLSET_SELECT_OPTION)
+    tools.setDebugToolsEnabled(true)
+    expect(tools.names()).not.toContain('browser_debug')
+    expect(tools.names()).toContain('browser_eval')
+  })
+
   it('gates the native-select arguments at TOOLSET_SELECT_OPTION', async () => {
     const { ctx, bridge, requestTool, registered } = makeHarness()
     const tools = registerBrowserTools(ctx, bridge, { toolTimeoutMs: 1_000, snapshotMaxChars: 12_000, maxInteractiveItems: 60 })
@@ -870,7 +911,7 @@ describe('registerBrowserTools', () => {
         makeHostHarness({ connected: true, version: '0.1.7', caps: { ...CAPS, debugger: true } }).registered,
         'browser_status',
       )
-      expect(allowed).toContain('debugging: allowed by the extension (screenshots, console, network, evaluation)')
+      expect(allowed).toContain('debugging: allowed by the extension (screenshots, console, network, evaluation, JavaScript breakpoints)')
 
       const off = await runText(
         makeHostHarness({ connected: true, version: '0.1.7', caps: { ...CAPS, debugger: false } }).registered,

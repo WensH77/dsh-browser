@@ -34,7 +34,7 @@ export function debugToolRefusal(name: string, allowed: boolean): ToolAnswer | u
     ok: false,
     error: {
       code: 'unsupported',
-      message: `Browser debugging is switched off in the extension settings, so ${name} is unavailable. Turn on "Allow browser debugging" in the extension's options to use screenshots, console, network, and page evaluation.`,
+      message: `Browser debugging is switched off in the extension settings, so ${name} is unavailable. Turn on "Allow browser debugging" in the extension's options to use screenshots, console, network, page evaluation, and JavaScript breakpoints.`,
     },
   }
 }

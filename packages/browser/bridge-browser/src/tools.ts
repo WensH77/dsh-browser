@@ -30,6 +30,7 @@ import {
   GDRIVE_UNSUPPORTED_HINT,
   LEGACY_TOOLSET,
   MAX_BINDABLE_TABS,
+  TOOLSET_JS_DEBUG,
   TOOLSET_PAGE_IMAGE,
   TOOLSET_POINTER_CLICK,
   TOOLSET_SELECTOR_TARGETS,
@@ -753,6 +754,7 @@ export const BROWSER_TOOL_NAMES = [
   'browser_network',
   'browser_eval',
   'browser_dialog',
+  'browser_debug',
   'browser_block',
   'browser_headers',
   'browser_click',
@@ -808,6 +810,15 @@ export const SLIDES_OPEN_PAGE_TOOL_NAMES = ['browser_slides_open_page'] as const
 
 /** Tools whose schema gains the native-`<select>` arguments at `TOOLSET_SELECT_OPTION`. */
 const SELECT_OPTION_TOOL_NAMES = ['browser_click', 'browser_dom_query'] as const
+
+/**
+ * Tools that only exist at `TOOLSET_JS_DEBUG`.
+ *
+ * It is both a debugging tool (registered only while the extension reports
+ * `debugger: true`) and a level-gated one: a build below that level has no wire
+ * case for the action, so the surface carries the skew rather than the call.
+ */
+export const JS_DEBUG_TOOL_NAMES = ['browser_debug'] as const
 
 /**
  * Answer a selector click/type aimed at an extension that cannot resolve
@@ -1026,10 +1037,10 @@ export function browserStatusText(server: BridgeServer, caps: BridgeCaps | undef
  * here answers "why can I not see the page" without a debug log.
  */
 function debuggingLine(caps: BridgeCaps | undefined): string {
-  if (caps?.debugger === true) return 'allowed by the extension (screenshots, console, network, evaluation)'
+  if (caps?.debugger === true) return 'allowed by the extension (screenshots, console, network, evaluation, JavaScript breakpoints)'
   if (caps?.debugger === false) {
     return 'off — turn on "Allow browser debugging" in the extension options and reload the extension; '
-      + 'until then screenshots, console, network and evaluation are not registered at all. '
+      + 'until then screenshots, console, network, evaluation and JavaScript breakpoints are not registered at all. '
       + 'If it is already on, this Chrome exposes no chrome.debugger to the extension (enterprise policy, or a Chrome older than 116)'
   }
   return `${UNKNOWN_OLDER_BUILD}, so debugging is off`
@@ -1217,11 +1228,12 @@ export function registerBrowserTools(
   // surfaces can never drift. A level-1 extension resolves selectors and ships
   // the DOM/rule tools but cannot search page text; a level-5 one predates the
   // native-`<select>` arguments.
-  const currentDefinitions = defineTools(ctx, call, callRaw, options, bindRun, clientDebugger, { selectorTargets: true, textFind: true, pageImage: true, selectOption: true })
-  const slidesDefinitions = defineTools(ctx, call, callRaw, options, bindRun, clientDebugger, { selectorTargets: true, textFind: true, pageImage: true, selectOption: false })
-  const findOnlyDefinitions = defineTools(ctx, call, callRaw, options, bindRun, clientDebugger, { selectorTargets: true, textFind: true, pageImage: false, selectOption: false })
-  const selectorOnlyDefinitions = defineTools(ctx, call, callRaw, options, bindRun, clientDebugger, { selectorTargets: true, textFind: false, pageImage: false, selectOption: false })
-  const legacyDefinitions = defineTools(ctx, call, callRaw, options, bindRun, clientDebugger, { selectorTargets: false, textFind: false, pageImage: false, selectOption: false })
+  const currentDefinitions = defineTools(ctx, call, callRaw, options, bindRun, clientDebugger, { selectorTargets: true, textFind: true, pageImage: true, selectOption: true, jsDebug: true })
+  const selectOptionDefinitions = defineTools(ctx, call, callRaw, options, bindRun, clientDebugger, { selectorTargets: true, textFind: true, pageImage: true, selectOption: true, jsDebug: false })
+  const slidesDefinitions = defineTools(ctx, call, callRaw, options, bindRun, clientDebugger, { selectorTargets: true, textFind: true, pageImage: true, selectOption: false, jsDebug: false })
+  const findOnlyDefinitions = defineTools(ctx, call, callRaw, options, bindRun, clientDebugger, { selectorTargets: true, textFind: true, pageImage: false, selectOption: false, jsDebug: false })
+  const selectorOnlyDefinitions = defineTools(ctx, call, callRaw, options, bindRun, clientDebugger, { selectorTargets: true, textFind: false, pageImage: false, selectOption: false, jsDebug: false })
+  const legacyDefinitions = defineTools(ctx, call, callRaw, options, bindRun, clientDebugger, { selectorTargets: false, textFind: false, pageImage: false, selectOption: false, jsDebug: false })
   const toolsetNames = new Set<string>([
     ...TOOLSET_TOOL_NAMES,
     ...SELECTOR_TARGET_TOOL_NAMES,
@@ -1243,7 +1255,8 @@ export function registerBrowserTools(
   // it reaches. Every row is derived from the same factories, minus the tools
   // that level predates.
   const levelMaps = new Map<number, Map<string, ToolDefinition>>([
-    [TOOLSET_SELECT_OPTION, byName(currentDefinitions)],
+    [TOOLSET_JS_DEBUG, byName(currentDefinitions)],
+    [TOOLSET_SELECT_OPTION, byName(selectOptionDefinitions)],
     [TOOLSET_SLIDES_OPEN_PAGE, byName(slidesDefinitions.map(guardSelectOption))],
     [TOOLSET_POINTER_CLICK, byName(slidesDefinitions.filter(notAt(slidesOpenPageOnly)).map(guardSelectOption))],
     [TOOLSET_PAGE_IMAGE, byName(slidesDefinitions.filter(notAt(pointerClickOnly, slidesOpenPageOnly)).map(guardSelectOption))],
@@ -1258,6 +1271,7 @@ export function registerBrowserTools(
       .map(guardSelectOption))],
   ])
   const levelOrder = [
+    TOOLSET_JS_DEBUG,
     TOOLSET_SELECT_OPTION,
     TOOLSET_SLIDES_OPEN_PAGE,
     TOOLSET_POINTER_CLICK,
@@ -1269,9 +1283,23 @@ export function registerBrowserTools(
     // Debugging tools wait for a connection that allows them.
     if (!debugNames.has(tool.name)) disposers.set(tool.name, ctx.tools.register(tool))
   }
-  let debugTools = currentDefinitions.filter((tool) => debugNames.has(tool.name))
+  const jsDebugOnly = new Set<string>(JS_DEBUG_TOOL_NAMES)
+  // Debugging tools are registered on the capability, not the level — except
+  // that one of them is also level-gated, so the two conditions intersect.
+  const debugToolsAt = (level: number): ToolDefinition[] =>
+    currentDefinitions.filter((tool) => debugNames.has(tool.name) && (level >= TOOLSET_JS_DEBUG || !jsDebugOnly.has(tool.name)))
+  let debugTools = debugToolsAt(BRIDGE_TOOLSET as number)
   let debugEnabled = false
   let clientToolset = BRIDGE_TOOLSET as number
+  const syncDebugTools = (): void => {
+    for (const tool of debugTools) {
+      disposers.get(tool.name)?.()
+      disposers.delete(tool.name)
+    }
+    debugTools = debugToolsAt(clientToolset)
+    if (!debugEnabled) return
+    for (const tool of debugTools) disposers.set(tool.name, ctx.tools.register(tool))
+  }
   const gdrive = defineTool({
     name: 'google_drive_export',
     description: 'Export a Google Doc or Google Sheet using your logged-in Google session. '
@@ -1361,14 +1389,7 @@ export function registerBrowserTools(
     setDebugToolsEnabled(enabled: boolean): void {
       if (enabled === debugEnabled) return
       debugEnabled = enabled
-      if (!enabled) {
-        for (const tool of debugTools) {
-          disposers.get(tool.name)?.()
-          disposers.delete(tool.name)
-        }
-        return
-      }
-      for (const tool of debugTools) disposers.set(tool.name, ctx.tools.register(tool))
+      syncDebugTools()
     },
     setClientToolset(level: number): void {
       const resolved = levelOrder.find((candidate) => level >= candidate) ?? LEGACY_TOOLSET
@@ -1382,6 +1403,8 @@ export function registerBrowserTools(
         const definition = source.get(name)
         if (definition !== undefined) disposers.set(name, ctx.tools.register(definition))
       }
+      // A level change can add or remove the level-gated debugging tool.
+      syncDebugTools()
     },
     dispose(): void {
       for (const dispose of disposers.values()) dispose()
@@ -1503,9 +1526,9 @@ function defineTools(
   options: BrowserToolsOptions,
   bindRun: BindInteractiveRun,
   clientDebugger: () => boolean,
-  features: { selectorTargets: boolean; textFind: boolean; pageImage: boolean; selectOption: boolean },
+  features: { selectorTargets: boolean; textFind: boolean; pageImage: boolean; selectOption: boolean; jsDebug: boolean },
 ): ToolDefinition[] {
-  const { selectorTargets, textFind, pageImage, selectOption } = features
+  const { selectorTargets, textFind, pageImage, selectOption, jsDebug } = features
   const snapshot = (): ToolDefinition => defineTool({
     name: 'browser_snapshot',
     description: `Read the page and accessible iframes as structured text with numbered action targets, plus a screenshot of the same moment. Use frame for iframe targets, delta=true for changes only, and region to limit tokens. Truncation is reported in the snapshot notes. Pass visual=false for a cheaper text-only read. ${UNTRUSTED_CONTENT_WARNING}`,
@@ -1633,6 +1656,31 @@ function defineTools(
     timeoutMs: options.toolTimeoutMs,
     output: TEXT_OUTPUT,
     execute: (args, exec) => call(exec, 'browser_dialog', args as Record<string, unknown>),
+  })
+
+  const debug = (): ToolDefinition => defineTool({
+    name: 'browser_debug',
+    description: 'Debug the controlled tab over Chrome\'s debugger: set a line breakpoint (url or urlRegex plus a 0-based lineNumber) or an XHR/fetch breakpoint (kind "xhr"), list and remove them, pause, resume, step, read a pause with its call frames and variables (action "wait"), and evaluate an expression in a paused frame (action "eval"). Action "scripts" lists what is loaded. A pause freezes the page\'s JavaScript, so every other page-facing tool is refused until it resumes. '
+      + UNTRUSTED_CONTENT_WARNING,
+    parameters: {
+      action: { type: 'string', enum: ['scripts', 'break', 'unbreak', 'list', 'pause', 'resume', 'step', 'wait', 'eval'], required: true, description: 'What to do. "break"/"unbreak" manage breakpoints; "pause"/"resume"/"step" move execution; "wait" reads buffered pauses; "eval" evaluates in a paused frame.' },
+      kind: { type: 'string', description: 'For action "break": "line" (default) or "xhr". For action "step": "over" (default), "into", or "out".' },
+      url: { type: 'string', description: 'break: script url (exact, or a substring unique among loaded scripts), or the request-URL substring for kind "xhr". scripts: only list urls containing this.' },
+      urlRegex: { type: 'string', description: 'break: a CDP urlRegex matching the script to break in. Use instead of url when a prefix or pattern is what identifies the file.' },
+      lineNumber: { type: 'number', description: 'break: the line to stop on, 0-based (the number Chrome stack traces print).' },
+      columnNumber: { type: 'number', description: 'break: optional 0-based column inside that line.' },
+      condition: { type: 'string', description: 'break: a JavaScript expression; the page stops only while it is truthy.' },
+      id: { type: 'string', description: 'unbreak: the breakpoint id reported by "break" or "list".' },
+      all: { type: 'boolean', description: 'unbreak: remove every breakpoint this extension installed for the tab.' },
+      cursor: { type: 'number', description: 'wait: return pauses after this cursor. scripts: only scripts discovered after this cursor. Pass the previous nextCursor.' },
+      timeoutMs: { type: 'number', description: 'wait: block up to this long for the next pause (default 0, max 20000).' },
+      limit: { type: 'number', description: 'wait: maximum pauses to return (default 5). scripts: maximum urls (default 60).' },
+      frameIndex: { type: 'number', description: 'eval: which call frame of the current pause to evaluate in (default 0, the innermost).' },
+      expression: { type: 'string', description: 'eval: the expression to evaluate. It runs synchronously in the paused frame, so promises cannot settle.' },
+    },
+    timeoutMs: options.toolTimeoutMs,
+    output: TEXT_OUTPUT,
+    execute: (args, exec) => call(exec, 'browser_debug', args as Record<string, unknown>),
   })
 
   const block = (): ToolDefinition => defineTool({
@@ -1916,6 +1964,7 @@ function defineTools(
     network(),
     evaluate(),
     dialog(),
+    ...jsDebug ? [debug()] : [],
     block(),
     headers(),
     click(),

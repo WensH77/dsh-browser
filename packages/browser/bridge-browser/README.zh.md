@@ -76,6 +76,7 @@ npx @deepseek-ai/dsh@0.1.7-rc.1 web
 | `browser_console` / `browser_network` | 控制台消息与未捕获错误；请求列表、按 id 取一个响应体、内存内响应替换。 |
 | `browser_dialog` | 回应页面的 JS 弹窗——页面被 `alert`/`confirm` 冻住时的唯一出路。 |
 | `browser_eval` | 在页面自身上下文求值（不受页面 CSP 限制）。 |
+| `browser_debug` | 基于 CDP `Debugger` 域的 JS 调试：行断点与 XHR/fetch 断点（`break`）、列出与删除（`list`/`unbreak`）、执行控制（`pause`/`resume`/`step`）、读暂停现场（`wait`，含调用帧与栈顶帧变量）、在暂停的调用帧里求值（`eval`）。暂停会冻住页面，期间的页面类工具一律被拒（并带回暂停位置），直到恢复；控制台与网络缓冲照常可用。每次调用单独审批，审批卡可给「本会话内允许」，且要求扩展工具集级别 ≥ 7。 |
 | `browser_block` / `browser_headers` | 阻断匹配请求，或改写请求/响应头；session 规则，只作用于受控标签页。 |
 | `browser_status` | 宿主侧自检，扩展连没连都能用：连接状态、扩展 id/构建版本与它声明的 `proto`/`toolset` 对本插件的结论（直接说「重载扩展」还是「重启 dsh」）、**扩展是否允许调试**（截图没图时第一个要看的就是这行：它区分「开关没开」与「这个 Chrome 根本没给扩展 `chrome.debugger`」）、镜像的扩展文件是否最新、**扩展最近记录的调试事件**（开启调试能力时附上：attach/detach 及 Chrome 给出的断开原因、工具失败；存在 `chrome.storage.session`，service worker 被重启也不会丢），以及唯一一个下一步动作。不受调试开关与扩展能力级别影响。 |
 | `browser_setup` | 宿主侧装机辅助：把扩展文件重新同步到 `~/.dsh/browser-extension`、打开 `chrome://extensions`、有剪贴板工具时把该路径复制进去，并点明剩下唯一那个手动动作。幂等。 |

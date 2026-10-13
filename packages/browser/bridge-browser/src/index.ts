@@ -279,9 +279,13 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
     // arrives the full surface is registered; an older extension narrows it.
     tools.setDebugToolsEnabled(server.clientDebugger())
     capabilitiesSync = (caps) => {
+      // Level first: the debugging surface is the intersection of "the user
+      // allowed debugging" and "this build implements the tool", and a peer that
+      // is below the level must never be handed a tool it would answer with
+      // "Unknown action" — not even for the instant between these two calls.
+      if (caps !== undefined) tools.setClientToolset(declaredToolset(caps))
       tools.setDebugToolsEnabled(caps?.debugger === true)
       if (caps === undefined) return
-      tools.setClientToolset(declaredToolset(caps))
       // The user may be looking at the dsh log rather than the extension UI, and
       // an extension old enough to need this has no way to report it itself.
       if (declaredToolset(caps) < BRIDGE_TOOLSET) {

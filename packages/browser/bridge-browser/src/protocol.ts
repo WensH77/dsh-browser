@@ -63,6 +63,7 @@ export const DEBUG_TOOL_NAMES = [
   'browser_network',
   'browser_eval',
   'browser_dialog',
+  'browser_debug',
 ] as const
 
 /**
@@ -168,7 +169,8 @@ export const LEGACY_PROTO = 1
  * {@link TOOLSET_SLIDES_OPEN_PAGE} adds `browser_slides_open_page`;
  * {@link TOOLSET_SELECT_OPTION} adds the `option` argument to `browser_click`
  * and the `options` field to `browser_dom_query` (a native `<select>` cannot be
- * operated by a synthetic click).
+ * operated by a synthetic click); {@link TOOLSET_JS_DEBUG} adds
+ * `browser_debug` (breakpoints, pause, stepping, call-frame evaluation).
  *
  * A tool whose action the old build has no wire case for must be gated at the
  * level that ships it: exposing it to an older extension trades a smaller tool
@@ -176,7 +178,7 @@ export const LEGACY_PROTO = 1
  * cannot anticipate. The same holds for an argument: an older build drops it
  * silently, so the call reports success and changes nothing.
  */
-export const BRIDGE_TOOLSET = 6
+export const BRIDGE_TOOLSET = 7
 
 /** Level that first resolves CSS `selector` targets and ships the DOM/rule tools. */
 export const TOOLSET_SELECTOR_TARGETS = 1
@@ -195,6 +197,13 @@ export const TOOLSET_SLIDES_OPEN_PAGE = 5
 
 /** Level that first chooses a `<select>` option (`browser_click { option }`) and reads one's options (`browser_dom_query { fields: ["options"] }`). */
 export const TOOLSET_SELECT_OPTION = 6
+
+/**
+ * Level that first ships `browser_debug`: JavaScript breakpoints, pausing,
+ * stepping, and evaluating in a paused call frame over the CDP `Debugger`
+ * domain. A lower build has no wire case for the action at all.
+ */
+export const TOOLSET_JS_DEBUG = 7
 
 /** Feature level assumed when `caps.toolset` is absent. */
 export const LEGACY_TOOLSET = 0

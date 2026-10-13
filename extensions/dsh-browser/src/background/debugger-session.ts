@@ -171,6 +171,12 @@ export interface DebuggerDomains {
   log?: boolean
   network?: boolean
   page?: boolean
+  /**
+   * The `Debugger` domain: script inventory, breakpoints, pauses. Enabled only
+   * when the model actually debugs JavaScript, never as part of priming — it
+   * makes V8 collect script events and step metadata for every later script.
+   */
+  debugger?: boolean
 }
 
 const DOMAIN_FLAGS: Array<[string, keyof DebuggerDomains]> = [
@@ -178,6 +184,7 @@ const DOMAIN_FLAGS: Array<[string, keyof DebuggerDomains]> = [
   ['Log', 'log'],
   ['Network', 'network'],
   ['Page', 'page'],
+  ['Debugger', 'debugger'],
 ]
 
 /** One tab's attach state, shared by every feature that needs CDP. */
@@ -254,6 +261,33 @@ export interface DebuggerLease {
 }
 
 /**
+ * Turn one domain off for a tab that stays attached.
+ *
+ * `Debugger` is the domain this exists for: it carries breakpoints, and it is
+ * also the one domain a feature turns on and off again while the session (the
+ * console/network hold) lives on. Sending `${domain}.disable` through
+ * `sendCommand` by hand would leave `session.domains` claiming the domain is
+ * still enabled, so the next holder would skip the `enable` and every later
+ * breakpoint would fail with "Debugger agent is not enabled".
+ *
+ * @param tabId - the tab whose domain should be turned off.
+ * @param domain - the CDP domain name as `DOMAIN_FLAGS` spells it.
+ */
+export async function releaseDebuggerDomain(tabId: number, domain: string): Promise<void> {
+  await withLock(tabId, async () => {
+    const session = sessions.get(tabId)
+    if (session === undefined || !session.domains.has(domain)) return
+    try {
+      await chrome.debugger.sendCommand({ tabId }, `${domain}.disable`)
+    } catch {
+      // The session may be gone; either way this extension no longer holds the
+      // domain, which is what the bookkeeping below records.
+    }
+    session.domains.delete(domain)
+  })
+}
+
+/**
  * Attach to one tab (or reuse the session this extension already holds) and
  * return a lease. Domains the caller needs are enabled before it returns.
  *
@@ -264,7 +298,7 @@ export interface DebuggerLease {
  */
 export async function acquireDebuggerSession(tabId: number, need: DebuggerDomains = {}): Promise<DebuggerLease> {
   if (!visionAvailable()) {
-    throw new CaptureError('unsupported', 'This extension has no chrome.debugger API, so screenshots, console, network, and evaluation are unavailable. Reload the extension from chrome://extensions.', 'unsupported')
+    throw new CaptureError('unsupported', 'This extension has no chrome.debugger API, so screenshots, console, network, evaluation, and JavaScript breakpoints are unavailable. Reload the extension from chrome://extensions.', 'unsupported')
   }
   await withLock(tabId, async () => {
     const session = sessionFor(tabId)
