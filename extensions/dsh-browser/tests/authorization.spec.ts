@@ -112,6 +112,33 @@ describe('approvalPromptForCall', () => {
       .toMatchObject({ origins: ['https://app.example', 'https://login.example.net'] })
   })
 
+  it('asks for every JavaScript-debugging call, and says which one it is', () => {
+    // The debugger stops the page's own code and can evaluate inside it, so no
+    // origin trust covers it — but the card has to name which of those it is.
+    const resume = approvalPromptForCall(call('browser_debug', { action: 'resume' }), 'auto', FRAMES, 'en')
+    expect(resume).toMatchObject({
+      kind: 'action',
+      action: 'browser_debug',
+      origins: ['https://app.example', 'https://login.example.net'],
+      canTrust: false,
+    })
+    expect(resume?.summary).toBe('JavaScript debugging in the current page: resume the page')
+
+    expect(approvalPromptForCall(call('browser_debug', { action: 'eval', expression: 'total' }), 'auto', FRAMES, 'zh')?.summary)
+      .toBe('当前页面的 JS 调试：在暂停的调用帧里求值')
+    expect(approvalPromptForCall(call('browser_debug', {}), 'auto', FRAMES, 'en')?.summary)
+      .toBe('JavaScript debugging in the current page: control the debugger')
+
+    // The opt-in that covers `browser_eval` must not silently cover the debugger.
+    setActionTrustPolicy({ trustJsExecution: true })
+    try {
+      expect(approvalPromptForCall(call('browser_debug', { action: 'eval', expression: 'total' }), 'auto', FRAMES, 'en'))
+        .toMatchObject({ canTrust: false })
+    } finally {
+      setActionTrustPolicy({ trustJsExecution: false })
+    }
+  })
+
   it('lets origin trust cover JavaScript only by explicit opt-in', () => {
     try {
       expect(approvalPromptForCall(call('browser_eval', { expression: 'document.title' }), 'auto', FRAMES, 'en'))

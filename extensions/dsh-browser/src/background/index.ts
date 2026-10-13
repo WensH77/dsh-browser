@@ -66,6 +66,7 @@ import { FocusedWindowTracker } from './focused-window.ts'
 import { ApprovalCoordinator, type ApprovalRequestResult } from './approval-coordinator.ts'
 import { unboundNavigateDestination as resolveUnboundNavigateDestination } from './navigate-consent.ts'
 import { detachDevtoolsSession, isSessionAttached, primeSession } from './devtools.ts'
+import { jsDebugTabIds } from './js-debug.ts'
 import { visionAvailable } from './capture.ts'
 import { debugToolRefusal } from './debug-policy.ts'
 import { affinityFailureAnswer } from './affinity-copy.ts'
@@ -398,7 +399,12 @@ async function syncDevtoolsPriming(): Promise<void> {
       if (wanted.size >= MAX_PRIMED_TABS) break
     }
   }
-  for (const tabId of [...primedTabs]) {
+  // Both sets, on purpose: a tab the debug tool attached on demand is not
+  // necessarily in `primedTabs` (priming is capped at three tabs and is
+  // best-effort), so unbinding it would otherwise leave its breakpoints — and a
+  // page stopped on one — behind with no tool able to reach it. This also covers
+  // the capability being switched off, where `wanted` is empty.
+  for (const tabId of new Set([...primedTabs, ...jsDebugTabIds()])) {
     if (wanted.has(tabId)) continue
     primedTabs.delete(tabId)
     await detachDevtoolsSession(tabId).catch(() => undefined)

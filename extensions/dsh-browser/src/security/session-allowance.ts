@@ -125,6 +125,14 @@ export class SessionAllowance {
  * Response mocking rewrites what the page receives, so it is keyed apart from
  * the read paths that share the tool name — including `mockClear`, which is
  * the same rewrite power pointed at an override the user already allowed.
+ *
+ * `browser_debug` is deliberately *not* keyed per action, although one call is
+ * "list the scripts" and another is "evaluate in a paused frame". Keying it that
+ * way was tried and reverted: a debugging round is five or six calls, so the
+ * user got five or six cards in a row, each asking about the same tab — while
+ * `browser_eval` has always let one grant cover every later evaluation in the
+ * page's own context, which is the more powerful thing. The card still names the
+ * action being approved; the grant is for the debugger on this page's session.
  */
 export function scopeKeyForCall(action: string, args: Record<string, unknown>): string {
   if (action !== 'browser_network') return action
@@ -150,6 +158,10 @@ export const SESSION_SCOPABLE_ACTIONS = new Set([
   'browser_headers',
   'browser_dialog',
   'browser_eval',
+  // Debugging is a conversation, not a single call: reading a pause, looking at
+  // a frame and resuming are three calls, and each one asking again makes the
+  // feature unusable. One grant covers the whole debugger for the session.
+  'browser_debug',
   'browser_back',
   'browser_forward',
 ])

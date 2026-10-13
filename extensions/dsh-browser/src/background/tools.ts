@@ -21,6 +21,7 @@ import { CaptureError, captureTab } from './capture.ts'
 import { FOREIGN_FRAME_REFUSAL_MARK } from './debugger-session.ts'
 import { PageImageError, fetchPageImage, pageImageEnvelope, parsePageImageSource } from './page-image.ts'
 import { clearMocks, evaluateInPage, handleDialog, installMock, parseMockRule, pendingDialog, readConsole, readNetwork } from './devtools.ts'
+import { jsDebugAnswer, pausedAtBreakpoint } from './js-debug.ts'
 import { addBlockRule, addHeaderRule, clearTabRules, listTabRules, parseHeaderChanges } from './net-rules.ts'
 import { wrapUntrustedContent, wrapUntrustedResult } from '../security/untrusted.ts'
 import { recordDebugEvent } from './debug-log.ts'
@@ -80,7 +81,9 @@ const NAVIGATION_CANDIDATE_TOOLS = new Set([
  * by the browser process instead — the console and network buffers come from
  * CDP events, and block/headers rules are declarativeNetRequest — so they stay
  * usable. `browser_dialog` is the way out and must never be refused by this
- * guard. Everything else is refused early with the dialog quoted back.
+ * guard. Everything else is refused early with the dialog quoted back —
+ * including `browser_debug`: while a dialog holds the renderer, the answer is to
+ * close it, and debugger commands would only queue behind the dialog.
  */
 const DIALOG_SAFE_TOOLS = new Set([
   'browser_dialog',
@@ -89,6 +92,31 @@ const DIALOG_SAFE_TOOLS = new Set([
   'browser_block',
   'browser_headers',
 ])
+/**
+ * Tools that still answer while a breakpoint has the renderer stopped.
+ *
+ * A `Debugger.paused` page is frozen exactly like a dialog-frozen one, but
+ * nothing in the page says so: a content-script call would sit there until the
+ * per-call budget ran out. The tools below are answered by the browser process
+ * or from the background's own buffers, and `browser_debug` is how the page gets
+ * moving again, so this guard must never refuse it.
+ */
+const PAUSED_SAFE_TOOLS = new Set([
+  'browser_debug',
+  'browser_dialog',
+  'browser_console',
+  'browser_network',
+  'browser_block',
+  'browser_headers',
+])
+/**
+ * `browser_debug` actions whose answer carries page-derived data.
+ *
+ * Kept here rather than in the handler because it decides a consent question:
+ * with page-content sharing off these are refused up front, while the actions
+ * that only move the debugger keep working.
+ */
+const DEBUG_READ_ACTIONS = new Set(['scripts', 'break', 'wait', 'eval', 'list', 'unbreak'])
 const NAVIGATION_SNAPSHOT_GUIDANCE = 'Navigation completed and the current page snapshot is included below. Use it directly instead of taking an immediate duplicate snapshot.'
 /**
  * Budget for the snapshot a navigation attaches automatically.
@@ -190,6 +218,26 @@ function dialogHoldFailure(dialog: { message: string; type: string }): ToolAnswe
     `A JavaScript ${dialog.type} is open on this page, which freezes it until it is answered, so this call did not run.`
     + `${quoteDialogMessage(dialog.message)} `
     + 'Answer it with browser_dialog (action "accept" or "dismiss"; a prompt also takes "text") — that goes over CDP and works while the page is frozen.',
+  )
+}
+
+/**
+ * Refuse a page-facing call while a breakpoint has the renderer stopped.
+ *
+ * Same freeze as a dialog, different cause and different way out: the page will
+ * not run again until the debugger resumes it. Refusing here — before the
+ * approval prompt — is what keeps the model from spending a whole call on a
+ * hang it cannot see the reason for.
+ */
+function jsPausedFailure(pause: string | undefined): ToolAnswer {
+  const where = pause === undefined
+    ? 'stopped at a JavaScript breakpoint (its location is withheld: page content sharing is off)'
+    : pause
+  return unavailable(
+    `The controlled tab is ${where} — a JavaScript breakpoint stopped it, so page JavaScript (and therefore this call) cannot run. `
+    + 'Call browser_debug with action "wait" to read the pause (or "eval" to inspect a frame), then action "resume" (or "step"). '
+    + 'browser_debug needs its own approval, and nothing on the page runs until it is answered. '
+    + 'browser_console and browser_network still read their buffers.',
   )
 }
 
@@ -745,6 +793,7 @@ async function dispatchOnce(
   }
   if (call.name === 'browser_eval') return wrapPageAnswer(await withForeignFrameRetry(tabId, () => evaluateInPage(tabId, call.args, budget.maxChars)), budget.maxChars)
   if (call.name === 'browser_dialog') return wrapPageAnswer(await withForeignFrameRetry(tabId, () => handleDialog(tabId, call.args)), budget.maxChars)
+  if (call.name === 'browser_debug') return wrapPageAnswer(await withForeignFrameRetry(tabId, () => jsDebugAnswer(tabId, call.args, budget.maxChars)), budget.maxChars)
   if (call.name === 'browser_block') return netRuleAnswer(tabId, call, 'block')
   if (call.name === 'browser_headers') return netRuleAnswer(tabId, call, 'headers')
 
@@ -856,6 +905,17 @@ export async function dispatchToolCall(
       || call.name === 'browser_dom_query' || call.name === 'browser_image')) {
     return { ok: false, error: { code: 'action-failed', message: 'Page content sharing is disabled in Settings > Page content sharing.' } }
   }
+  // `browser_debug` is the one tool that both reads page-derived data (script
+  // URLs, variable values) and is the only way to unfreeze a page stopped at a
+  // breakpoint. The control-only actions therefore stay available with sharing
+  // off — refusing them would leave a frozen page with no way back — while the
+  // ones that carry page-derived text are refused like any other read.
+  if (sharePageContent === 'off' && call.name === 'browser_debug' && DEBUG_READ_ACTIONS.has(String(call.args.action))) {
+    // `list` and `unbreak` are in here because their answers quote breakpoint
+    // labels, and a label is a page URL. What stays is what releases a frozen
+    // page: resume, pause, and step carry no page data either way.
+    return { ok: false, error: { code: 'action-failed', message: 'Page content sharing is disabled in Settings > Page content sharing, and this browser_debug action reports page-derived data (script urls, variables, or breakpoint labels). The control actions (resume, pause, step) still work, including to release a page stopped at a breakpoint.' } }
+  }
   const tab = targetTab ?? (await chrome.tabs.query({ active: true, lastFocusedWindow: true }))[0]
   if (isCancelled(call, signal)) return cancelled()
   if (tab?.id === undefined) {
@@ -869,6 +929,14 @@ export async function dispatchToolCall(
   if (!DIALOG_SAFE_TOOLS.has(call.name)) {
     const dialog = pendingDialog(tab.id)
     if (dialog !== undefined) return dialogHoldFailure(dialog)
+  }
+  // Same reasoning one level down: a page stopped at a breakpoint is frozen for
+  // every content-script tool, and the model's only way out is `browser_debug`.
+  if (!PAUSED_SAFE_TOOLS.has(call.name)) {
+    const pause = pausedAtBreakpoint(tab.id)
+    // The pause description is a script URL with line:column, so it is withheld
+    // under the same setting that keeps other page content from leaving.
+    if (pause !== undefined) return jsPausedFailure(sharePageContent === 'off' ? undefined : pause)
   }
   const effectiveBudget = budget ?? { maxItems: 60, maxChars: DEFAULT_SNAPSHOT_MAX_CHARS }
   const frames = await listTabFrames(tab.id, tab.url)

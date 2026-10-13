@@ -15,7 +15,7 @@ const PAGE_READS = new Set([
   'browser_dom_query',
 ])
 /** Actions whose blast radius is not bounded by "one origin", so they never trust-skip. */
-const UNTRUSTABLE_ACTIONS = new Set(['browser_eval', 'browser_headers', 'browser_dialog'])
+const UNTRUSTABLE_ACTIONS = new Set(['browser_eval', 'browser_headers', 'browser_dialog', 'browser_debug'])
 const STATE_CHANGING_ACTIONS = new Set([
   'browser_click',
   'browser_type',
@@ -142,11 +142,19 @@ export function approvalPromptForCall(
               `Answer the page's JavaScript dialog (${call.args.action === 'accept' ? 'accept' : 'dismiss'})`,
               `回应页面的 JS 弹窗（${call.args.action === 'accept' ? '确认' : '取消'}）`,
             )
-          : localized(
-            locale,
-            `Rewrite request/response headers for ${safeInline(typeof call.args.pattern === 'string' ? call.args.pattern : '')}`,
-            `改写匹配 ${safeInline(typeof call.args.pattern === 'string' ? call.args.pattern : '')} 的请求/响应头`,
-          ),
+          : call.name === 'browser_debug'
+            // The debugger stops the page's own JavaScript, and `eval` runs code
+            // inside it, so the card says which of those this call is.
+            ? localized(
+                locale,
+                `JavaScript debugging in the current page: ${debugActionSummary(call.args.action, locale)}`,
+                `当前页面的 JS 调试：${debugActionSummary(call.args.action, locale)}`,
+              )
+            : localized(
+              locale,
+              `Rewrite request/response headers for ${safeInline(typeof call.args.pattern === 'string' ? call.args.pattern : '')}`,
+              `改写匹配 ${safeInline(typeof call.args.pattern === 'string' ? call.args.pattern : '')} 的请求/响应头`,
+            ),
       origins: uniqueOrigins(targets, frames),
       // Header rewriting can exfiltrate or reshape what the page loads, so it is
       // never trust-skipped; JS execution joins trust only by explicit opt-in.
@@ -188,6 +196,28 @@ export function approvalPromptForCall(
 
 function requestedFrame(args: Record<string, unknown>): number {
   return typeof args.frame === 'number' && Number.isInteger(args.frame) && args.frame >= 0 ? args.frame : 0
+}
+
+/**
+ * What one `browser_debug` call will do, in the user's language.
+ *
+ * The card is the only place a person sees this tool: "control JavaScript
+ * debugging" alone would ask them to approve a pause as readily as an
+ * expression evaluated inside the page's own frame.
+ */
+function debugActionSummary(action: unknown, locale: UiLocale): string {
+  switch (typeof action === 'string' ? action : '') {
+    case 'scripts': return localized(locale, 'list the page scripts', '列出页面脚本')
+    case 'break': return localized(locale, 'set a breakpoint', '设置断点')
+    case 'unbreak': return localized(locale, 'remove a breakpoint', '移除断点')
+    case 'list': return localized(locale, 'list the breakpoints', '列出断点')
+    case 'pause': return localized(locale, 'pause the page', '暂停页面')
+    case 'resume': return localized(locale, 'resume the page', '恢复页面运行')
+    case 'step': return localized(locale, 'step one statement', '单步执行一条语句')
+    case 'wait': return localized(locale, 'read the pause, including frame variables', '读取暂停现场（含调用帧变量）')
+    case 'eval': return localized(locale, 'evaluate an expression in the paused frame', '在暂停的调用帧里求值')
+    default: return localized(locale, 'control the debugger', '控制调试器')
+  }
 }
 
 function uniqueOrigins(targets: TabFrame[], allFrames: TabFrame[]): string[] {

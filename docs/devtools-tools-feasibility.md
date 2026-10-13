@@ -1,6 +1,6 @@
 # 调研：给 dsh-browser 追加 DevTools 类工具
 
-> 状态：**调研完成；§0 的能力已实施**（视觉 2026-09-15，控制台 / 网络 / 执行 JS / 弹窗 2026-09-16，见 §0）。仍未做：`Debugger` 域的**断点与单步**。范围：能否在现有 `dsh-browser`（host 插件 + Chrome/Firefox 扩展）里加「控制台 / 网络 / 执行 JS / 断点 / 截图」这类 DevTools 能力，以及分几步做、每步的硬约束。
+> 状态：**调研完成；§0 的能力已实施**（视觉 2026-09-15，控制台 / 网络 / 执行 JS / 弹窗 2026-09-16，断点 / 单步 2026-10-13，见 §0）。DevTools 类能力已全部落地。范围：能否在现有 `dsh-browser`（host 插件 + Chrome/Firefox 扩展）里加「控制台 / 网络 / 执行 JS / 断点 / 截图」这类 DevTools 能力，以及分几步做、每步的硬约束。
 
 ## 0. 实施记录：视觉（截图）已落地
 
@@ -24,7 +24,7 @@
 - 审批：`browser_console`/`browser_network` 属页面读取（受 `sharePageContent` 约束）；`browser_eval`、`browser_headers`、`browser_network` 的 mock 变体**永不信任跳过**；`browser_block` 可按 origin 信任。日志、URL、求值结果一律过 `wrapUntrustedContent`。
 - 生命周期：会话与规则都绑定受控标签页，标签页关闭时一起清理。
 
-未做：`browser_debug`（断点/单步），已记为待办。
+未做：无。`browser_debug`（断点/单步）已于 2026-10-13 落地，见下方 §0.2。
 
 ## 0.1 网络拦截/改写能力核对（2026-09-15，官方文档 + CDP 协议）
 
@@ -47,6 +47,26 @@
 - CDP 侧的代价与截图相同：`debugger` 权限、attach 期间与 DevTools 互斥。
 
 内容脚本近似（MAIN world 包装 `fetch`/`XHR`）只覆盖走 fetch/XHR 的请求：`<script src>`、`<img>`、`<link>`、导航、WebSocket/EventSource/sendBeacon、`document_start` 之前已发出的请求、Service Worker 发出的请求都做不到。所以「真的 block」和「真的替换」都不该走这条路。
+
+## 0.2 实施记录：`browser_debug`（断点 / 单步，2026-10-13）
+
+按 §4.2 的映射落地，一个工具九个动作：`scripts`（已解析脚本清单）、`break`（行断点 `url`/`urlRegex` + 0 基 `lineNumber` + 可选 `condition`；`kind: "xhr"` 走 `Debugger.setXHRBreakpoint`）、`unbreak`（单条或 `all`）、`list`、`pause`/`resume`/`step`、`wait`（暂停环形缓冲 + cursor，读时按需取栈顶帧变量）、`eval`（`Debugger.evaluateOnCallFrame`）。
+
+- `Debugger` 域加进 `debugger-session.ts` 的 `DebuggerDomains`，但**不参与预热**：只有模型真的调 `browser_debug` 才 enable（它会让 V8 为后续每个脚本收集脚本事件与单步元数据）。会话仍是那一个共享的 per-tab attach。
+- 事件不挂在 devtools 的 console/network 路由器上，而是 `js-debug.ts` 自己装 `chrome.debugger.onEvent`：那个路由器会丢掉"没有缓冲记录"的标签页的事件，而暂停必须对派发器可见——即使这个标签页从没预热过。
+- **暂停也是一种冻结**，与弹窗同级。`pausedAtBreakpoint` 让 `dispatchToolCall` 在取审批之前就拒掉页面类工具（`PAUSED_SAFE_TOOLS` 之外的），并点名 `browser_debug { action: "resume" }`。与弹窗一致：拒绝文案带暂停位置，console/network 缓冲照常可读。
+- 生命周期：`dropJsDebug`（resume + `Debugger.disable`，清断点）在标签页关闭、解绑、以及**关掉调试开关**时执行——后者尤其重要，开关关掉后 `browser_debug` 会被 `debugToolRefusal` 拒掉，留下的断点就没有任何工具能解开。Chrome 侧 detach 走模块自己的 `onDetach` 监听，只清内存。
+- 工具集级别：`TOOLSET_JS_DEBUG = 7`（`BRIDGE_TOOLSET` 6 → 7）。调试工具原本只看 `caps.debugger` 注册，而 `browser_debug` 是唯一一个旧构建没有对应 wire case 的动作，所以注册条件改为"调试能力 ∧ 级别 ≥ 7"；`setClientToolset` 在级别变化时同步这道交集。
+- 审批：归入 `UNTRUSTABLE_ACTIONS`（与 `browser_eval` / `browser_headers` / `browser_dialog` 同级），每次单独审批、`canTrust: false`——`trustJsExecution` 不覆盖调试器；审批卡按动作给出中文/英文摘要（"在暂停的调用帧里求值" ≠ "恢复页面运行"）。
+- 隐私：`sharePageContent: 'off'` 下拒掉会带回页面数据的动作（`scripts`/`break`/`wait`/`eval`），但保留纯控制动作（`pause`/`resume`/`step`/`list`/`unbreak`）——全部拒掉会让停在断点上的页面无路可走。
+- 已知边界：暂停期间任何内容脚本工具都会挂到调用上限；`eval` 不支持 await（`Debugger.evaluateOnCallFrame` 协议上没有该参数，promise 只能作为对象返回）；`Debugger.paused` 的调用帧 id 只在"当前这次暂停"有效，旧条目按 stale 渲染。
+- **真机冒烟结果（2026-10-13，本机 Chrome + 本地测试页 `http://127.0.0.1:8731`）**：已实测通过 `scripts`、`break`（唯一子串解析到真实 URL、返回已绑定位置）、`break {kind:"xhr"}`（暂停 `reason` 为 `XHR`，停在 fetch 之前）、`wait`（调用帧 + 栈顶帧局部/闭包/全局变量、`nextCursor` 分页、旧暂停标 stale）、`eval`（`input + 1` → 30）、`step over`（`reason step`，停到下一行且 `doubled` 已赋值）、`pause`、`list`、`unbreak {all:true}`、`resume`、暂停期间页面类工具被拒并带暂停位置、以及**关掉调试开关后页面立刻恢复**（`resume` + `Debugger.disable`，页面工具随即正常）。
+- 真机冒烟（2026-10-13）修正两处只有真机才暴露的问题：XHR/fetch 断点走 `DOMDebugger.setXHRBreakpoint`（`Debugger` 域没有这个方法，实测返回 `-32601`）；`Debugger.CallFrame.url` 会为空，帧的 URL 改用 `location.scriptId` 回查脚本清单。`Debugger.pause` 还可能停在别的扩展注入的脚本里（实测），要精确请用 `break`。
+- **未验证 / 有意保守的地方**（2026-10-13 复核后确认，都不是"忘了做"）：
+  1. **worker 重启会丢暂停记录，但 attach 可能还在**。`debugger-session.ts` 的 `attach-reused` 分支承认 attach 能跨 worker 重启存活，而本模块的 scripts/pauses/breakpoints 全在内存里；真发生这种组合时页面仍被暂停、而 `pausedAtBreakpoint` 已返回 undefined，守卫要到下一次 `browser_debug` 调用重新 enable 域时才可能自愈（`Debugger.enable` 对已暂停目标是否重发 `Debugger.paused`，需真机 MV3 重启才能确认）。仓库里 `debug-log.ts` 与 `debugger-session.ts` 两条注释对"重启是否带走 attach"说法相反，本机无法判定。缓解：`detachDevtoolsSession` 现在无条件走 `releaseDebuggerDomain`，即便内存记录已丢也会发一次 `Debugger.disable`（它会连带清断点、放开暂停）。
+  2. **暂停期间 `browser_capture` / `browser_snapshot` 被拒**。它们走 CDP，理论上可能拍得到暂停画面（DevTools 就能），但未实测；保守起见按"冻结"处理，拒绝文案带暂停位置。
+  3. **弹窗在时 `browser_debug` 也被拒**（不在 `DIALOG_SAFE_TOOLS`）：那会儿该先答弹窗，且 Debugger 命令只会排在弹窗后面。
+  4. **共享的 `pageBufferText` 只统计被 `maxChars` 挤掉的行**，不统计被 `limit` 跳过的条目；被截断的一页仍会把 `nextCursor` 推到"已选中的最后一条"，因此按打印出来的 cursor 翻页可能跳过没印出来的条目（`browser_console` / `browser_network` 一直如此，本次未改）。
 
 ## 1. 结论
 
@@ -137,7 +157,7 @@ enable 之前的历史日志拿不到；worker 内部日志拿不到；跨域 if
 | `browser_console` | `Runtime.enable` + `Log.enable`，缓冲 `Runtime.consoleAPICalled` / `Log.entryAdded` |
 | `browser_network` | `Network.enable`，缓冲 request/response/failed；正文按需 `Network.getResponseBody` |
 | `browser_screenshot` | `Page.captureScreenshot` → attachment |
-| 断点/单步（可选） | `Debugger.enable` / `setBreakpointByUrl` / `paused` / `evaluateOnCallFrame` |
+| 断点/单步（已落地） | `Debugger.enable` / `setBreakpointByUrl` / `setXHRBreakpoint` / `paused` / `evaluateOnCallFrame` |
 
 ### 4.3 与路线 A 的合并方式
 

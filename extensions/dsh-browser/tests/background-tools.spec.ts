@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { dispatchToolCall, frameArgumentInvalid, frameMissingFailure, invalidationReason, type ToolAnswer, type ToolCall } from '../src/background/tools.ts'
+import { recordJsDebugEvent, resetJsDebugForTest } from '../src/background/js-debug.ts'
 import type { TabFrame } from '../src/background/frames.ts'
 
 const CALL: ToolCall = { id: 'tool-1', name: 'browser_snapshot', args: {} }
@@ -905,6 +906,95 @@ describe('dispatchToolCall', () => {
     const answer = await dispatchToolCall({ id: 'shot-conflict', name: 'browser_capture', args: {} }, 'auto')
 
     expect(answer).toMatchObject({ ok: false, error: { code: 'action-failed', message: expect.stringContaining('Close DevTools') } })
+  })
+})
+
+describe('browser_debug dispatch', () => {
+  const pauseEvent = { reason: 'other', callFrames: [{ callFrameId: 'f0', functionName: 'go', url: 'https://app.example/app.js', location: { lineNumber: 12, columnNumber: 0 } }] }
+
+  afterEach(() => {
+    resetJsDebugForTest()
+  })
+
+  const authorize = vi.fn(async () => 'approved' as const)
+
+  it('answers a breakpoint listing from the CDP session, not the page', async () => {
+    const debuggerApi = mockDebuggerApi()
+    const chromeMock = mockChrome({ tab: { id: 71, url: 'https://app.example/' }, debugger: debuggerApi })
+
+    const answer = await dispatchToolCall({ id: 'debug-list', name: 'browser_debug', args: { action: 'list' } }, 'auto', undefined, authorize)
+
+    expect(answer.ok).toBe(true)
+    expect((answer.result as { text: string }).text).toContain('Breakpoints (page is running)')
+    expect(debuggerApi.sendCommand).toHaveBeenCalledWith({ tabId: 71 }, 'Debugger.enable')
+    expect(chromeMock.sendMessage).not.toHaveBeenCalled()
+  })
+
+  it('refuses page-facing tools while a breakpoint holds the renderer, and names the way out', async () => {
+    const debuggerApi = mockDebuggerApi()
+    const chromeMock = mockChrome({ tab: { id: 72, url: 'https://app.example/' }, debugger: debuggerApi })
+    recordJsDebugEvent(72, 'Debugger.paused', pauseEvent)
+
+    const blocked = await dispatchToolCall({ id: 'snap-while-paused', name: 'browser_snapshot', args: {} }, 'auto', undefined, authorize)
+
+    expect(blocked).toMatchObject({
+      ok: false,
+      error: { code: 'content-unavailable', message: expect.stringContaining('browser_debug with action "wait"') },
+    })
+    expect((blocked.error as { message: string }).message).toContain('https://app.example/app.js:12:0')
+    // Refused before any approval prompt and before the content script.
+    expect(chromeMock.sendMessage).not.toHaveBeenCalled()
+
+    // The tool that releases the page is never the one refused, and the console
+    // buffer keeps answering because it comes from the browser process.
+    const read = await dispatchToolCall({ id: 'debug-while-paused', name: 'browser_debug', args: { action: 'wait' } }, 'auto', undefined, authorize)
+    expect(read.ok).toBe(true)
+    expect((read.result as { text: string }).text).toContain('page is paused at https://app.example/app.js:12:0')
+
+    const resumed = await dispatchToolCall({ id: 'debug-resume', name: 'browser_debug', args: { action: 'resume' } }, 'auto', undefined, authorize)
+    expect(resumed.ok).toBe(true)
+    expect(debuggerApi.sendCommand).toHaveBeenCalledWith({ tabId: 72 }, 'Debugger.resume')
+
+    // Chrome tells us it resumed; the guard lifts from there.
+    recordJsDebugEvent(72, 'Debugger.resumed', {})
+    const after = await dispatchToolCall({ id: 'snap-after', name: 'browser_snapshot', args: {} }, 'auto', undefined, authorize)
+    expect(after.ok).toBe(true)
+  })
+
+  it('hides the pause location and the breakpoint list when page sharing is off', async () => {
+    const debuggerApi = mockDebuggerApi()
+    mockChrome({ tab: { id: 74, url: 'https://app.example/' }, debugger: debuggerApi })
+    recordJsDebugEvent(74, 'Debugger.paused', pauseEvent)
+
+    // The refusal a page tool gets quotes the pause; with sharing off it must
+    // not be the script URL that leaves the page. `browser_wait` is the probe
+    // because it is neither in the sharing-off name list nor approval-gated, so
+    // the pause guard is what answers it.
+    const blocked = await dispatchToolCall({ id: 'wait-paused-off', name: 'browser_wait', args: {} }, 'off', undefined, authorize)
+    expect(blocked).toMatchObject({ ok: false, error: { code: 'content-unavailable' } })
+    expect((blocked.error as { message: string }).message).toContain('location is withheld')
+    expect((blocked.error as { message: string }).message).not.toContain('app.js')
+
+    // `list` echoes breakpoint labels, which are page URLs.
+    const listed = await dispatchToolCall({ id: 'debug-list-off', name: 'browser_debug', args: { action: 'list' } }, 'off', undefined, authorize)
+    expect(listed).toMatchObject({ ok: false, error: { message: expect.stringContaining('sharing is disabled') } })
+
+    // Releasing the frozen page still works: it carries no page data.
+    const resumed = await dispatchToolCall({ id: 'debug-resume-paused-off', name: 'browser_debug', args: { action: 'resume' } }, 'off', undefined, authorize)
+    expect(resumed.ok).toBe(true)
+  })
+
+  it('keeps the control actions available with page content sharing off, and refuses the reads', async () => {
+    const debuggerApi = mockDebuggerApi()
+    mockChrome({ tab: { id: 73, url: 'https://app.example/' }, debugger: debuggerApi })
+
+    const read = await dispatchToolCall({ id: 'debug-wait-off', name: 'browser_debug', args: { action: 'wait' } }, 'off', undefined, authorize)
+    expect(read).toMatchObject({ ok: false, error: { message: expect.stringContaining('sharing is disabled') } })
+
+    // Refusing every action would leave a page stopped at a breakpoint with no
+    // way back, so the control-only ones stay.
+    const control = await dispatchToolCall({ id: 'debug-resume-off', name: 'browser_debug', args: { action: 'resume' } }, 'off', undefined, authorize)
+    expect(control.ok).toBe(true)
   })
 })
 

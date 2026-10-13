@@ -21,6 +21,21 @@ describe('SessionAllowance', () => {
     expect(allowances.allows('session-a', 'browser_dialog')).toBe(false)
   })
 
+  it('covers every debugging action with one grant, unlike the network mock', () => {
+    // Keying this per action was tried and reverted: a debugging round is five
+    // or six calls, so the user got a card per call about the same tab. The card
+    // still names the action; the grant is for the debugger on this session.
+    const allowances = new SessionAllowance()
+    expect(scopeKeyForCall('browser_debug', { action: 'resume' })).toBe('browser_debug')
+
+    allowances.remember('session-a', 'browser_debug', 'browser_debug')
+    expect(allowances.allows('session-a', scopeKeyForCall('browser_debug', { action: 'resume' }))).toBe(true)
+    expect(allowances.allows('session-a', scopeKeyForCall('browser_debug', { action: 'eval' }))).toBe(true)
+    // Still separate from the other debugging tools.
+    expect(allowances.allows('session-a', scopeKeyForCall('browser_eval', {}))).toBe(false)
+    expect(isSessionScopableAction('browser_debug')).toBe(true)
+  })
+
   it('separates response mocking from reading the same tool', () => {
     const allowances = new SessionAllowance()
     const mock = scopeKeyForCall('browser_network', { mock: { pattern: '*/api/*' } })
@@ -151,7 +166,7 @@ describe('allowsSessionScope', () => {
   })
 
   it('lists the actions that may hold a session grant', () => {
-    for (const action of ['browser_network', 'browser_headers', 'browser_dialog', 'browser_eval', 'browser_back', 'browser_forward']) {
+    for (const action of ['browser_network', 'browser_headers', 'browser_dialog', 'browser_eval', 'browser_debug', 'browser_back', 'browser_forward']) {
       expect(isSessionScopableAction(action), action).toBe(true)
     }
     for (const action of ['browser_navigate', 'browser_click', 'browser_console', 'browser_snapshot', 'gdrive.fetch']) {
