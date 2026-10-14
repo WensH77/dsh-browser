@@ -323,7 +323,7 @@ require_command pnpm "未找到 pnpm；请先启用 Corepack 或安装 pnpm。" 
 require_command node "未找到 Node.js；请先安装受支持的 Node.js 版本。" "Node.js was not found; install a supported Node.js version first."
 require_command rsync "未找到 rsync；请先安装 rsync。" "rsync was not found; install rsync first."
 
-print_step 1 "构建 Chrome 扩展与浏览器桥" "Build the Chrome extension and the browser bridge"
+print_step 1 "构建 Chrome 扩展与浏览器桥接" "Build the Chrome extension and the browser bridge"
 (cd "$ROOT" && pnpm install --frozen-lockfile >/dev/null 2>&1)
 # The extension is built first so the bridge package can copy the fresh dist into
 # itself (`scripts/copy-extension.mjs`, part of its build): the other order leaves

@@ -30,6 +30,16 @@ export interface RecentOp {
   endedAt?: number
   /** Element the action actually resolved, reported by the page at execution time. */
   label?: string
+  /**
+   * The read succeeded and found nothing.
+   *
+   * `browser_dom_query` with no matching element, or `browser_get_text` whose
+   * selector or `find` phrase was absent: `state` is still `done` and the dot
+   * stays green, because the call did not fail. The answer simply carries no
+   * content, which looks identical in the feed to a read that returned some —
+   * hence a field of its own. Never set on a failure.
+   */
+  noMatch?: boolean
 }
 
 /** What the status side panel shows as the currently controlled page. */

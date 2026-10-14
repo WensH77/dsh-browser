@@ -8,7 +8,7 @@
 
 - `BridgeCaps` 的 `textOnly` 双向兼容标记已于 2026-09-16 删除，改为 `proto`（握手版本，缺失即旧构建）+ `toolset`（扩展能力级别，缺失即 0），调试能力由 `debugger` 声明；`isCaps` 仍接受老扩展只报预算的 hello，宿主按 `toolset` 裁剪工具面（见[决策记录](pure-tool-bridge-decisions.md)）。
 - `browser_snapshot` 默认附带**同一时刻**的截图，`visual: false` 可关；`browser_capture` 新增，参数 `fullPage` / `format` / `quality`。
-- 扩展侧 `src/background/capture.ts`：`chrome.debugger` 临时 attach → `Page.getLayoutMetrics` → `Page.captureScreenshot`（CSS 像素 clip，支持 `captureBeyondViewport`）→ 按宿主 `imageLimits` 缩放/降质 → `finally` detach。字节只走内存 + base64 过桥，扩展不落盘。
+- 扩展侧 `src/background/capture.ts`：`chrome.debugger` 临时 attach → `Page.getLayoutMetrics` → `Page.captureScreenshot`（CSS 像素 clip，支持 `captureBeyondViewport`）→ 按宿主 `imageLimits` 缩放/降质 → `finally` detach。字节只走内存 + base64 经桥接，扩展不落盘。
 - host 侧：图片经 attachment 服务 `saveImage` 变成 image block，渲染时先给一条 untrusted 提示再附图；路由不声明图片输入时降级为纯文本并说明原因。
 - 权限：Chrome manifest 加 `debugger`（安装警告 "Access the page debugger backend"）；Firefox 不加，报 unsupported。截图归入页面读取审批（`PAGE_READS`），受 `sharePageContent` 策略与 blocked origins 约束。
 - 测试：host 68、扩展 129 全绿（含 `tests/capture.spec.ts`、截图派发/降级/DevTools 冲突用例）。
@@ -168,7 +168,7 @@ enable 之前的历史日志拿不到；worker 内部日志拿不到；跨域 if
 生态里已有现成实现，能力面比我们要做的更宽：
 
 - [xiaobai2017666/dsh-chrome-cdp](https://github.com/xiaobai2017666/dsh-chrome-cdp)：11 个工具（`chrome_evaluate/console/network/debug/breakpoint/screenshot/click/type/list_targets/navigate/cdp`），`chrome-remote-interface` 直连，端点不通时自己拉起独立 profile 的 Chrome。1★，最后 push 2026-09-09，README 有三节正文缺失。
-- [caob23/dsh-browser-control](https://github.com/caob23/dsh-browser-control)：MV3 扩展用 `chrome.debugger` 外连本地桥（与本仓库同构），工具含 `browser_evaluate/screenshot/console_log/network_log/pdf/emulate`。14★，AGPL-3.0。**它证明了「MV3 扩展 + chrome.debugger」这条路在实践上可行**。
+- [caob23/dsh-browser-control](https://github.com/caob23/dsh-browser-control)：MV3 扩展用 `chrome.debugger` 外连本地桥接（与本仓库同构），工具含 `browser_evaluate/screenshot/console_log/network_log/pdf/emulate`。14★，AGPL-3.0。**它证明了「MV3 扩展 + chrome.debugger」这条路在实践上可行**。
 - [lirui1024k/dsh-browser-ops](https://github.com/lirui1024k/dsh-browser-ops)（27 工具，含 `browser_diagnostics`）、[try-works/dsh-browser-agent](https://github.com/try-works/dsh-browser-agent)、[Viger1/dsh-preview](https://github.com/Viger1/dsh-preview)、[guo6x/dsh-shipcheck](https://github.com/guo6x/dsh-shipcheck) 也各自带 `evaluate`/`screenshot`/诊断工具。
 - 对照：[Lum1104/dsh-browser](https://github.com/Lum1104/dsh-browser)（659★，同源路线）明确保持纯文本、不做截图。
 
@@ -218,7 +218,7 @@ tool result 支持 image block：`dsh-llm/lib/types/types.d.ts` 里 `ContentBloc
 
 ## 9. 工作量粗估
 
-- 路线 A（3 个工具 + 审批 + options + 测试）：中等。主要是 MAIN world 注入与消息桥、参数序列化、`webRequest` 缓冲、CSP 边界处理。
+- 路线 A（3 个工具 + 审批 + options + 测试）：中等。主要是 MAIN world 注入与消息桥接、参数序列化、`webRequest` 缓冲、CSP 边界处理。
 - 路线 B（CDP 通道 + 缓冲 + 重连 + caps 协商 + 截图 attachment）：大。风险集中在 DevTools 撞车、黄条体验与截图链路的模型能力前提。
 - 复用外部插件：0 代码，代价是另起 Chrome、丢登录态。
 

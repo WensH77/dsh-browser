@@ -15,6 +15,13 @@ import { isSensitiveField, maskValue } from './privacy.ts'
 import type { ElementIds } from './ids.ts'
 import type { SnapshotBudget } from './snapshot.ts'
 import { buildSnapshot, renderSnapshot, uniqueSelector } from './snapshot.ts'
+import {
+  TEXT_SEARCH_SCOPE_WHOLE_PAGE,
+  domQueryMissAnswer,
+  getTextNoElementAnswer,
+  selectorScope,
+  textSearchMissAnswer,
+} from '../shared/empty-answer.ts'
 
 /** A settled action result. */
 /** Where the page keeps a picture, for the background to fetch and hand to vision. */
@@ -929,7 +936,7 @@ function domQueryAction(args: Record<string, unknown>): ActionResult {
     throw new ActionError('bad-args', `selector is not valid CSS: ${selector}`)
   }
   if (matches.length === 0) {
-    return { text: `dom query: 0 matches for "${selector}" in this frame.` }
+    return { text: domQueryMissAnswer(selector) }
   }
 
   const value = (element: Element, field: string): string | undefined => {
@@ -1331,8 +1338,8 @@ async function slidesOpenPageAction(args: Record<string, unknown>): Promise<Acti
 async function getTextAction(args: Record<string, unknown>, ctx: ActionContext): Promise<ActionResult> {
   const selector = typeof args.selector === 'string' && args.selector !== '' ? args.selector : undefined
   const source = selector !== undefined ? document.querySelector(selector) : null
-  const text = source !== null ? pageText(source) : selector !== undefined ? `No element matched selector: ${selector}` : pageText()
-  const scope = selector === undefined ? 'the whole page' : `selector "${selector}"`
+  const text = source !== null ? pageText(source) : selector !== undefined ? getTextNoElementAnswer(selector) : pageText()
+  const scope = selector === undefined ? TEXT_SEARCH_SCOPE_WHOLE_PAGE : selectorScope(selector)
   const find = typeof args.find === 'string' ? args.find.trim() : ''
   // The ceiling is the negotiated tab budget, not a fixed 8000: a caller asking
   // for 20000 used to get 8000 back with no way to tell. `maxChars` shrinks the
@@ -1375,7 +1382,7 @@ function findInText(text: string, needle: string, scope: string, args: Record<st
     if (offsets.length >= FIND_MATCH_LIMIT) break
   }
   if (offsets.length === 0) {
-    return `text search: no match for "${needle}" in ${scope} (case-insensitive, ${text.length} characters searched).`
+    return textSearchMissAnswer(needle, scope, text.length)
   }
 
   const budget = optionalCharsBudget(args, ceiling)

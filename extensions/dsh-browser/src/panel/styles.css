@@ -16,6 +16,13 @@
 
 html, body { margin: 0; height: 100%; }
 
+/* The React mount point is `.panel`'s parent, so it has to carry the height too:
+   `height: 100%` resolves against the parent, and with `#root` left at `auto` the
+   panel collapsed to its content height. The footer then sat directly under the feed
+   with the rest of the window empty below it, which is what "the status never sinks"
+   looked like -- and the `.panel { height: 100% }` above was already correct. */
+#root { height: 100%; }
+
 body {
   background: var(--bg);
   color: var(--fg);
@@ -65,7 +72,7 @@ body {
 /* `min-height: 0` is what lets this shrink: a flex item defaults to
    `min-height: auto`, so without it the body refuses to go below its content
    and pushes everything above it out of the panel instead of scrolling. */
-.panel__body { flex: 1; min-height: 0; overflow: auto; }
+.panel__body { flex: 1; min-height: 0; overflow: auto; display: flex; flex-direction: column; }
 
 /* Handshake mismatch: the only thing the user can act on, kept above the feed. */
 .panel__notice {
@@ -112,7 +119,13 @@ body {
   gap: 8px;
   border-top: 1px solid rgba(128, 128, 128, 0.25);
   padding-top: 8px;
+  margin-top: 8px;
 }
+
+/* The operating status sits between the scrolling body and the footer, outside the
+   scroll area: as the last item inside it, a long operation feed scrolled it out of
+   view, and with a short feed it floated up under the list. */
+.panel__status { padding-top: 8px; }
 
 button {
   font-family: inherit;
@@ -203,9 +216,12 @@ button {
   line-height: 1.5;
 }
 /*.ops start*/
-.ops { margin-bottom: 16px; }
+/* The feed takes whatever height is left above the status strip and scrolls inside it.
+   A fixed `max-height` (42vh) left the bottom half of the panel empty whenever the
+   list was longer than the cap, which is the opposite of using the room it has. */
+.ops { margin-bottom: 16px; display: flex; flex-direction: column; min-height: 0; flex: 1 1 auto; }
 .ops__label { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin-bottom: 8px; }
-.ops__list { list-style: none; margin: 0; padding: 0; max-height: 42vh; overflow-y: auto; }
+.ops__list { list-style: none; margin: 0; padding: 0; min-height: 0; overflow-y: auto; }
 .ops__row {
   display: grid;
   grid-template-columns: 54px 7px minmax(0, 1fr);
@@ -271,6 +287,29 @@ button {
   font-size: 10px;
   padding: 0 4px;
   border: 1px solid rgba(128, 128, 128, .28);
+  color: var(--muted);
+}
+
+/* The right-hand status column: chips keep their own order and only the column
+   is pushed to the end of the row, so a read that found nothing can carry a chip
+   in the same place the state chip lands. */
+.ops__chips {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  flex: none;
+  margin-left: auto;
+}
+
+/* A successful read that returned no content. Deliberately grey: the call did
+   not fail, so this must not read as the red error chip. */
+.ops__no-match {
+  flex: none;
+  font-size: 10.5px;
+  padding: 0 6px;
+  border-radius: 8px;
+  line-height: 16px;
+  background: rgba(128, 128, 128, .16);
   color: var(--muted);
 }
 

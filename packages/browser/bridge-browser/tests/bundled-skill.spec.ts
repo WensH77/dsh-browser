@@ -95,7 +95,7 @@ describe('the bundled guide skill', () => {
 
     const loaded = await registry.get(GUIDE_NAME, { cwd: PACKAGE_ROOT })
 
-    expect(loaded?.content.startsWith('# dsh-browser 桥的工具选择与故障排查')).toBe(true)
+    expect(loaded?.content.startsWith('# dsh-browser 桥接的工具选择与故障排查')).toBe(true)
     expect(loaded?.content).not.toContain('name: dsh-browser-bridge-guide')
     // The build copies the file rather than keeping a second source, so the two
     // must stay byte-identical apart from the frontmatter split.

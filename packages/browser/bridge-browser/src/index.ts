@@ -411,7 +411,7 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
     handler: (req, socket, head) => { server.handleUpgrade(req, socket, head) },
   }
   ctx.effect(() => ctx.webServer.registerUpgrade(route), 'bridge-browser: /ext/bridge upgrade route')
-  // 异步 disposer：HMR/卸载时先等桥完全关闭（socket/泵/acceptor 静默）再继续。
+  // 异步 disposer：HMR/卸载时先等桥接完全关闭（socket/泵/acceptor 静默）再继续。
   ctx.effect(() => () => server.close(), 'bridge-browser: bridge server')
 
   // Zero-config discovery endpoint: the extension fetches this to learn the

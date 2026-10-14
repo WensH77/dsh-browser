@@ -1,9 +1,9 @@
 ---
 name: dsh-browser-bridge-guide
-description: 在任何工作区（any workspace），只要你用 dsh-browser 桥的 browser_* 工具驱动页面、排查页面异常或组合这些工具，就该加载我。含：点了报成功但页面没变/新填的值没提交的判据阶梯；读文本、取内嵌图片、截图各用哪个工具；bug 排查与 JS 弹窗处置；绑定、安装与更新。
+description: 在任何工作区（any workspace），只要你用 dsh-browser 桥接的 browser_* 工具驱动页面、排查页面异常或组合这些工具，就该加载我。含：点了报成功但页面没变/新填的值没提交的判据阶梯；读文本、取内嵌图片、截图各用哪个工具；bug 排查与 JS 弹窗处置；绑定、安装与更新。
 ---
 
-# dsh-browser 桥的工具选择与故障排查
+# dsh-browser 桥接的工具选择与故障排查
 
 这份指南是 `browser_*` 工具的技术配方。用它们驱动浏览器、排查「动了但没反应」、
 组合多个工具时读它；行为红线（不得凭空断言页面内容、拒绝是边界不是谜题等）在
@@ -26,7 +26,7 @@ writes are refused, so a step that depends on either can do nothing silently.`
 隐藏或失焦的标签页收不到焦点事件、剪贴板写入被拒；依赖这两样的步骤会静默失败，
 而工具本身照样报成功。
 
-**③ 字段按失焦提交的话，桥已经替你补齐了。** 扩展在点击和输入之前会主动让当前
+**③ 字段按失焦提交的话，桥接已经替你补齐了。** 扩展在点击和输入之前会主动让当前
 字段失焦（`settleFocusForActivation`），窗口没系统焦点时改为补发 `blur` / `focusout`，
 前后台都成立。所以「拿到的是旧值」说明原因不在这里，别在这一步耗时间。
 

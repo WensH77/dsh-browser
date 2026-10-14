@@ -149,6 +149,25 @@ describe('registerBrowserTools', () => {
     expect(registered).toHaveLength(0)
   })
 
+  it('keeps the read descriptions free of feed-only fields and Chinese copy', () => {
+    // The extension's operation feed marks a read that found nothing. That mark
+    // is a panel concern: if it ever reaches the model, it does so as a new
+    // schema field or as Chinese wording in a description that is otherwise
+    // English, so both are asserted here rather than trusted.
+    const { ctx, bridge, registered } = makeHarness()
+    const tools = registerBrowserTools(ctx, bridge, { toolTimeoutMs: 1_000, snapshotMaxChars: 12_000, maxInteractiveItems: 60 })
+
+    for (const name of ['browser_get_text', 'browser_dom_query'] as const) {
+      const definition = registered.find((entry) => entry.name === name)?.definition
+      expect(definition, name).toBeDefined()
+      const surface = JSON.stringify(definition)
+      expect(surface, name).not.toContain('noMatch')
+      expect(surface, name).not.toMatch(/[\u4e00-\u9fff]/)
+    }
+
+    tools.dispose()
+  })
+
   it('narrows the surface to what a legacy extension implements', async () => {
     const { ctx, bridge, requestTool, registered } = makeHarness()
     const tools = registerBrowserTools(ctx, bridge, { toolTimeoutMs: 1_000, snapshotMaxChars: 12_000, maxInteractiveItems: 60 })
@@ -659,8 +678,11 @@ describe('registerBrowserTools', () => {
     const result = await run()
 
     // The same call finishes, on the page that was open — no failed call and no
-    // second tool call to bind.
-    expect(String((result as { text: string }).text)).toBe('two rows')
+    // second tool call to bind. The line in front names that page, because its
+    // own text ("two rows") never says which page answered.
+    expect(String((result as { text: string }).text)).toBe(
+      'Bound this session to tab 7 — https://app.example/orders (chosen by the user, not by the bridge).\ntwo rows',
+    )
     expect(seen).toEqual(['browser_dom_query', 'browser_list_tabs', 'browser_bind_tab', 'browser_dom_query'])
     expect(requestTool).toHaveBeenLastCalledWith('browser_dom_query', { selector: '#row' }, exec.signal, 5_000, 'session-a')
     // One open page is not a choice: a question with a single option would wait
@@ -676,7 +698,11 @@ describe('registerBrowserTools', () => {
 
     const result = await run()
 
-    expect(String((result as { text: string }).text)).toBe('two rows')
+    // The question's answer is the page: `7 — Orders` binds tab 7, and the
+    // retried call says so in front of its own text.
+    expect(String((result as { text: string }).text)).toBe(
+      'Bound this session to tab 7 — https://app.example/orders (chosen by the user, not by the bridge).\ntwo rows',
+    )
     expect(ask).toHaveBeenCalledTimes(1)
     expect(seen).toEqual(['browser_dom_query', 'browser_list_tabs', 'browser_bind_tab', 'browser_dom_query'])
     expect(requestTool).toHaveBeenCalledWith('browser_bind_tab', { tabId: 7 }, exec.signal, 5_000, 'session-a')
@@ -712,7 +738,9 @@ describe('registerBrowserTools', () => {
 
     const result = await run()
 
-    expect(String((result as { text: string }).text)).toBe('two rows')
+    expect(String((result as { text: string }).text)).toBe(
+      'Bound this session to tab 7 — https://app.example/orders (chosen by the user, not by the bridge).\ntwo rows',
+    )
     expect((ask.mock.calls[0]?.[0] as { questions: Array<{ question: string }> }).questions[0]?.question)
       .toBe('Which open page should this session operate?')
   })
@@ -757,7 +785,11 @@ describe('registerBrowserTools', () => {
       async () => ({ answers: [{ id: 'bind-page', selected: [] }] }),
     )
 
-    await expect(run()).rejects.toThrow('chrome://newtab/ cannot be operated')
+    const failure = await run().then(() => 'bound', (error: unknown) => String((error as Error).message))
+
+    // Nothing was bound, so the refusal stands exactly as the extension wrote
+    // it, and no line claims a page this session never got.
+    expect(failure).toBe('chrome://newtab/ cannot be operated.')
     expect(seen).toEqual(['browser_dom_query', 'browser_list_tabs'])
     expect(ask).toHaveBeenCalledTimes(1)
   })
@@ -851,11 +883,110 @@ describe('registerBrowserTools', () => {
 
     const [first, second] = await Promise.all([run('browser_dom_query'), run('browser_get_text')])
 
-    expect(String((first as { text: string }).text)).toBe('browser_dom_query ran')
-    expect(String((second as { text: string }).text)).toBe('browser_get_text ran')
+    // Both retries carry the same page: they shared one choice, so they name
+    // the same tab and URL.
+    expect(String((first as { text: string }).text)).toBe(
+      'Bound this session to tab 7 — https://app.example/orders (chosen by the user, not by the bridge).\nbrowser_dom_query ran',
+    )
+    expect(String((second as { text: string }).text)).toBe(
+      'Bound this session to tab 7 — https://app.example/orders (chosen by the user, not by the bridge).\nbrowser_get_text ran',
+    )
     expect(ask).toHaveBeenCalledTimes(1)
     expect(seen.filter((entry) => entry === 'browser_list_tabs')).toHaveLength(1)
     expect(seen.filter((entry) => entry === 'browser_bind_tab')).toHaveLength(1)
+  })
+
+  it('names the page the user really picked, not the one the model assumed', async () => {
+    // The reported failure: the model assumed one page, the user picked another,
+    // and the page it then operated answered with nothing — so nothing told it
+    // that it was on the wrong page.
+    const { run } = pageChoiceHarness(
+      'ID=7 | Orders | https://app.example/orders\nID=15 | Dashboard | https://app.example/dashboard',
+      async () => ({ answers: [{ id: 'bind-page', selected: ['15 — Dashboard'] }] }),
+    )
+
+    const result = await run()
+
+    expect(String((result as { text: string }).text)).toBe(
+      'Bound this session to tab 15 — https://app.example/dashboard (chosen by the user, not by the bridge).\ntwo rows',
+    )
+  })
+
+  it('leaves a call that never asked for a page byte for byte as it was', async () => {
+    // A page choice is the only reason a line appears. A call that succeeds on
+    // its first dispatch gets the extension's text untouched, so this test fails
+    // the moment the line is added unconditionally.
+    const { ctx, bridge, requestTool, registered } = makeHarness()
+    requestTool.mockResolvedValue({ text: 'two rows' })
+    registerBrowserTools(ctx, bridge, { toolTimeoutMs: 5_000, snapshotMaxChars: 12_000, maxInteractiveItems: 60 })
+    const exec = { signal: new AbortController().signal, agent: { id: 'session-a' } }
+    const definition = registered.find((entry) => entry.name === 'browser_dom_query')!.definition
+
+    const result = await (definition.execute as (a: unknown, e: typeof exec) => Promise<unknown>)({ selector: '#row' }, exec)
+
+    expect(result).toEqual({ text: 'two rows' })
+  })
+
+  it('keeps the payload shape when the retried call also carries an image', async () => {
+    // The visual tools read the image off the same object as the text, so the
+    // line is written into `text` rather than replacing the payload.
+    const ask = vi.fn(async () => ({ answers: [{ id: 'bind-page', selected: ['9 — Mail'] }] }))
+    const { ctx, bridge, requestTool, registered } = makeHarness({ ...visualServices(), userQuestions: { ask } }, true)
+    let dispatches = 0
+    requestTool.mockImplementation(async (name: string) => {
+      if (name === 'browser_list_tabs') return { text: 'ID=7 | Orders | https://app.example/orders\nID=9 | Mail | https://mail.example/' }
+      if (name === 'browser_bind_tab') return { text: 'Bound session to tab 9: Mail' }
+      dispatches += 1
+      if (dispatches === 1) throw new BridgeToolError('action-failed', 'chrome://newtab/ cannot be operated.', true)
+      return { text: 'snapshot text', image: CAPTURED }
+    })
+    registerBrowserTools(ctx, bridge, { toolTimeoutMs: 1_000, snapshotMaxChars: 12_000, maxInteractiveItems: 60 })
+    const definition = registered.find((entry) => entry.name === 'browser_snapshot')!.definition
+
+    const value = await (definition.execute as (a: unknown, e: unknown) => Promise<{ text: string; image?: { attachmentId: string } }>)({}, routedExec())
+
+    expect(value.text).toBe(
+      'Bound this session to tab 9 — https://mail.example/ (chosen by the user, not by the bridge).\nsnapshot text',
+    )
+    expect(value.image?.attachmentId).toBe('att-1')
+  })
+
+  it('names the tab and its URL when the model asks for the page choice by name', async () => {
+    const ask = vi.fn(async () => ({ answers: [{ id: 'bind-page', selected: ['9 — Mail'] }] }))
+    const { ctx, bridge, requestTool, registered } = makeHarness({ userQuestions: { ask } })
+    requestTool.mockImplementation(async (name: string) => {
+      if (name === 'browser_list_tabs') return { text: 'ID=7 | Orders | https://app.example/orders\nID=9 | Mail | https://mail.example/' }
+      if (name === 'browser_bind_tab') return { text: 'Bound session to tab 9: Mail' }
+      return { text: 'ok' }
+    })
+    registerBrowserTools(ctx, bridge, { toolTimeoutMs: 5_000, snapshotMaxChars: 12_000, maxInteractiveItems: 60 })
+    const exec = { signal: new AbortController().signal, agent: { id: 'session-a' } }
+    const definition = registered.find((entry) => entry.name === 'browser_bind_interactive')!.definition
+
+    const result = await (definition.execute as (a: unknown, e: typeof exec) => Promise<unknown>)({}, exec)
+
+    // The extension's own bind answer names the tab and its title but not its
+    // URL, so the line carries both.
+    expect(String((result as { text: string }).text)).toBe(
+      'Bound this session to tab 9 — https://mail.example/ (chosen by the user, not by the bridge).\nBound session to tab 9: Mail',
+    )
+  })
+
+  it('does not repeat the URL when the bind answer already carries it', async () => {
+    const ask = vi.fn(async () => ({ answers: [{ id: 'bind-page', selected: ['9 — Mail'] }] }))
+    const { ctx, bridge, requestTool, registered } = makeHarness({ userQuestions: { ask } })
+    requestTool.mockImplementation(async (name: string) => {
+      if (name === 'browser_list_tabs') return { text: 'ID=9 | Mail | https://mail.example/' }
+      if (name === 'browser_bind_tab') return { text: 'Bound session to tab 9: https://mail.example/' }
+      return { text: 'ok' }
+    })
+    registerBrowserTools(ctx, bridge, { toolTimeoutMs: 5_000, snapshotMaxChars: 12_000, maxInteractiveItems: 60 })
+    const exec = { signal: new AbortController().signal, agent: { id: 'session-a' } }
+    const definition = registered.find((entry) => entry.name === 'browser_bind_interactive')!.definition
+
+    const result = await (definition.execute as (a: unknown, e: typeof exec) => Promise<unknown>)({}, exec)
+
+    expect(String((result as { text: string }).text)).toBe('Bound session to tab 9: https://mail.example/')
   })
 
   it('budgets one page call as the bounded parts it is made of', () => {

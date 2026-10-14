@@ -6,7 +6,7 @@ Status: implemented
 
 ## 问题
 
-浏览器桥仓库曾依赖同级的 DeepSeek Harness 源码 checkout，以提供 TypeScript 项目引用、workspace 依赖、测试解析与 `dsh` 可执行文件。这种拓扑使仓库无法独立针对已发布的 npm 版本完成安装、构建、测试或运行。
+浏览器桥接仓库曾依赖同级的 DeepSeek Harness 源码 checkout，以提供 TypeScript 项目引用、workspace 依赖、测试解析与 `dsh` 可执行文件。这种拓扑使仓库无法独立针对已发布的 npm 版本完成安装、构建、测试或运行。
 
 ## 决策
 

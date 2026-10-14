@@ -1,6 +1,7 @@
 import { useEffect, useState, type ReactElement } from 'react'
 import { localeFromUiState, type UiLocale } from '../i18n.ts'
 import { opLabel, type OpCopy } from './op-label.ts'
+import { noMatchLabel } from './no-match-chip.ts'
 import { sendUiRequest, type SessionGrantsPush, type UiState } from '../shared/messages.ts'
 import { noticeText } from '../shared/notice-copy.ts'
 import { decisionButtons } from './approval-buttons.ts'
@@ -21,8 +22,8 @@ export const zh = {
   connected: '已连接',
   reconnecting: '重连中…',
   stopped: '未连接',
-  idle: '当前没有正在操作的页面。让 dsh 打开一个网址(首次导航会自动新开标签页并绑定本会话)，或在会话中发送“绑定网页”指定某个标签页。',
-  operating: '操作',
+  idle: '当前没有受控标签页。让 dsh 打开一个网址(首次导航会自动新开标签页并绑定本会话)，或在会话中发送“绑定网页”指定某个标签页。',
+  operating: '受控标签页',
   session: '会话',
   settings: '设置',
   log: '日志',
@@ -32,7 +33,7 @@ export const zh = {
   updateHint: '把更新命令复制到剪贴板（只复制，不执行；跑完请在 chrome://extensions 手动 Reload）',
   updateCopied: '已复制',
   updateFailed: '复制失败',
-  updateNeedsBridge: '需要先连上桥（后台未连接 dsh）',
+  updateNeedsBridge: '需要先连上桥接（后台未连接 dsh）',
   updateUnavailable: '宿主没有返回更新命令（插件版本可能过旧，或该方法被拒绝）',
   reconnect: '重连',
   pendingApprovals: '等待确认的浏览器操作',
@@ -57,6 +58,7 @@ export const zh = {
   opWaiting: '等待中',
   opFailed: '失败',
   opCancelled: '已取消',
+  opNoMatch: '无匹配',
   opNavigate: '导航到',
   opClick: '点击',
   opType: '输入',
@@ -78,6 +80,15 @@ export const zh = {
   opReload: '刷新',
   opListTabs: '列出标签页',
   opBindTab: '绑定标签页',
+  opDomQuery: '查询元素',
+  opClickPointer: '按压点击',
+  opImage: '读取图片',
+  opDebug: '调试页面',
+  opStatus: '查看桥接状态',
+  opSetup: '准备扩展文件',
+  opUpdate: '打印更新命令',
+  opBindInteractive: '选择要绑定的页面',
+  opSlidesPage: '切换到幻灯片',
   opChars: '个字符',
   clear: '清除操作',
   unbind: '解除关联',
@@ -90,8 +101,8 @@ export const en = {
   connected: 'Connected',
   reconnecting: 'Reconnecting…',
   stopped: 'Disconnected',
-  idle: 'No page is being operated. Ask dsh to open a URL (the first navigation opens a new tab and binds this session to it), or send "bind to the page" in the session to choose a tab.',
-  operating: 'Operation',
+  idle: 'No tab is under this session\'s control. Ask dsh to open a URL (the first navigation opens a new tab and binds this session to it), or send "bind to the page" in the session to choose a tab.',
+  operating: 'Controlled tab',
   session: 'Session',
   settings: 'Settings',
   log: 'Log',
@@ -128,6 +139,7 @@ export const en = {
   opWaiting: 'Waiting',
   opFailed: 'Failed',
   opCancelled: 'Cancelled',
+  opNoMatch: 'No match',
   opNavigate: 'Navigate to',
   opClick: 'Click',
   opType: 'Type',
@@ -149,6 +161,15 @@ export const en = {
   opReload: 'Reload',
   opListTabs: 'List tabs',
   opBindTab: 'Bind tab',
+  opDomQuery: 'Query elements',
+  opClickPointer: 'Press-sequence click',
+  opImage: 'Read image',
+  opDebug: 'Debug page',
+  opStatus: 'Check bridge status',
+  opSetup: 'Prepare extension files',
+  opUpdate: 'Print update command',
+  opBindInteractive: 'Choose a page to bind',
+  opSlidesPage: 'Open slide',
   opChars: ' chars',
   clear: 'Clear operations',
   unbind: 'Unbind',
@@ -403,6 +424,7 @@ export function App(): ReactElement {
                   operations unreachable rather than merely off-screen. */}
               {(ui?.recentOps ?? []).map((op) => {
                 const stateText = opStateLabel(op.state, copy)
+                const noMatchText = noMatchLabel(op, copy)
                 const code = opCode(op)
                 return (
                   <li className="ops__row" key={op.id} title={opTitle(op)}>
@@ -414,7 +436,12 @@ export function App(): ReactElement {
                       <span className="ops__meta">
                         {/* The chip would just repeat a label that already fell back to the tool name. */}
                         {opLabel(op, copy as OpCopy) !== op.name && <span className="ops__tool">{op.name}</span>}
-                        {stateText !== undefined && <span className={`ops__state ops__state--${op.state}`}>{stateText}</span>}
+                        {/* One right-aligned column, so the mark of a read that found
+                            nothing lands where the state chip would. */}
+                        <span className="ops__chips">
+                          {noMatchText !== undefined && <span className="ops__no-match">{noMatchText}</span>}
+                          {stateText !== undefined && <span className={`ops__state ops__state--${op.state}`}>{stateText}</span>}
+                        </span>
                       </span>
                     </span>
                   </li>
@@ -424,6 +451,13 @@ export function App(): ReactElement {
           </section>
         )}
 
+      </main>
+
+      {/* What the panel is operating is status, not feed: it sits above the footer and
+          outside the scrolling body, so a long operation list cannot push it out of view
+          and it always lands in the same place instead of floating under the feed with
+          empty space beneath it. */}
+      <div className="panel__status">
         {operating
           ? (
             <section className="operating">
@@ -438,7 +472,7 @@ export function App(): ReactElement {
             </section>
           )
           : (connected && ops.length === 0 ? <p className="panel__idle">{copy.idle}</p> : <span />)}
-      </main>
+      </div>
 
       <footer className="panel__footer">
         <span className="panel__footer-actions">

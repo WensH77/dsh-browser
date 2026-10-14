@@ -391,7 +391,7 @@ $WebProfileManifest = Join-Path $DshHomeDir 'profiles\web\package.json'
 Assert-Command 'pnpm' "未找到 pnpm；请先启用 Corepack 或安装 pnpm。" "pnpm was not found; enable Corepack or install pnpm first."
 Assert-Command 'node' "未找到 Node.js；请先安装受支持的 Node.js 版本。" "Node.js was not found; install a supported Node.js version first."
 
-Write-Step 1 "构建 Chrome 扩展与浏览器桥" "Build the Chrome extension and the browser bridge"
+Write-Step 1 "构建 Chrome 扩展与浏览器桥接" "Build the Chrome extension and the browser bridge"
 Invoke-Quiet -WorkingDirectory $Root -Command 'pnpm' -Arguments @('install', '--frozen-lockfile') `
   -FailZh "依赖安装失败。" -FailEn "Dependency installation failed."
 # The extension is built first so the bridge package can copy the fresh dist into itself
@@ -400,7 +400,7 @@ Invoke-Quiet -WorkingDirectory $Root -Command 'pnpm' -Arguments @('install', '--
 Invoke-Quiet -WorkingDirectory $Root -Command 'pnpm' -Arguments @('--filter', 'dsh-browser-extension', 'run', 'build') `
   -FailZh "扩展构建失败。" -FailEn "The extension build failed."
 Invoke-Quiet -WorkingDirectory $Root -Command 'pnpm' -Arguments @('--filter', $BridgePlugin, 'run', 'build') `
-  -FailZh "桥插件构建失败。" -FailEn "The bridge plugin build failed."
+  -FailZh "桥接插件构建失败。" -FailEn "The bridge plugin build failed."
 
 Write-Step 2 "注册到本机 web profile" "Register with the local web profile"
 foreach ($OldName in @($LegacyPlugin, $RenamedPlugin)) {
@@ -415,7 +415,7 @@ foreach ($OldName in @($LegacyPlugin, $RenamedPlugin)) {
 $LinkTarget = $Plugin.Replace('\', '/')
 Invoke-Quiet -WorkingDirectory $Root -Command 'pnpm' `
   -Arguments @('exec', 'dsh', 'plugin', '--profile', 'web', 'add', '-w', "$BridgePlugin@link:$LinkTarget") `
-  -FailZh "注册桥插件失败。" -FailEn "Registering the bridge plugin failed."
+  -FailZh "注册桥接插件失败。" -FailEn "Registering the bridge plugin failed."
 
 Write-Step 3 "安装技能（所有工作区可用）" "Install skills (available to every workspace)"
 # Copied rather than linked: creating a symlink on Windows needs Developer Mode or elevation,

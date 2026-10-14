@@ -35,6 +35,15 @@ export interface OpCopy {
   opConsole: string
   opNetwork: string
   opDialog: string
+  opDomQuery: string
+  opClickPointer: string
+  opImage: string
+  opDebug: string
+  opStatus: string
+  opSetup: string
+  opUpdate: string
+  opBindInteractive: string
+  opSlidesPage: string
   opChars: string
   opElement: string
 }
@@ -86,6 +95,9 @@ export function opLabel(op: RecentOp, copy: OpCopy): string {
   switch (op.name) {
     case 'browser_navigate': return `${copy.opNavigate} ${hostOf(stringArg(op, 'url'))}`
     case 'browser_click': return named(copy.opClick)
+    // The pointer click is the same act for the user; naming it apart is what shows that the
+    // plain click did not work and the agent reached for the press sequence.
+    case 'browser_click_pointer': return named(copy.opClickPointer)
     case 'browser_type': return resolved === undefined
       ? `${copy.opType} ${stringArg(op, 'text').length}${copy.opChars} → ${target(op, copy)}`
       : `${copy.opType} ${stringArg(op, 'text').length}${copy.opChars} → ${resolved}`
@@ -104,6 +116,10 @@ export function opLabel(op: RecentOp, copy: OpCopy): string {
       const find = stringArg(op, 'find')
       const parts = [find === '' ? '' : `"${short(find, 24)}"`, scope === '' ? '' : short(scope, 24)].filter((p) => p !== '')
       return parts.length === 0 ? copy.opGetText : `${copy.opGetText} ${parts.join(' · ')}`
+    }
+    case 'browser_dom_query': {
+      const scope = stringArg(op, 'selector')
+      return scope === '' ? copy.opDomQuery : `${copy.opDomQuery} ${short(scope, 24)}`
     }
     case 'browser_console': return copy.opConsole
     case 'browser_network': {
@@ -127,7 +143,20 @@ export function opLabel(op: RecentOp, copy: OpCopy): string {
     case 'browser_list_tabs': return copy.opListTabs
     case 'browser_bind_tab': {
       const tabId = numberArg(op, 'tabId')
-      return `${copy.opBindTab} ${tabId ?? ''}`.trim()
+      // The extension resolves the bound tab and records `42 — https://…`; the argument alone
+      // only carries the number, which says nothing about which page is now being operated.
+      return `${copy.opBindTab} ${resolved ?? tabId ?? ''}`.trim()
+    }
+    case 'browser_image': return named(copy.opImage)
+    // One tool, ten actions: the action is what tells them apart, so it rides along.
+    case 'browser_debug': return `${copy.opDebug} ${stringArg(op, 'action')}`.trim()
+    case 'browser_status': return copy.opStatus
+    case 'browser_setup': return copy.opSetup
+    case 'browser_update': return copy.opUpdate
+    case 'browser_bind_interactive': return copy.opBindInteractive
+    case 'browser_slides_open_page': {
+      const page = numberArg(op, 'page')
+      return page === undefined ? copy.opSlidesPage : `${copy.opSlidesPage} ${page}`
     }
     default: return op.name
   }
