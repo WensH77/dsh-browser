@@ -25,6 +25,57 @@ export const BRIDGE_OPEN_GDRIVE_FOLDER_METHOD = 'bridge.openGDriveFolder'
 export const BRIDGE_GDRIVE_MOVE_METHOD = 'bridge.gdrive.moveIntoSession'
 
 /**
+ * Internal RPC the extension uses to report which language its own UI speaks.
+ *
+ * The plugin raises two prompts that a human reads — the page-choice question
+ * and the nudge for a call that has gone quiet — and it cannot read the
+ * extension's settings, so the extension reports the setting here: once per
+ * connection, and again whenever the user changes it. A host older than this
+ * method refuses it with `method-not-allowed`, which is why the report is
+ * fire-and-forget: the plugin keeps its English wording in that case.
+ */
+export const BRIDGE_UI_LANGUAGE_METHOD = 'bridge.uiLanguage'
+
+/**
+ * Internal RPC the panel's Update button uses to fetch this installation's
+ * update command.
+ *
+ * The command depends on where the plugin runs from and on the platform, and
+ * the host is the side that knows both, so the extension asks for it instead of
+ * composing one. The answer is the bare command line — never the multi-line
+ * explanation `browser_update` hands the model — because the panel copies it to
+ * the clipboard for the user to run. Nothing is executed on either side.
+ *
+ * A host older than this method refuses it with `method-not-allowed`; the panel
+ * reports that as a failure rather than as a copied command.
+ */
+export const BRIDGE_UPDATE_COMMAND_METHOD = 'bridge.updateCommand'
+
+/**
+ * Languages the extension's user-facing surfaces speak.
+ *
+ * Only `'en'` and `'zh'` exist: the language is an explicit user setting with an
+ * English default, never the browser's own language.
+ */
+export type UiLanguage = 'en' | 'zh'
+
+/**
+ * Read the language out of a {@link BRIDGE_UI_LANGUAGE_METHOD} payload.
+ *
+ * Anything else — an unknown language, a missing field, a non-object payload —
+ * yields `undefined` so the caller can keep English instead of rendering a
+ * language it does not have copy for.
+ *
+ * @param payload - the rpc frame's payload.
+ * @returns the reported language, or undefined when it is unusable.
+ */
+export function parseUiLanguagePayload(payload: unknown): UiLanguage | undefined {
+  if (typeof payload !== 'object' || payload === null || Array.isArray(payload)) return undefined
+  const language = (payload as { language?: unknown }).language
+  return language === 'en' || language === 'zh' ? language : undefined
+}
+
+/**
  * Extension IDs the bridge accepts on its loopback no-token path.
  *
  * A Chromium extension's origin is `chrome-extension://<32-char id>`, so the ID
@@ -256,6 +307,18 @@ export type ToolErrorCode =
 export interface ToolError {
   code: ToolErrorCode
   message: string
+  /**
+   * Set only on the failures a page choice resolves: the calling session has no
+   * page it may operate — never bound, its tab closed, or pointed at a page no
+   * other extension may touch — and the host can list the open pages, let the
+   * user pick one, bind the session to it and run the original call again.
+   *
+   * Absent on every other failure, including the one where a *different*
+   * session owns the browser: a choice cannot fix that, and the answer must
+   * stay "ask the user to hand it over". Hosts that predate the field simply
+   * report the failure, which is what they did before.
+   */
+  needsPageChoice?: true
 }
 
 /** Capabilities negotiated in `hello`/`hello.ok`. The extension performs its own actions; these bounds shape page snapshots. */

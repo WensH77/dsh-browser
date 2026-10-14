@@ -107,6 +107,21 @@ function linkTargetOf(target) {
 }
 
 /**
+ * Whether anything already occupies the path — including a link that resolves to nothing.
+ *
+ * `existsSync` follows a symlink, so a link left behind by a checkout that moved or was deleted
+ * reads as absent. The install would then skip the replace branch and fail in `symlinkSync` with
+ * `EEXIST`, leaving the stale link in place after every run (measured 2026-10-13). `lstatSync`
+ * sees the directory entry itself, which is what decides whether the path is taken.
+ *
+ * @param path - the installed path to test.
+ * @returns true when a file, directory or link occupies it.
+ */
+function pathTaken(path) {
+  return lstatSync(path, { throwIfNoEntry: false }) !== undefined
+}
+
+/**
  * Install every repository skill into a DSH skills root, replacing what is there.
  *
  * A previous install of the same skill is replaced in place. Anything else that
@@ -129,7 +144,7 @@ export function installRepoSkills({ sourceRoot = SKILL_SOURCE_ROOT, targetRoot, 
   for (const skill of skills) {
     const target = join(targetRoot, skill.installAs)
     let backup
-    if (existsSync(target)) {
+    if (pathTaken(target)) {
       if (linkTargetOf(target) === resolve(skill.source)) {
         results.push({ name: skill.name, status: 'current' })
         continue

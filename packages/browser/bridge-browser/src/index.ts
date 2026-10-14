@@ -18,8 +18,10 @@
 
 import { describeRetention, nodeRetentionIo, pruneExports } from './gdrive-retention.ts'
 import { spawn } from 'node:child_process'
-import { copyFile, mkdir, rename, unlink } from 'node:fs/promises'
+import { readFileSync } from 'node:fs'
+import { copyFile, mkdir, readFile, rename, unlink } from 'node:fs/promises'
 import { basename, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-attachment'
@@ -168,6 +170,166 @@ export function resolveConfig(config: Config): ResolvedConfig {
   return resolved
 }
 
+/** The one skill this package bundles, under `assets/<this name>/SKILL.md`. */
+const BUNDLED_GUIDE_NAME = 'dsh-browser-bridge-guide'
+
+/**
+ * Precedence rank of a packaged skill provider.
+ *
+ * Deliberately the same 600 that `@deepseek-ai/dsh-skill` exports as
+ * `BUNDLED_SKILL_RANK`: the package does not depend on that module, and the
+ * value is registry policy rather than a wire contract.
+ */
+const BUNDLED_SKILL_RANK = 600
+
+/** Provider name for the bundled guide, distinct from the filesystem's. */
+const BUNDLED_GUIDE_PROVIDER = 'dsh-browser-bridge'
+
+/**
+ * The part of the skill registry this plugin uses, declared structurally.
+ *
+ * Deliberately not `import type { SkillRegistry } from '@deepseek-ai/dsh-skill'`:
+ * the bridge plugin does not declare that package, and it must keep working in a
+ * composition that mounts no skills service at all. The three members below are
+ * the whole contract the provider needs — `registerProvider` for the
+ * registration effect, and the provider's own `name`/`list`/`get`.
+ */
+interface SkillProviderControlLike {
+  readonly signal: AbortSignal
+  readonly invalidate: () => void
+}
+
+interface SkillCandidateLike {
+  readonly name: string
+  readonly description: string
+  readonly invocation: { readonly modelInvocable: boolean; readonly userInvocable: boolean }
+  readonly provider: string
+  readonly source: string
+  readonly rank: number
+  readonly resourceBase: { readonly kind: 'directory'; readonly path: string }
+  readonly locator: string
+}
+
+interface SkillProviderLike {
+  readonly name: string
+  readonly list: (options: { cwd?: string | undefined; signal?: AbortSignal | undefined }) =>
+    Promise<readonly SkillCandidateLike[]>
+  readonly get: (candidate: SkillCandidateLike, options: { cwd?: string | undefined; signal?: AbortSignal | undefined }) =>
+    Promise<Record<string, unknown> | undefined>
+}
+
+interface SkillsRegistryLike {
+  registerProvider(create: (control: SkillProviderControlLike) => SkillProviderLike): () => void
+}
+
+/** Directory holding the packaged skill bundles; siblings of this module. */
+function packagedAssetRoot(): string {
+  return fileURLToPath(new URL('../assets/', import.meta.url))
+}
+
+/**
+ * Read the `name` and `description` out of a SKILL.md's YAML frontmatter.
+ *
+ * Frontmatter-only parsing rather than a YAML dependency: these two scalar
+ * fields are the whole contract (the registry names a skill from `name`, and the
+ * catalog advertises the truncated `description`).
+ *
+ * @param markdown - the file contents.
+ * @param path - the file path, for the error message.
+ * @returns the two frontmatter fields.
+ * @throws when either field is missing — a bundled skill with no name would be
+ *   registered under a name no caller can address, and that must be loud.
+ */
+function parseSkillFrontmatter(markdown: string, path: string): { name: string; description: string } {
+  const block = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/.exec(markdown)
+  const frontmatter = block?.[1]
+  if (frontmatter === undefined) throw new Error(`bridge-browser: ${path} has no YAML frontmatter`)
+  const name = /^name:[ \t]*(.+?)[ \t]*$/m.exec(frontmatter)?.[1] ?? ''
+  const description = /^description:[ \t]*(.+?)[ \t]*$/m.exec(frontmatter)?.[1] ?? ''
+  if (name === '' || description === '') {
+    throw new Error(`bridge-browser: ${path} needs both a name and a description in its frontmatter`)
+  }
+  return { name, description: description.replace(/^['"]|['"]$/g, '') }
+}
+
+/**
+ * Register the bundled bridge guide with whichever skills registry is mounted.
+ *
+ * Two distribution paths ship this skill on purpose: the repository installer
+ * links `.dsh/skills/<name>` into the user skill root (so a session in any
+ * workspace finds it), and this provider carries the same file inside the
+ * package (so a composition that never ran the installer still has it). The
+ * registry deduplicates by name and rank, so the two never appear as two
+ * catalog entries.
+ *
+ * A missing skills service, or a missing asset, is reported and then ignored:
+ * losing the guide costs advice, while failing here would cost the bridge.
+ *
+ * @param ctx - plugin context, read for the optional `skills` service.
+ */
+function registerBundledGuide(ctx: Context): void {
+  const skills = lookupSkillsService(ctx)
+  if (skills === undefined) {
+    ctx.logger.info('browser bridge: no skills service mounted — the bundled guide skill is not registered')
+    return
+  }
+  const assetRoot = packagedAssetRoot()
+  const skillFile = join(assetRoot, BUNDLED_GUIDE_NAME, 'SKILL.md')
+  let frontmatter: { name: string; description: string }
+  try {
+    frontmatter = parseSkillFrontmatter(readFileSync(skillFile, 'utf8'), skillFile)
+  } catch (error: unknown) {
+    ctx.logger.warn(`browser bridge: bundled guide skill unavailable — ${error instanceof Error ? error.message : String(error)}`)
+    return
+  }
+  const candidate: SkillCandidateLike = {
+    name: frontmatter.name,
+    description: frontmatter.description,
+    // Both surfaces: the model loads it as the recipe behind the prompt's
+    // pointer, and a human may type `/<name>` to put it in the conversation.
+    invocation: { modelInvocable: true, userInvocable: true },
+    provider: BUNDLED_GUIDE_PROVIDER,
+    source: 'bundled',
+    rank: BUNDLED_SKILL_RANK,
+    resourceBase: { kind: 'directory', path: join(assetRoot, BUNDLED_GUIDE_NAME) },
+    locator: skillFile,
+  }
+  const skillLabel = candidate.name
+  ctx.effect(() => skills.registerProvider(() => ({
+    name: BUNDLED_GUIDE_PROVIDER,
+    list: () => Promise.resolve([candidate]),
+    // No abort signal on the read: this is one small file on the local disk, so
+    // it settles long before a caller's cancellation, and passing a signal that
+    // is no longer watched risks an unhandled rejection for no gain.
+    get: async (loaded) => {
+      const raw = await readFile(loaded.locator, 'utf8')
+      const { rank: _rank, locator: _locator, ...summary } = loaded
+      const body = raw.replace(/^---\r?\n[\s\S]*?\r?\n---(?:\r?\n|$)/, '')
+      return { ...summary, content: body.trim() }
+    },
+  })), `bridge-browser: bundled guide skill (${skillLabel})`)
+  ctx.logger.info(`browser bridge: bundled guide skill registered as "${skillLabel}"`)
+}
+
+/**
+ * Find a mounted skills registry, tolerating its absence.
+ *
+ * `ctx.get` returns `undefined` for a service this composition does not mount,
+ * and cordis throws for an undeclared service in some setups, so both outcomes
+ * mean the same thing here: no registry, no bundled skill.
+ *
+ * @param ctx - plugin context.
+ * @returns the registry slice, or undefined when nothing answers to `skills`.
+ */
+function lookupSkillsService(ctx: Context): SkillsRegistryLike | undefined {
+  try {
+    const service = ctx.get('skills') as Partial<SkillsRegistryLike> | undefined
+    return typeof service?.registerProvider === 'function' ? service as SkillsRegistryLike : undefined
+  } catch {
+    return undefined
+  }
+}
+
 /**
  * Mount the bridge: resolve the token, register the upgrade route, the tool
  * set, and an optional system-prompt section, all effect-scoped for HMR.
@@ -300,8 +462,15 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
     }
   }, 'bridge-browser: browser tools')
 
-  // Optional system-prompt contribution: a one-line hint only — the model is
-  // told to fetch snapshots on demand instead of hoarding page text.
+  // Register the bundled bridge guide as a skill, so the model can load the
+  // tool-selection and troubleshooting recipe on demand instead of carrying it
+  // in every turn. Optional lookup: a composition without the skills service
+  // loses the skill, never the bridge.
+  registerBundledGuide(ctx)
+
+  // Optional system-prompt contribution: the behavioural invariants (do not
+  // assert un-snapshotted page content, a refusal is a boundary, no retry of a
+  // lost tab) plus a pointer to the guide, which holds the recipes.
   const systemPrompt = ctx.get('systemPrompt')
   if (systemPrompt !== undefined) {
     ctx.effect(() => systemPrompt.section({
@@ -309,44 +478,36 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
       order: 107,
       text: 'A browser bridge may be connected. To read or operate the user\'s active browser page, call browser_snapshot '
         + '(numbered items are the click/type targets; it also returns a screenshot of the same moment unless you pass visual:false), '
-        + 'unless the current turn already includes a plugin-provided '
-        + 'followed-page browser_snapshot. Reuse that injected snapshot and its indices directly. Never assume page content you have not snapshotted. '
-        + 'When an investigation arrives with a web page link, do not open with the bridge: search the local codebase first for how that page and its operations work, '
-        + 'so you have the operational and business context, and combine it with the background the task gives you to decide what actually needs verifying in the browser. '
-        + 'An empty code search proves nothing: page errors often come from server-side configuration (rules, feature flags, database rows) rather than code, '
-        + 'so follow up with browser_console / browser_network and read the page itself before concluding that the behaviour does not exist. '
-        + 'Call browser_capture when the question is visual — layout, styling, a canvas or chart, or whether something rendered — and pass '
-        + 'visual:false on browser_snapshot when you only need updated text. '
-        + 'When the question is about a picture the page embeds (a chart, diagram, or screenshot), address it with browser_dom_query and then call '
-        + 'browser_image on that element: it returns the picture itself at its original resolution and needs no screenshot, so it also works while DevTools '
-        + 'is open. Use browser_capture when the question is about how the page looks as rendered. '
-        + 'To answer "what does this page or section say", read the text once — browser_get_text, optionally with a selector, or with find + context to jump '
-        + 'straight to a phrase — and slice it yourself; do not script several browser_eval rounds to hunt through the DOM. Reach for browser_capture when the '
-        + 'question is about appearance or when the content is drawn into a canvas or image, and note that a capture needs that tab free of DevTools. '
-        + 'A JavaScript dialog (alert / confirm / prompt) is browser UI that freezes the page it belongs to: page-facing tools are refused while one is open, and the refusal quotes the dialog. Read it and answer with browser_dialog — that call goes over CDP and works while the page is frozen. '
-        + 'When the page misbehaves, browser_console and browser_network read the tab\'s console and requests (Chrome builds), '
-        + 'browser_network mock replaces a response, browser_eval runs page-context JavaScript, and browser_block / browser_headers '
-        + 'block or rewrite matching requests in the controlled tab. '
-        + 'When the user asks to bind this session to a specific open page (for example "bind to the page"), call browser_bind_interactive — '
-        + 'it lists the pages, asks the user, and binds in one step. '
-        + 'One session operates the browser at a time: if another session already holds the controlled tab, binding fails and names that session, and so does '
-        + 'a first browser_navigate. Nothing runs in that case — ask the user to press Unbind in the dsh browser panel (or to keep working in the other '
-        + 'session and bring its answer back here) instead of retrying the call. '
-        + 'When browser tools cannot connect, or a browser tool seems to be missing, call browser_status first: it names the single next action. '
-        + 'On a first install, or when browser_status reports refreshed extension files, call browser_setup to prepare the files and open the extensions page. '
-        + 'When the user asks how to update this installation, call browser_update and hand them the command it prints: it never runs the command itself, '
-        + 'because updating writes into their dsh home and needs a click in Chrome. '
-        + 'When a browser tool reports that no page is bound, or that the controlled tab is gone, do not retry the same call: call browser_navigate with the '
-        + 'target URL (it opens a new tab and binds this session to it), or browser_bind_interactive to let the user choose among the pages already open. '
-        + 'A refused call is not a transient error — follow the route the refusal names instead of retrying variants of it. '
+        + 'unless the current turn already includes a plugin-provided followed-page browser_snapshot. Reuse that injected snapshot and its indices '
+        + 'directly instead of taking another one. Never assume page content you have not snapshotted. '
+        + 'When an investigation arrives with a web page link, do not open with the bridge: search the local codebase first for how that page and its '
+        + 'operations work, so you have the operational and business context, and combine it with the background the task gives you to decide what '
+        + 'actually needs verifying in the browser. An empty code search proves nothing: page errors often come from server-side configuration '
+        + '(rules, feature flags, database rows) rather than code, so follow up with browser_console / browser_network and read the page itself before '
+        + 'concluding that the behaviour does not exist. To answer what a page or section says, read the text once and slice it yourself — do not '
+        + 'script several browser_eval rounds to hunt through the DOM. When the question is about a picture the page embeds, address it with '
+        + 'browser_dom_query and then browser_image, which returns the picture itself rather than a screenshot. '
+        + 'A JavaScript dialog (alert / confirm / prompt) freezes the page it belongs to: page-facing tools are refused while one is open and the '
+        + 'refusal quotes the dialog, so read it and answer with browser_dialog. '
+        + 'To drive the page, troubleshoot it, or combine these tools, load the dsh-browser-bridge-guide skill; it carries the recipes — which tool '
+        + 'reads text, how an embedded picture is fetched, when a capture is the right question, what a "clicked, but nothing changed" result means, '
+        + 'how the tab\'s visible/focused state is reported, which link types browser_navigate opens as ordinary pages, how a Chrome confirmation '
+        + 'relates to a call that seems to have changed nothing, and how to bind, install, and update the bridge. '
         + 'A refusal is a boundary, not a puzzle: never look for another transport to reach the same content (curl, a reader proxy, an unauthenticated '
         + 'export URL, or a different tool) — that circumvents the user\'s gate rather than solving the task. If two tools each name a route the other '
         + 'refuses, or a refusal names a route that cannot work for this content, stop and tell the user what contradicted and what you need, instead of '
-        + 'probing the policy with trial calls. '
-        + 'Only Google Docs (/document/d/…) and Sheets (/spreadsheets/d/…) links are exported: call google_drive_export for those instead of '
-        + 'browser_navigate. Slides, Drive files, and every other link are ordinary pages — read them with the browser tools (browser_navigate to one, '
-        + 'then browser_snapshot, browser_capture, or browser_dom_query), and never try to read them through HTML views or page tools when they are one '
-        + 'of the two exported kinds. For spreadsheets: the tool downloads the workbook and asks which sheet to analyze; answer with a sheet name or "all". A browser action may wait for the user to confirm it in the assistant window; the call returns only after the decision. If an action seemingly changed nothing after confirmation, take a fresh browser_snapshot before concluding. Snapshot text is charged to the conversation context, so read economically: while a page is still loading use browser_wait instead of repeating browser_snapshot; use delta:true for consecutive reads of the same page, region to scope a read, and maxChars when only a bounded excerpt is needed.',
+        + 'probing the policy with trial calls. A refused call is not a transient error — follow the route the refusal names instead of retrying '
+        + 'variants of it. '
+        + 'Only /document/d/… and /spreadsheets/d/… links go to google_drive_export, and every other Google link — Slides included — is a page '
+        + 'to open with browser_navigate, never through an HTML view or a page tool. '
+        + 'One session operates the browser at a time: if another session already holds the controlled tab, binding fails and names that session, and so '
+        + 'does a first browser_navigate. Nothing runs in that case — ask the user to press Unbind in the dsh browser panel (or to keep working in the '
+        + 'other session and bring its answer back here) instead of retrying the call. When a browser tool reports that no page is bound, or that the '
+        + 'controlled tab is gone, do not retry the same call: call browser_navigate with the target URL (it opens a new tab and binds this session to '
+        + 'it), or browser_bind_interactive to let the user choose among the pages already open. '
+        + 'When browser tools cannot connect, or a browser tool seems to be missing, call browser_status first: it names the single next action. Read '
+        + 'economically: a snapshot is charged to the conversation context, so pass visual:false when only text changed, and use browser_wait, '
+        + 'delta:true, region, or maxChars instead of taking the same snapshot again.'
     }), 'bridge-browser: system prompt section')
   }
 

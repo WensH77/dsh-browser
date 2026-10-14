@@ -49,6 +49,31 @@ const SCRIPT_LIST_MAX = 60
 const SCRIPT_URL_MAX = 200
 /** Longest a `wait` may block for the next pause. */
 const WAIT_MAX_MS = 20_000
+/** Listeners rendered per chain level by one `listeners` read. */
+const LISTENER_MAX = 20
+/**
+ * Levels one `listeners` read walks before `document` is fetched directly.
+ *
+ * A ceiling on the walk, not a target — it stops early at `document`. Raised from 12 to 24
+ * after the first real page it ran on: a preference checkbox sat 12 wrappers deep, so the
+ * walk stopped exactly one level short of the level this action exists to read. The direct
+ * `document` fetch below is what makes the ceiling safe; this number only decides how much
+ * of the middle gets listed.
+ */
+const LISTENER_CHAIN_MAX = 24
+/** Characters kept per listener's script URL. */
+const LISTENER_URL_MAX = 160
+/**
+ * The sentence that keeps a level's "none" from reading as a verdict.
+ *
+ * A framework can keep its handlers on `document` and dispatch by event target:
+ * legacy React 15 does exactly that, in the capture phase because `blur` and
+ * `focus` do not bubble. So an input with no listener of its own still submits
+ * on blur, and a bare "none" would be a false negative — the failure mode this
+ * action exists to avoid, because the alternative was probing with a real
+ * interaction that can have side effects on a live product.
+ */
+const LISTENERS_DELEGATION_NOTE = 'Note: a "none" level is not a verdict. A framework can keep its handlers on document and dispatch by event target — legacy React 15 does exactly that, in the capture phase because blur and focus do not bubble — so an element with no listeners of its own can still respond, and a field can still submit on blur. Watch a real interaction with browser_console or browser_network before concluding that an event does nothing.'
 
 /** One remote object reference, as CDP reports a scope. */
 interface ScopeRef {
@@ -624,6 +649,304 @@ async function waitAnswer(tabId: number, args: Record<string, unknown>, budgetCh
   return { ok: true, result: { text: pageBufferText(head, lines, next, budgetChars) } }
 }
 
+/** One listener as `DOMDebugger.getEventListeners` reports it. */
+interface ListenerEntry {
+  type: string
+  useCapture: boolean
+  passive: boolean
+  once: boolean
+  scriptId: string
+  lineNumber: number
+  columnNumber: number
+}
+
+/** One level of the chain, with the listeners found on it. */
+interface ChainLevel {
+  label: string
+  listeners: ListenerEntry[]
+}
+
+/** A live remote node handle, plus CDP's own one-line description of it. */
+interface NodeHandle {
+  objectId: string
+  /** e.g. `input#email.form-input`; empty when Chrome offers none. */
+  description: string
+  /** e.g. `HTMLInputElement`, `HTMLDocument`; empty when Chrome offers none. */
+  className: string
+}
+
+/** What one expression resolved to. */
+type NodeLookup =
+  | { kind: 'node'; node: NodeHandle }
+  | { kind: 'threw'; message: string }
+  /** The expression produced no handle: `querySelector` found nothing. */
+  | { kind: 'empty' }
+
+function toNodeHandle(raw: { result?: { objectId?: unknown; description?: unknown; className?: unknown } }): NodeHandle | undefined {
+  const objectId = raw.result?.objectId
+  if (typeof objectId !== 'string' || objectId === '') return undefined
+  return {
+    objectId,
+    description: typeof raw.result?.description === 'string' ? raw.result.description : '',
+    className: typeof raw.result?.className === 'string' ? raw.result.className : '',
+  }
+}
+
+/**
+ * Resolve one expression on the running page to a live node handle.
+ *
+ * `silent: true` keeps an invalid selector's `SyntaxError` out of the page's own
+ * console — this is a diagnostic, and the page should not log for it. The
+ * response still carries `exceptionDetails` (silent only mutes the console
+ * report and the pause-on-exception), so a bad selector is reported from there.
+ */
+async function evaluateNode(tabId: number, expression: string): Promise<NodeLookup> {
+  const raw = await chrome.debugger.sendCommand({ tabId }, 'Runtime.evaluate', {
+    expression,
+    returnByValue: false,
+    silent: true,
+  }) as {
+    result?: { objectId?: unknown; description?: unknown; className?: unknown }
+    exceptionDetails?: { text?: unknown; exception?: { description?: unknown } }
+  }
+  if (raw.exceptionDetails !== undefined) {
+    const details = raw.exceptionDetails
+    const message = typeof details.exception?.description === 'string'
+      ? details.exception.description
+      : typeof details.text === 'string' ? details.text : 'the expression threw'
+    return { kind: 'threw', message }
+  }
+  const node = toNodeHandle(raw)
+  return node === undefined ? { kind: 'empty' } : { kind: 'node', node }
+}
+
+/**
+ * The parent of one chain level, or undefined at the top.
+ *
+ * `document.parentElement` is undefined, and `documentElement`'s is `document`,
+ * so the walk ends by itself; no global is written into the page.
+ */
+async function parentNode(tabId: number, objectId: string): Promise<NodeHandle | undefined> {
+  const raw = await chrome.debugger.sendCommand({ tabId }, 'Runtime.callFunctionOn', {
+    objectId,
+    functionDeclaration: 'function () { return this.parentElement || null }',
+    returnByValue: false,
+  }) as { result?: { objectId?: unknown; description?: unknown; className?: unknown } }
+  return toNodeHandle(raw)
+}
+
+/**
+ * Parse the `type` argument into the set of event types to report.
+ *
+ * Comma-separated, so one string covers `blur,focus` — the pair a field's commit path
+ * usually rides on. An empty or absent value means no filter: that is the discovery mode,
+ * everything on every level, capped per level.
+ */
+function parseListenerTypes(value: string | undefined): Set<string> | undefined {
+  if (value === undefined) return undefined
+  const types = value.split(',').map((part) => part.trim().toLowerCase()).filter((part) => part !== '')
+  return types.length === 0 ? undefined : new Set(types.slice(0, 8))
+}
+
+/**
+ * The listeners registered on exactly one node, optionally narrowed to named types.
+ *
+ * `depth: 0` is deliberate. Chrome's own default (1) also reports the node's
+ * direct children — blink's `InspectorDOMAgent::CollectNodes` walks one level
+ * down and keeps every child that has listeners — which would print a child's
+ * listener on this level's line, and the whole point here is which level owns
+ * what.
+ *
+ * `pierce` is off, and that is a change from this action's first cut. It reports
+ * listeners from every execution context, which on a real page meant the isolated worlds
+ * of other extensions: the document level came back with 1390 listeners, most of them
+ * foreign, and a `blur capture @ chrome-extension://…` sat next to the page's own blur
+ * handler as if the page had registered both. The question this action answers is what
+ * the page registered.
+ */
+async function nodeListeners(tabId: number, objectId: string, wanted: Set<string> | undefined): Promise<ListenerEntry[]> {
+  const raw = await chrome.debugger.sendCommand({ tabId }, 'DOMDebugger.getEventListeners', {
+    objectId,
+    depth: 0,
+    // Not `pierce`: that also reports the isolated worlds of other extensions, and a
+    // "blur capture @ chrome-extension://…" sitting next to the page's own blur handler
+    // reads as if the page registered both. Measured on the real page: the document level
+    // carried 1390 listeners, most of them other extensions'.
+    pierce: false,
+  }) as { listeners?: Array<Record<string, unknown>> }
+  const listeners: ListenerEntry[] = []
+  for (const entry of raw.listeners ?? []) {
+    if (typeof entry.type !== 'string' || entry.type === '') continue
+    // Filtering here rather than at the render step keeps the per-level counts honest:
+    // "document: 2" has to mean two listeners of the type the caller asked about.
+    if (wanted !== undefined && !wanted.has(entry.type.toLowerCase())) continue
+    listeners.push({
+      type: entry.type,
+      useCapture: entry.useCapture === true,
+      passive: entry.passive === true,
+      once: entry.once === true,
+      scriptId: typeof entry.scriptId === 'string' ? entry.scriptId : '',
+      lineNumber: typeof entry.lineNumber === 'number' ? entry.lineNumber : 0,
+      columnNumber: typeof entry.columnNumber === 'number' ? entry.columnNumber : 0,
+    })
+  }
+  return listeners
+}
+
+/** How one chain level names itself in the answer. */
+function levelLabel(node: NodeHandle, first: boolean): string {
+  if (node.className === 'HTMLDocument') return 'document'
+  const role = first ? 'element' : 'parent'
+  const name = node.description !== '' ? node.description : node.className
+  return name === '' ? role : `${role} <${shorten(name, 80)}>`
+}
+
+/**
+ * One listener line: what fires, in which phase, and where the handler lives.
+ *
+ * CDP reports a listener's script as a `scriptId` only, so the URL comes from
+ * the `Debugger.scriptParsed` inventory this module already keeps. A listener
+ * whose script that buffer no longer holds is named by its id rather than
+ * dropped — it is a real listener either way.
+ */
+function listenerLine(state: TabJsDebug, listener: ListenerEntry): string {
+  const script = state.scripts.find((candidate) => candidate.scriptId === listener.scriptId)
+  const where = script === undefined
+    ? `(script ${listener.scriptId === '' ? '?' : listener.scriptId} is not in the script buffer)`
+    : script.url === '' ? '(anonymous script)' : shorten(script.url, LISTENER_URL_MAX)
+  const flags = [listener.passive ? 'passive' : '', listener.once ? 'once' : ''].filter((flag) => flag !== '').join(', ')
+  const phase = listener.useCapture ? 'capture' : 'bubble'
+  return `${listener.type} ${phase}${flags === '' ? '' : ` (${flags})`} @ ${where}:${listener.lineNumber}:${listener.columnNumber}`
+}
+
+/**
+ * Join the chain under the character budget without losing the delegation note.
+ *
+ * The note is the part that stops "none" from reading as "the field ignores
+ * this", and a plain tail truncation would cut exactly that. Listener lines
+ * give way instead, with a marker that says how many did.
+ */
+function listenersText(head: string, lines: string[], note: string, budgetChars: number): string {
+  const budget = Math.max(1, Math.floor(budgetChars))
+  const suffix = `\n${note}`
+  if (head.length + suffix.length >= budget) return `${head}${suffix}`.slice(0, budget)
+  const marker = (omitted: number): string => `(${omitted} more line${omitted === 1 ? '' : 's'} omitted: raise maxChars)`
+  const kept: string[] = []
+  let room = budget - head.length - suffix.length - 1
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index]!
+    const cost = line.length + 1
+    if (room - cost < 0) {
+      const omitted = marker(lines.length - index)
+      if (room >= omitted.length) kept.push(omitted)
+      break
+    }
+    kept.push(line)
+    room -= cost
+  }
+  return `${head}\n${kept.join('\n')}${suffix}`
+}
+
+/**
+ * `listeners`: what is registered on an element and up its ancestor chain.
+ *
+ * A diagnostic, not a verdict — and that shapes the output. The page's
+ * framework may attach a single handler to `document` and dispatch by event
+ * target (legacy React 15 does, in the capture phase because `blur` does not
+ * bubble), so asking the input node returns nothing while the field does submit
+ * on blur. The chain is therefore walked to `document` and every level is
+ * printed, including the empty ones, and the answer always carries
+ * `LISTENERS_DELEGATION_NOTE`. This is what makes "look first" possible where
+ * the alternative was a probing interaction with real side effects.
+ */
+async function listenersAnswer(tabId: number, args: Record<string, unknown>, budgetChars: number): Promise<Answer> {
+  const state = stateFor(tabId)
+  const pause = pausedAtBreakpoint(tabId)
+  if (pause !== undefined) {
+    // The element lookup is a `Runtime.evaluate`, and a stopped renderer cannot
+    // answer one: this action would sit on the per-call budget instead of
+    // reporting. Refuse, and name the way out.
+    return { ok: false, error: { code: 'action-failed', message: `The page is ${pause}, so nothing on it can be looked up right now. Action "resume" lets it run again; action "eval" reads the paused frame.` } }
+  }
+  const selector = stringArg(args, 'selector')
+  const quoted = selector === undefined ? 'document' : `"${shorten(selector, SCRIPT_URL_MAX)}"`
+  // The question is nearly always "does anything here handle blur?", and a real document
+  // carries a thousand listeners. Narrowing to the types the caller names is what turns
+  // this from a dump into an answer; the counts then mean what they say.
+  const wantedTypes = parseListenerTypes(stringArg(args, 'type'))
+  const typeNote = wantedTypes === undefined ? '' : ` of type ${[...wantedTypes].map((type) => `"${type}"`).join(', ')}`
+  const objectIds: string[] = []
+  try {
+    // `Runtime` is asked for here rather than for every action, and after the
+    // pause guard above: it is the domain this action reads the page through,
+    // and nothing else in this module evaluates on a running page.
+    await holdDebuggerSession(tabId, { runtime: true })
+    const start = await evaluateNode(tabId, selector === undefined ? 'document' : `document.querySelector(${JSON.stringify(selector)})`)
+    if (start.kind === 'threw') {
+      return { ok: false, error: { code: 'action-failed', message: `${quoted} is not a usable CSS selector: ${shorten(start.message, 400)}` } }
+    }
+    if (start.kind === 'empty') {
+      return { ok: false, error: { code: 'action-failed', message: `Nothing on this page matches ${quoted}. Use browser_dom_query or browser_snapshot for a verified selector, or drop selector to read document.` } }
+    }
+    const levels: ChainLevel[] = []
+    let current: NodeHandle | undefined = start.node
+    let reachedDocument = false
+    let truncated = false
+    for (let index = 0; current !== undefined; index += 1) {
+      if (index >= LISTENER_CHAIN_MAX) {
+        truncated = true
+        break
+      }
+      const node = current
+      objectIds.push(node.objectId)
+      levels.push({ label: levelLabel(node, index === 0), listeners: await nodeListeners(tabId, node.objectId, wantedTypes) })
+      if (node.className === 'HTMLDocument') {
+        reachedDocument = true
+        break
+      }
+      current = await parentNode(tabId, node.objectId)
+    }
+    // `document` is the level this action exists to compare the element against — a
+    // framework keeps its delegated handlers there — so it is never skipped. It is also
+    // unreachable by walking: `parentElement` only ever returns an Element and `document`
+    // is not one, so the chain always stops at `<html>` (measured on the real page: the
+    // walk ended there with a null parent). This fetch is therefore the only path to that
+    // level, not a fallback for deep pages — do not delete it as redundant with the loop's
+    // `HTMLDocument` check, which only fires when the start itself is `document`. The
+    // ceiling decides how much of the middle gets listed.
+    if (!reachedDocument) {
+      const root = await evaluateNode(tabId, 'document')
+      if (root.kind === 'node') {
+        objectIds.push(root.node.objectId)
+        levels.push({
+          label: `document (reached directly; ${truncated ? `the ${LISTENER_CHAIN_MAX}-level walk stopped before it` : 'the walk ended before it'})`,
+          listeners: await nodeListeners(tabId, root.node.objectId, wantedTypes),
+        })
+        reachedDocument = true
+      }
+    }
+    const lines: string[] = []
+    let total = 0
+    levels.forEach((level, index) => {
+      total += level.listeners.length
+      lines.push(level.listeners.length === 0 ? `[${index + 1}] ${level.label}: none` : `[${index + 1}] ${level.label}: ${level.listeners.length}`)
+      for (const listener of level.listeners.slice(0, LISTENER_MAX)) lines.push(`    ${listenerLine(state, listener)}`)
+      if (level.listeners.length > LISTENER_MAX) lines.push(`    (${level.listeners.length - LISTENER_MAX} more on this level omitted)`)
+    })
+    const span = `${levels.length} level${levels.length === 1 ? '' : 's'}`
+    const end = reachedDocument ? 'document' : 'the top of the walk'
+    const head = total === 0
+      ? `event listeners${typeNote} on ${quoted} up the ancestor chain (${span}): none found, on that node or any level up to ${end}${truncated ? ' (the walk was cut short before document)' : ''}`
+      : `event listeners${typeNote} on ${quoted} up the ancestor chain (${span}, up to ${end}); script line numbers are CDP 0-based, as action "break" wants`
+    return { ok: true, result: { text: listenersText(head, lines, LISTENERS_DELEGATION_NOTE, budgetChars) } }
+  } finally {
+    // Remote handles live until released; nothing else owns these.
+    for (const objectId of objectIds) {
+      await chrome.debugger.sendCommand({ tabId }, 'Runtime.releaseObject', { objectId }).catch(() => undefined)
+    }
+  }
+}
+
 /**
  * One `browser_debug` call.
  *
@@ -635,7 +958,7 @@ async function waitAnswer(tabId: number, args: Record<string, unknown>, budgetCh
 export async function jsDebugAnswer(tabId: number, args: Record<string, unknown>, budgetChars: number): Promise<Answer> {
   const action = stringArg(args, 'action')
   if (action === undefined) {
-    return { ok: false, error: { code: 'action-failed', message: 'browser_debug requires an action: scripts, break, unbreak, list, pause, resume, step, wait, or eval.' } }
+    return { ok: false, error: { code: 'action-failed', message: 'browser_debug requires an action: scripts, break, unbreak, list, pause, resume, step, wait, eval, or listeners.' } }
   }
   try {
     // Every action needs the session: the pause state it reports is buffered
@@ -660,8 +983,10 @@ export async function jsDebugAnswer(tabId: number, args: Record<string, unknown>
         return await evalAnswer(tabId, args)
       case 'wait':
         return await waitAnswer(tabId, args, budgetChars)
+      case 'listeners':
+        return await listenersAnswer(tabId, args, budgetChars)
       default:
-        return { ok: false, error: { code: 'action-failed', message: `Unknown browser_debug action "${action}". Use scripts, break, unbreak, list, pause, resume, step, wait, or eval.` } }
+        return { ok: false, error: { code: 'action-failed', message: `Unknown browser_debug action "${action}". Use scripts, break, unbreak, list, pause, resume, step, wait, eval, or listeners.` } }
     }
   } catch (error: unknown) {
     return answerError(error)

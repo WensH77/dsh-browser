@@ -205,7 +205,7 @@ button {
 /*.ops start*/
 .ops { margin-bottom: 16px; }
 .ops__label { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin-bottom: 8px; }
-.ops__list { list-style: none; margin: 0; padding: 0; }
+.ops__list { list-style: none; margin: 0; padding: 0; max-height: 42vh; overflow-y: auto; }
 .ops__row {
   display: grid;
   grid-template-columns: 54px 7px minmax(0, 1fr);

@@ -1,11 +1,12 @@
 import { useEffect, useMemo, useState, type FormEvent, type ReactElement } from 'react'
 import { createRoot } from 'react-dom/client'
-import { getUiLocale } from '../i18n.ts'
+import { localeFromUiState, type UiLocale } from '../i18n.ts'
 import { sendUiRequest, type UiState } from '../shared/messages.ts'
 import { noticeText } from '../shared/notice-copy.ts'
 import './styles.css'
 import { SETTINGS_DEFAULTS, type Settings } from '../shared/settings.ts'
 import { policyRails } from './rails.ts'
+import { settingsPatch } from './settings-patch.ts'
 
 const zh = {
   title: 'AI 浏览器助手',
@@ -65,6 +66,11 @@ const zh = {
   secExports: 'Google 导出',
   openExport: '打开导出目录',
   openExportHint: '在文件管理器中打开 ~/.dsh/gdrive（按会话存放的导出文件），可自行清理。',
+  secLanguage: '界面语言',
+  language: '面板、审批卡与通知的语言',
+  languageHint: '不跟随浏览器语言：面板、审批卡、系统通知，以及 dsh 里选择页面那两条提问都按它显示；面向模型的工具描述保持英文。',
+  langEnglish: 'English',
+  langChinese: '中文',
   save: '保存更改',
   saved: '已保存',
   note: '纯浏览器工具桥：聊天与会话管理用 dsh 官方界面。',
@@ -133,6 +139,11 @@ const en = {
   secExports: 'Google exports',
   openExport: 'Open export folder',
   openExportHint: 'Reveal ~/.dsh/gdrive in the file manager (session-named exports) so you can clean it up.',
+  secLanguage: 'Interface language',
+  language: 'Language of the panel, approval cards and notifications',
+  languageHint: 'Not tied to the browser language: the panel, approval cards, notifications, and the two dsh page questions follow it. Model-facing tool descriptions stay English.',
+  langEnglish: 'English',
+  langChinese: '中文',
   save: 'Save changes',
   saved: 'Saved',
   note: 'A pure browser-tool bridge: chat and sessions live in the official dsh UI.',
@@ -143,8 +154,13 @@ const en = {
   controlled: 'Controlled page',
 }
 
-const locale = getUiLocale()
-const copy = locale === 'zh' ? zh : en
+/** The strings of one language. */
+type OptionsCopy = typeof en
+
+/** The options page reads the language from the pushed UI state, like the panel. */
+function copyFor(locale: UiLocale): OptionsCopy {
+  return locale === 'zh' ? zh : en
+}
 
 /** Read the four consent axes out of the settings the user is editing right now. */
 /** Split an entry into its scheme and the part the user actually recognises. */
@@ -170,6 +186,8 @@ function OriginLedger(props: {
   entries: string[]
   empty: string
   onChange: (next: string[]) => void
+  /** The page's strings: this component is outside the render that picks a locale. */
+  copy: OptionsCopy
 }): ReactElement {
   const [draft, setDraft] = useState('')
   const [bulk, setBulk] = useState(false)
@@ -217,8 +235,8 @@ function OriginLedger(props: {
                 <button
                   type="button"
                   className="origin__remove"
-                  title={copy.removeOrigin}
-                  aria-label={`${copy.removeOrigin}: ${entry}`}
+                  title={props.copy.removeOrigin}
+                  aria-label={`${props.copy.removeOrigin}: ${entry}`}
                   onClick={() => { props.onChange(props.entries.filter((candidate) => candidate !== entry)) }}
                 >
                   ×
@@ -234,8 +252,8 @@ function OriginLedger(props: {
           <input
             type="text"
             spellCheck={false}
-            placeholder={copy.addOrigin}
-            aria-label={`${props.title}: ${copy.addOrigin}`}
+            placeholder={props.copy.addOrigin}
+            aria-label={`${props.title}: ${props.copy.addOrigin}`}
             value={draft}
             onChange={(e) => { setDraft(e.target.value); setInvalid(false) }}
             onKeyDown={(e) => {
@@ -249,11 +267,11 @@ function OriginLedger(props: {
         </div>
       )}
 
-      {invalid && <p className="origins__error" role="alert">{copy.addOriginInvalid}</p>}
+      {invalid && <p className="origins__error" role="alert">{props.copy.addOriginInvalid}</p>}
       <footer className="origins__foot">
-        <span className="hint">{bulk ? copy.bulkHint : props.hint}</span>
+        <span className="hint">{bulk ? props.copy.bulkHint : props.hint}</span>
         <button type="button" className="linkish" onClick={() => { setBulk(!bulk); setInvalid(false) }}>
-          {bulk ? copy.bulkDone : copy.bulkEdit}
+          {bulk ? props.copy.bulkDone : props.copy.bulkEdit}
         </button>
       </footer>
     </section>
@@ -289,13 +307,21 @@ export function OptionsApp(): ReactElement {
   }, [])
 
   const bridge = state?.bridgeState ?? 'connecting'
+  const locale = localeFromUiState(state)
+  const copy = copyFor(locale)
   const bridgeLabel = bridge === 'connected'
     ? copy.bridgeConnected
     : bridge === 'reconnecting' ? copy.bridgeReconnecting : bridge === 'stopped' ? copy.bridgeStopped : copy.bridgeConnecting
 
-  const rails = useMemo(() => policyRails(settings, copy), [settings])
+  const rails = useMemo(() => policyRails(settings, copy), [settings, copy])
   const patch = (next: Partial<Settings>): void => {
     setSettings({ ...settings, ...next })
+    // The selector is the one field whose draft *is* the page's language: show
+    // the choice immediately, and let the save confirm it to the background.
+    const language = next.uiLanguage
+    if (language !== undefined) {
+      setState((prev) => prev === null ? prev : { ...prev, locale: language })
+    }
     setSaved(false)
   }
 
@@ -303,18 +329,7 @@ export function OptionsApp(): ReactElement {
     event.preventDefault()
     void sendUiRequest({
       type: 'settings.set',
-      patch: {
-        bridgeUrl: settings.bridgeUrl.trim(),
-        token: settings.token,
-        sharePageContent: settings.sharePageContent,
-        trustedActionOrigins: settings.trustedActionOrigins,
-        approvalNotifications: settings.approvalNotifications,
-        statusMode: settings.statusMode,
-        allowCrossDomainNavigation: settings.allowCrossDomainNavigation,
-        blockedOrigins: settings.blockedOrigins,
-        allowExtensionDebug: settings.allowExtensionDebug,
-        trustJsExecution: settings.trustJsExecution,
-      },
+      patch: settingsPatch(settings),
     }).then(() => { setSaved(true) }).catch(() => {})
   }
 
@@ -433,6 +448,7 @@ export function OptionsApp(): ReactElement {
                 empty={copy.emptyTrusted}
                 entries={settings.trustedActionOrigins}
                 onChange={(next) => { patch({ trustedActionOrigins: next }) }}
+                copy={copy}
               />
               <OriginLedger
                 title={copy.blocked}
@@ -441,6 +457,7 @@ export function OptionsApp(): ReactElement {
                 empty={copy.emptyBlocked}
                 entries={settings.blockedOrigins}
                 onChange={(next) => { patch({ blockedOrigins: next }) }}
+                copy={copy}
               />
             </div>
             <label className="field field--check">
@@ -478,6 +495,20 @@ export function OptionsApp(): ReactElement {
           >
             {copy.openExport}
           </button>
+        </Section>
+
+        <Section eyebrow="06" title={copy.secLanguage}>
+          <label className="field">
+            <span className="field__label">{copy.language}</span>
+            <select
+              value={settings.uiLanguage}
+              onChange={(e) => { patch({ uiLanguage: e.target.value as Settings['uiLanguage'] }) }}
+            >
+              <option value="en">{copy.langEnglish}</option>
+              <option value="zh">{copy.langChinese}</option>
+            </select>
+            <small className="hint">{copy.languageHint}</small>
+          </label>
         </Section>
 
         <footer className="actions">

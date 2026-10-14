@@ -52,7 +52,8 @@ import {
   type InstallMode,
   type UpdatePlatform,
 } from './update-source.ts'
-import type { BridgeServer } from './server.ts'
+import { BridgeToolError, type BridgeServer } from './server.ts'
+import { userPromptCopy } from './ui-copy.ts'
 
 /** Re-exported from the shared wire contract so both halves use one list. */
 export { DEBUG_TOOL_NAMES }
@@ -382,9 +383,51 @@ function spreadAgent(exec: Pick<ToolRunContext, 'agent'>): { agent?: unknown } {
   return exec.agent === undefined ? {} : { agent: exec.agent }
 }
 
+/**
+ * How long one bridge call may stay silent before the human is asked about it.
+ *
+ * A call waiting on a confirmation card in Chrome and a page that has stopped answering look
+ * identical from here: the bridge holds only its own timer, and no protocol frame reports a
+ * wait. Twenty seconds is past any ordinary page action but well inside the extension's
+ * 60-second approval window, so the ask lands while it can still help.
+ */
+export const SILENT_CALL_NUDGE_MS = 20_000
+/** Tools that talk to the user themselves, or that run as part of such a tool's own asking. */
+const NUDGE_EXEMPT_TOOLS = new Set(['browser_bind_interactive', 'browser_list_tabs', 'browser_bind_tab'])
+
 /** User may take a while to pick a page; keep the tool alive while asking. */
 export const BIND_INTERACTIVE_TIMEOUT_MS = 600_000
 export const GOOGLE_DRIVE_TIMEOUT_MS = 600_000
+
+/**
+ * How long a refused page call waits for the user to pick the page it should
+ * run on before it settles with that refusal.
+ *
+ * The question appears the moment the call is refused, so the user is looking
+ * at it already and the window only has to survive a click. A user who is away
+ * longer keeps the ordinary failure, whose answer names
+ * `browser_bind_interactive` — the same question with the full host window.
+ */
+export const PAGE_CHOICE_WINDOW_MS = 60_000
+
+/**
+ * Cooperative time limit for one page-touching tool call.
+ *
+ * Such a call can spend its time on a page choice before it runs at all, and
+ * every part of that is separately bounded: the dispatch the extension refused,
+ * the list of open pages, the bind, and the retry — each by `toolTimeoutMs` —
+ * plus the user's own window ({@link PAGE_CHOICE_WINDOW_MS}). This is their sum,
+ * so the timeout policy cannot answer the model with a timeout while the
+ * sequence is still legitimately running and discard the bind the user just
+ * made. Every one of those parts fails on its own timer, so a budget larger
+ * than the sum could only ever hide a hang in this layer's own code.
+ *
+ * @param toolTimeoutMs - the configured per-call bridge budget.
+ * @returns the limit one page call declares.
+ */
+export function pageToolTimeoutMs(toolTimeoutMs: number): number {
+  return 4 * toolTimeoutMs + PAGE_CHOICE_WINDOW_MS
+}
 
 /**
  * Longest explicit delay `browser_wait` will pass to the page.
@@ -407,56 +450,152 @@ export function clampWaitMs(value: unknown): number {
   return Math.min(Math.floor(value), MAX_WAIT_MS)
 }
 
+/** What one page choice did, and what to tell the model about it. */
+interface PageChoice {
+  /** Whether the session now owns a page. False leaves it exactly as it was. */
+  bound: boolean
+  /** Model-facing text: the bind result, or why nothing was bound. */
+  text: string
+}
+
+/** How one page choice is asked and how long each of its steps may take. */
+interface PageChoiceOptions {
+  /**
+   * Bind the only open page without asking. A session with one page to choose
+   * from has no choice to make, so the question would render one option and
+   * wait for a click that decides nothing.
+   */
+  silentWhenSingle: boolean
+  /** Bridge budget for the list and the bind (both extension virtual actions). */
+  waitMs: number
+  /**
+   * How long to wait for the user's answer. Left out, the question waits as
+   * long as the declaring tool's own cooperative budget allows — which is what
+   * the explicit `browser_bind_interactive` wants and what a refused page call
+   * cannot afford.
+   */
+  choiceMs?: number
+}
+
+/**
+ * Bound the question to a window, fused with the caller's cancellation.
+ *
+ * @param upstream - the tool call's own signal.
+ * @param timeoutMs - window in ms; omitted keeps the caller's signal as-is.
+ * @returns the signal to ask under, plus the cleanup that clears its timer.
+ */
+function choiceWindow(upstream: AbortSignal, timeoutMs?: number): { signal: AbortSignal; dispose: () => void } {
+  if (timeoutMs === undefined) return { signal: upstream, dispose: () => {} }
+  const controller = new AbortController()
+  const onAbort = (): void => controller.abort()
+  const timer = setTimeout(onAbort, timeoutMs)
+  if (upstream.aborted) onAbort()
+  else upstream.addEventListener('abort', onAbort, { once: true })
+  return {
+    signal: controller.signal,
+    dispose: () => {
+      clearTimeout(timer)
+      upstream.removeEventListener('abort', onAbort)
+    },
+  }
+}
+
+/**
+ * Let the user point this session at one of the open pages, and bind it.
+ *
+ * This is the whole interaction behind both callers: `browser_bind_interactive`
+ * (the model asks, the user picks) and the page choice a refused page call
+ * makes for itself (the extension answered that this session has no page it can
+ * operate). Listing, asking and binding are shared so the two can never drift
+ * in wording or in what they consider bindable.
+ *
+ * @param ctx - Cordis context carrying the user-questions service.
+ * @param bridge - the authenticated bridge server.
+ * @param exec - the running call, for its session and its cancellation.
+ * @param options - whether a single page needs asking, and the two windows.
+ * @returns whether a page was bound, with the text describing it.
+ * @throws when the listing or the bind fails at the transport — that is the
+ * bridge or the extension talking, not a page the user could choose.
+ */
+async function choosePage(
+  ctx: Context,
+  bridge: BridgeServer,
+  exec: Pick<ToolRunContext, 'agent' | 'signal'>,
+  options: PageChoiceOptions,
+): Promise<PageChoice> {
+  const sessionId = exec.agent === undefined ? undefined : String(exec.agent.id)
+  const userQuestions = ctx.get('userQuestions') as UserQuestionsLike | undefined
+  if (userQuestions === undefined) {
+    return { bound: false, text: 'Binding is unavailable: the user-questions service is not mounted in this composition.' }
+  }
+  // 1) List open pages through the extension (background virtual action). A
+  // failure here is a transport problem, not a page problem, so it travels as
+  // the tool error it is rather than as an answer about pages.
+  const listed = await bridge.requestTool('browser_list_tabs', {}, exec.signal, options.waitMs, sessionId)
+  const entries = parseBindableTabs((listed as { text?: unknown }).text)
+  if (entries.length === 0) {
+    return { bound: false, text: 'No bindable web pages are open. Open a page first, then ask again.' }
+  }
+  // Same cap the extension renders to: a lower number here silently hides the
+  // pages the extension already decided to report.
+  if (entries.length > MAX_BINDABLE_TABS) entries.length = MAX_BINDABLE_TABS
+  const sole = entries.length === 1 ? entries[0] : undefined
+  let pickedId: number | undefined
+  if (options.silentWhenSingle && sole !== undefined) {
+    pickedId = sole.id
+  } else {
+    // 2) Ask the human which page to use (standard GUI question, blocks here).
+    const questionOptions = entries.map((entry) => ({
+      label: `${entry.id} — ${entry.title || entry.url}`,
+      description: entry.url,
+    }))
+    const copy = userPromptCopy(bridge.clientUiLanguage())
+    const wait = choiceWindow(exec.signal, options.choiceMs)
+    try {
+      const answers = await userQuestions.ask({
+        questions: [{
+          id: 'bind-page',
+          question: copy.bindQuestion,
+          options: questionOptions,
+        }],
+        ...spreadAgent(exec),
+        signal: wait.signal,
+      })
+      const selected = answers.answers[0]?.selected[0]
+      const match = /^(\d+)/.exec(String(selected ?? ''))
+      if (match !== null) pickedId = Number(match[1])
+    } catch (error: unknown) {
+      return { bound: false, text: `Binding cancelled: ${errText(error)}` }
+    } finally {
+      wait.dispose()
+    }
+  }
+  if (pickedId === undefined || !entries.some((entry) => entry.id === pickedId)) {
+    return { bound: false, text: 'No page was chosen, so nothing was bound.' }
+  }
+  // 3) Bind the session to the chosen tab (extension virtual action). A refusal
+  // here is reported as-is: the extension's own reason (another session holds
+  // the browser, the tab is gone) is more use than anything this layer could
+  // add, and swallowing it into text would hide that it failed.
+  const bound = await bridge.requestTool('browser_bind_tab', { tabId: pickedId }, exec.signal, options.waitMs, sessionId)
+  const boundText = (bound as { text?: unknown }).text
+  return { bound: true, text: typeof boundText === 'string' ? boundText : `Bound session to tab ${pickedId}.` }
+}
+
 /** Run the interactive binding flow inside one tool call. */
 async function bindInteractiveRun(
   ctx: Context,
   bridge: BridgeServer,
   exec: Pick<ToolRunContext, 'agent' | 'signal'>,
 ): Promise<TextResult> {
-  const sessionId = exec.agent === undefined ? undefined : String(exec.agent.id)
-  const userQuestions = ctx.get('userQuestions') as UserQuestionsLike | undefined
-  if (userQuestions === undefined) {
-    return { text: 'Binding is unavailable: the user-questions service is not mounted in this composition.' }
-  }
-  // 1) List open pages through the extension (background virtual action).
-  const listed = await bridge.requestTool('browser_list_tabs', {}, exec.signal, BIND_INTERACTIVE_TIMEOUT_MS, sessionId)
-  const entries = parseBindableTabs((listed as { text?: unknown }).text)
-  if (entries.length === 0) {
-    return { text: 'No bindable web pages are open. Open a page first, then ask again.' }
-  }
-  // Same cap the extension renders to: a lower number here silently hides the
-  // pages the extension already decided to report.
-  if (entries.length > MAX_BINDABLE_TABS) entries.length = MAX_BINDABLE_TABS
-  // 2) Ask the human which page to use (standard GUI question, blocks here).
-  const options = entries.map((entry) => ({
-    label: `${entry.id} — ${entry.title || entry.url}`,
-    description: entry.url,
-  }))
-  let pickedId: number | undefined
-  try {
-    const answers = await userQuestions.ask({
-      questions: [{
-        id: 'bind-page',
-        question: 'Which open page should this session operate?',
-        options,
-      }],
-      ...spreadAgent(exec),
-      signal: exec.signal,
-    })
-    const selected = answers.answers[0]?.selected[0]
-    const match = /^(\d+)/.exec(String(selected ?? ''))
-    if (match !== null) pickedId = Number(match[1])
-  } catch (error: unknown) {
-    const message = errText(error)
-    return { text: `Binding cancelled: ${message}` }
-  }
-  if (pickedId === undefined || !entries.some((entry) => entry.id === pickedId)) {
-    return { text: 'No page was chosen, so nothing was bound.' }
-  }
-  // 3) Bind the session to the chosen tab (extension virtual action).
-  const bound = await bridge.requestTool('browser_bind_tab', { tabId: pickedId }, exec.signal, BIND_INTERACTIVE_TIMEOUT_MS, sessionId)
-  const boundText = (bound as { text?: unknown }).text
-  return { text: typeof boundText === 'string' ? boundText : `Bound session to tab ${pickedId}.` }
+  // The model asked for this by name, so a single open page is still the user's
+  // decision to make here; only the page choice a refused call makes for itself
+  // takes the one page there is.
+  const choice = await choosePage(ctx, bridge, exec, {
+    silentWhenSingle: false,
+    waitMs: BIND_INTERACTIVE_TIMEOUT_MS,
+  })
+  return { text: choice.text }
 }
 
 /** Per-CSV preview length and max number of previewed sheets in one reply. */
@@ -1211,11 +1350,104 @@ export function registerBrowserTools(
   options: BrowserToolsOptions,
 ): BrowserToolRegistration {
   const disposers = new Map<string, () => void>()
+  /**
+   * Ask the human about a call that has gone quiet, then keep waiting either way.
+   *
+   * The answer never changes the call — it only decides who knows that something is waiting.
+   * Asking is the whole point: the card the extension raises lives in Chrome, out of sight of
+   * whoever started the call, and a silent ninety seconds reads as "the tool broke". A live
+   * child cannot open a human interaction (`CALLER_NOT_LIVE` / `DELEGATED_CALLER`), so a
+   * refused ask is dropped and the wait simply continues.
+   */
+  const nudgeWhenSilent = async <T>(
+    exec: Pick<ToolRunContext, 'agent' | 'signal'>,
+    name: string,
+    call: Promise<T>,
+  ): Promise<T> => {
+    const userQuestions = NUDGE_EXEMPT_TOOLS.has(name)
+      ? undefined
+      : ctx.get('userQuestions') as UserQuestionsLike | undefined
+    if (userQuestions === undefined) return call
+    const timer = setTimeout(() => {
+      // Read at ask time: the language can arrive after this call started, and
+      // it is a cached field, not a round trip.
+      const copy = userPromptCopy(bridge.clientUiLanguage())
+      void userQuestions.ask({
+        questions: [{
+          id: 'silent-browser-call',
+          question: copy.silentQuestion(name, Math.round(SILENT_CALL_NUDGE_MS / 1000)),
+          options: [
+            { label: copy.silentAnswerNone },
+            { label: copy.silentAnswerWorking },
+          ],
+        }],
+        ...spreadAgent(exec),
+        signal: exec.signal,
+      }).catch(() => undefined)
+    }, SILENT_CALL_NUDGE_MS)
+    try {
+      return await call
+    } finally {
+      clearTimeout(timer)
+    }
+  }
+  const dispatch = async (
+    exec: Pick<ToolRunContext, 'agent' | 'signal'>,
+    name: string,
+    args: Record<string, unknown>,
+    sessionId: string | undefined,
+  ): Promise<unknown> => await nudgeWhenSilent(exec, name, sessionId === undefined
+    ? bridge.requestTool(name, args, exec.signal, options.toolTimeoutMs)
+    : bridge.requestTool(name, args, exec.signal, options.toolTimeoutMs, sessionId))
+  /**
+   * Dispatch one page call, resolving a missing page inside the same call.
+   *
+   * A session that has never bound a page — or whose page is one Chrome keeps
+   * to its own extension — used to spend its first browser call on a refusal
+   * and a second one on `browser_bind_interactive`, so every session that began
+   * anywhere but an operable active tab paid for a failed call and a round trip
+   * before any work happened. The extension marks those refusals
+   * `needsPageChoice`; here that becomes the page choice itself, and the call
+   * runs again once a page is bound.
+   *
+   * Exactly one retry: a page that is unoperable again settles the call rather
+   * than looping, and a refusal that is not about a missing page (another
+   * session owns the browser) is never answered with a bind it cannot fix.
+   */
+  /**
+   * The page choice already in flight per session.
+   *
+   * A model may call several page tools in one step. Without this, every refused
+   * call in that step would raise its own question and bind its own page — two
+   * identical dialogs on screen, the last bind winning for both retries. The
+   * first choice is shared instead; whoever waited for it retries their own call
+   * once a page is bound.
+   */
+  const pageChoices = new Map<string, Promise<PageChoice>>()
+  const choosePageOnce = (exec: Pick<ToolRunContext, 'agent' | 'signal'>, sessionId: string): Promise<PageChoice> => {
+    const running = pageChoices.get(sessionId)
+    if (running !== undefined) return running
+    const choice = choosePage(ctx, bridge, exec, {
+      silentWhenSingle: true,
+      waitMs: options.toolTimeoutMs,
+      choiceMs: PAGE_CHOICE_WINDOW_MS,
+    }).finally(() => { pageChoices.delete(sessionId) })
+    pageChoices.set(sessionId, choice)
+    return choice
+  }
   const callRaw = async (exec: Pick<ToolRunContext, 'agent' | 'signal'>, name: string, args: Record<string, unknown>): Promise<unknown> => {
     const sessionId = exec.agent === undefined ? undefined : String(exec.agent.id)
-    return sessionId === undefined
-      ? await bridge.requestTool(name, args, exec.signal, options.toolTimeoutMs)
-      : await bridge.requestTool(name, args, exec.signal, options.toolTimeoutMs, sessionId)
+    try {
+      return await dispatch(exec, name, args, sessionId)
+    } catch (error: unknown) {
+      if (sessionId === undefined || !(error instanceof BridgeToolError) || !error.needsPageChoice) throw error
+      const choice = await choosePageOnce(exec, sessionId)
+      // Nothing was bound (no page open, the user declined, or the window ran
+      // out): the failure the extension gave is still the best answer, and its
+      // text already names the two ways out.
+      if (!choice.bound || exec.signal.aborted) throw error
+      return await dispatch(exec, name, args, sessionId)
+    }
   }
   const call = async (exec: Pick<ToolRunContext, 'agent' | 'signal'>, name: string, args: Record<string, unknown>): Promise<TextResult> => {
     return normalizeTextResult(await callRaw(exec, name, args), name)
@@ -1529,6 +1761,10 @@ function defineTools(
   features: { selectorTargets: boolean; textFind: boolean; pageImage: boolean; selectOption: boolean; jsDebug: boolean },
 ): ToolDefinition[] {
   const { selectorTargets, textFind, pageImage, selectOption, jsDebug } = features
+  // Every tool this factory defines runs against a bound page, so every one of
+  // them may have to make a page choice first; see pageToolTimeoutMs. The
+  // bridge waits inside them stay at options.toolTimeoutMs.
+  const pageCallTimeoutMs = pageToolTimeoutMs(options.toolTimeoutMs)
   const snapshot = (): ToolDefinition => defineTool({
     name: 'browser_snapshot',
     description: `Read the page and accessible iframes as structured text with numbered action targets, plus a screenshot of the same moment. Use frame for iframe targets, delta=true for changes only, and region to limit tokens. Truncation is reported in the snapshot notes. Pass visual=false for a cheaper text-only read. ${UNTRUSTED_CONTENT_WARNING}`,
@@ -1538,7 +1774,7 @@ function defineTools(
       maxChars: { type: 'number', description: 'Optional character budget for this read (500 up to the negotiated cap); content beyond it is truncated with a note.' },
       visual: { type: 'boolean', description: 'Include a same-moment screenshot. Defaults to true.' },
     },
-    timeoutMs: options.toolTimeoutMs,
+    timeoutMs: pageCallTimeoutMs,
     output: VISUAL_OUTPUT,
     execute: async (args, exec) => {
       const a = args as { delta?: boolean; region?: string; maxChars?: number; visual?: boolean }
@@ -1578,7 +1814,7 @@ function defineTools(
       format: { type: 'string', enum: ['png', 'jpeg'], description: 'Encoded image format. Defaults to png.' },
       quality: { type: 'number', description: 'JPEG quality 1-100. Ignored for png.' },
     },
-    timeoutMs: options.toolTimeoutMs,
+    timeoutMs: pageCallTimeoutMs,
     output: VISUAL_OUTPUT,
     execute: async (args, exec) => {
       if (!await imageRouteAvailable(ctx, exec, clientDebugger)) {
@@ -1607,14 +1843,14 @@ function defineTools(
       cursor: { type: 'number', description: 'Return entries after this cursor; pass the previous nextCursor.' },
       limit: { type: 'number', description: 'Maximum entries to return (default 50, max 300).' },
     },
-    timeoutMs: options.toolTimeoutMs,
+    timeoutMs: pageCallTimeoutMs,
     output: TEXT_OUTPUT,
     execute: (args, exec) => call(exec, 'browser_console', args as Record<string, unknown>),
   })
 
   const network = (): ToolDefinition => defineTool({
     name: 'browser_network',
-    description: `Read network requests from the controlled tab (url, method, status, type, duration) with a cursor, read one response body by requestId, or override a response. Requests are captured only while the tab is attached. Pass mock to answer matching requests from memory (status/headers/body, or fail) and mockClear to remove overrides. ${UNTRUSTED_CONTENT_WARNING}`,
+    description: `Read network requests from the controlled tab (url, method, status, type, duration) with a cursor, read one request or response body by requestId (+body marks a request body), or override a response. Requests are captured only while the tab is attached. Pass mock to answer matching requests from memory (status/headers/body, or fail); mockClear removes overrides. ${UNTRUSTED_CONTENT_WARNING}`,
     parameters: {
       url: { type: 'string', description: 'Only requests whose URL contains this substring.' },
       resourceType: { type: 'string', description: 'Only this CDP resource type, e.g. document, xhr, fetch, script, image.' },
@@ -1629,19 +1865,19 @@ function defineTools(
       },
       mockClear: { type: 'boolean', description: 'Remove every override installed for this tab.' },
     },
-    timeoutMs: options.toolTimeoutMs,
+    timeoutMs: pageCallTimeoutMs,
     output: TEXT_OUTPUT,
     execute: (args, exec) => call(exec, 'browser_network', args as Record<string, unknown>),
   })
 
   const evaluate = (): ToolDefinition => defineTool({
     name: 'browser_eval',
-    description: `Evaluate a JavaScript expression in the page's own context and return its value; page variables and frameworks are reachable, and the page CSP does not block the evaluation. Await promises by default. Requires its own approval unless the user let origin trust cover JavaScript execution in Settings. ${UNTRUSTED_CONTENT_WARNING}`,
+    description: `Evaluate JavaScript in the page's own context; page variables and frameworks are reachable. Await promises by default. For page text, structure, or network use browser_get_text, browser_dom_query, or browser_network instead. Requires approval unless origin trust covers JavaScript execution. ${UNTRUSTED_CONTENT_WARNING}`,
     parameters: {
       expression: { type: 'string', required: true, description: 'JavaScript expression to evaluate. Use an async IIFE for multi-statement work.' },
       awaitPromise: { type: 'boolean', description: 'Await a returned promise. Defaults to true.' },
     },
-    timeoutMs: options.toolTimeoutMs,
+    timeoutMs: pageCallTimeoutMs,
     output: TEXT_OUTPUT,
     execute: (args, exec) => call(exec, 'browser_eval', args as Record<string, unknown>),
   })
@@ -1653,17 +1889,19 @@ function defineTools(
       action: { type: 'string', enum: ['accept', 'dismiss'], required: true, description: 'Accept the dialog (OK) or dismiss it (Cancel).' },
       text: { type: 'string', description: 'Text to submit when the dialog is a prompt.' },
     },
-    timeoutMs: options.toolTimeoutMs,
+    timeoutMs: pageCallTimeoutMs,
     output: TEXT_OUTPUT,
     execute: (args, exec) => call(exec, 'browser_dialog', args as Record<string, unknown>),
   })
 
   const debug = (): ToolDefinition => defineTool({
     name: 'browser_debug',
-    description: 'Debug the controlled tab over Chrome\'s debugger: set a line breakpoint (url or urlRegex plus a 0-based lineNumber) or an XHR/fetch breakpoint (kind "xhr"), list and remove them, pause, resume, step, read a pause with its call frames and variables (action "wait"), and evaluate an expression in a paused frame (action "eval"). Action "scripts" lists what is loaded. A pause freezes the page\'s JavaScript, so every other page-facing tool is refused until it resumes. '
+    description: 'Debug the controlled tab over Chrome\'s debugger: set a line breakpoint (url or urlRegex plus a 0-based lineNumber) or an XHR/fetch breakpoint (kind "xhr"), list and remove them, pause, resume, step, read a pause with its call frames and variables (action "wait"), and evaluate an expression in a paused frame (action "eval"). Action "scripts" lists what is loaded; action "listeners" lists the event listeners on a selector (document by default) and on each ancestor, narrowed to given event types when asked. A pause freezes the page\'s JavaScript, so every other page-facing tool is refused until it resumes. '
       + UNTRUSTED_CONTENT_WARNING,
     parameters: {
-      action: { type: 'string', enum: ['scripts', 'break', 'unbreak', 'list', 'pause', 'resume', 'step', 'wait', 'eval'], required: true, description: 'What to do. "break"/"unbreak" manage breakpoints; "pause"/"resume"/"step" move execution; "wait" reads buffered pauses; "eval" evaluates in a paused frame.' },
+      action: { type: 'string', enum: ['scripts', 'break', 'unbreak', 'list', 'pause', 'resume', 'step', 'wait', 'eval', 'listeners'], required: true, description: 'What to do. "break"/"unbreak" manage breakpoints; "pause"/"resume"/"step" move execution; "wait" reads buffered pauses; "eval" evaluates in a paused frame; "listeners" reads event listeners.' },
+      selector: { type: 'string', description: 'listeners: CSS selector of the element to read; omit to read document.' },
+      type: { type: 'string', description: 'listeners: event types to report, comma-separated (for example "blur,focus"). Omit to report every type, capped per level.' },
       kind: { type: 'string', description: 'For action "break": "line" (default) or "xhr". For action "step": "over" (default), "into", or "out".' },
       url: { type: 'string', description: 'break: script url (exact, or a substring unique among loaded scripts), or the request-URL substring for kind "xhr". scripts: only list urls containing this.' },
       urlRegex: { type: 'string', description: 'break: a CDP urlRegex matching the script to break in. Use instead of url when a prefix or pattern is what identifies the file.' },
@@ -1678,7 +1916,7 @@ function defineTools(
       frameIndex: { type: 'number', description: 'eval: which call frame of the current pause to evaluate in (default 0, the innermost).' },
       expression: { type: 'string', description: 'eval: the expression to evaluate. It runs synchronously in the paused frame, so promises cannot settle.' },
     },
-    timeoutMs: options.toolTimeoutMs,
+    timeoutMs: pageCallTimeoutMs,
     output: TEXT_OUTPUT,
     execute: (args, exec) => call(exec, 'browser_debug', args as Record<string, unknown>),
   })
@@ -1691,7 +1929,7 @@ function defineTools(
       resourceTypes: { type: 'array', items: { type: 'string' }, description: 'Optional restriction, e.g. ["image", "script"].' },
       clear: { type: 'boolean', description: 'Remove every rule this extension installed for this tab instead of adding one.' },
     },
-    timeoutMs: options.toolTimeoutMs,
+    timeoutMs: pageCallTimeoutMs,
     output: TEXT_OUTPUT,
     execute: (args, exec) => call(exec, 'browser_block', args as Record<string, unknown>),
   })
@@ -1705,7 +1943,7 @@ function defineTools(
       responseHeaders: { type: 'array', items: { type: 'object', additionalProperties: true }, description: 'Changes applied to responses: [{ header, operation, value? }].' },
       clear: { type: 'boolean', description: 'Remove every rule this extension installed for this tab instead of adding one.' },
     },
-    timeoutMs: options.toolTimeoutMs,
+    timeoutMs: pageCallTimeoutMs,
     output: TEXT_OUTPUT,
     execute: (args, exec) => call(exec, 'browser_headers', args as Record<string, unknown>),
   })
@@ -1728,14 +1966,14 @@ function defineTools(
         : {},
       frame: FRAME_PARAMETER,
     },
-    timeoutMs: options.toolTimeoutMs,
+    timeoutMs: pageCallTimeoutMs,
     output: TEXT_OUTPUT,
     execute: (args, exec) => call(exec, 'browser_click', args as Record<string, unknown>),
   })
 
   const clickPointer = (): ToolDefinition => defineTool({
     name: 'browser_click_pointer',
-    description: 'Click one element using a full mouse press (pointerdown, mousedown, pointerup, mouseup, click at its centre) instead of a single click event. Use it when browser_click reports success but nothing changes: canvas/SVG editors such as Google Slides bind controls to the press sequence. Same targets and approval as browser_click.'
+    description: 'Click one element using a full mouse press (pointerdown, mousedown, pointerup, mouseup, click at its centre) instead of a single click event. Use it for a control that acts on the press itself, where browser_click reports success and nothing changes — Google Slides filmstrips and toolbars are the measured case. Same targets and approval as browser_click.'
       + (selectorTargets ? '' : ' This build takes an index target only.'),
     parameters: {
       index: { type: 'number', description: 'Element index from the browser_snapshot inventory.' },
@@ -1744,7 +1982,7 @@ function defineTools(
         : {},
       frame: FRAME_PARAMETER,
     },
-    timeoutMs: options.toolTimeoutMs,
+    timeoutMs: pageCallTimeoutMs,
     output: TEXT_OUTPUT,
     execute: (args, exec) => call(exec, 'browser_click_pointer', args as Record<string, unknown>),
   })
@@ -1757,7 +1995,7 @@ function defineTools(
     parameters: {
       page: { type: 'number', required: true, description: 'Page number to open, counting from 1.' },
     },
-    timeoutMs: options.toolTimeoutMs,
+    timeoutMs: pageCallTimeoutMs,
     output: TEXT_OUTPUT,
     execute: (args, exec) => call(exec, 'browser_slides_open_page', args as Record<string, unknown>),
   })
@@ -1776,7 +2014,7 @@ function defineTools(
       text: { type: 'string', required: true, description: 'Text to enter.' },
       replace: { type: 'boolean', description: 'When true, clear the existing value before entering text. Defaults to append.' },
     },
-    timeoutMs: options.toolTimeoutMs,
+    timeoutMs: pageCallTimeoutMs,
     output: TEXT_OUTPUT,
     execute: (args, exec) => {
       const a = args as { index?: number; selector?: string; frame?: number; text: string; replace?: boolean }
@@ -1797,7 +2035,7 @@ function defineTools(
       key: { type: 'string', required: true, description: 'Key name using KeyboardEvent.key semantics.' },
       frame: FRAME_PARAMETER,
     },
-    timeoutMs: options.toolTimeoutMs,
+    timeoutMs: pageCallTimeoutMs,
     output: TEXT_OUTPUT,
     execute: (args, exec) => call(exec, 'browser_press', args as Record<string, unknown>),
   })
@@ -1810,7 +2048,7 @@ function defineTools(
       amount: { type: 'number', description: 'Number of pixels to scroll; ignored for top and bottom.' },
       frame: FRAME_PARAMETER,
     },
-    timeoutMs: options.toolTimeoutMs,
+    timeoutMs: pageCallTimeoutMs,
     output: TEXT_OUTPUT,
     execute: (args, exec) => {
       const a = args as { direction: 'up' | 'down' | 'top' | 'bottom'; amount?: number; frame?: number }
@@ -1828,7 +2066,7 @@ function defineTools(
     parameters: {
       url: { type: 'string', required: true, description: 'Complete http or https URL.' },
     },
-    timeoutMs: options.toolTimeoutMs,
+    timeoutMs: pageCallTimeoutMs,
     output: TEXT_OUTPUT,
     execute: (args, exec) => call(exec, 'browser_navigate', args as Record<string, unknown>),
   })
@@ -1837,7 +2075,7 @@ function defineTools(
     name,
     description,
     parameters: {},
-    timeoutMs: options.toolTimeoutMs,
+    timeoutMs: pageCallTimeoutMs,
     output: TEXT_OUTPUT,
     execute: (_args, exec) => call(exec, name, {}),
   })
@@ -1851,7 +2089,7 @@ function defineTools(
       limit: { type: 'number', description: 'Maximum matches to report (default 20, max 50).' },
       frame: FRAME_PARAMETER,
     },
-    timeoutMs: options.toolTimeoutMs,
+    timeoutMs: pageCallTimeoutMs,
     output: TEXT_OUTPUT,
     execute: (args, exec) => call(exec, 'browser_dom_query', args as Record<string, unknown>),
   })
@@ -1872,7 +2110,7 @@ function defineTools(
       frame: FRAME_PARAMETER,
       maxChars: { type: 'number', description: 'Optional character budget for this read (500-32000, default 8000); content beyond it is truncated with a note.' },
     },
-    timeoutMs: options.toolTimeoutMs,
+    timeoutMs: pageCallTimeoutMs,
     output: TEXT_OUTPUT,
     execute: (args, exec) => {
       const a = args as { selector?: string; find?: string; context?: number; frame?: number; maxChars?: number }
@@ -1896,7 +2134,7 @@ function defineTools(
       index: { type: 'number', description: 'Element index from the browser_snapshot inventory.' },
       frame: FRAME_PARAMETER,
     },
-    timeoutMs: options.toolTimeoutMs,
+    timeoutMs: pageCallTimeoutMs,
     output: VISUAL_OUTPUT,
     execute: async (args, exec) => {
       // No debugger needed: a page picture is read over the page's own session.
@@ -1925,7 +2163,7 @@ function defineTools(
       ms: { type: 'number', description: `Additional milliseconds to wait (0-${MAX_WAIT_MS}). Omit to perform only the settle check.` },
       frame: FRAME_PARAMETER,
     },
-    timeoutMs: options.toolTimeoutMs,
+    timeoutMs: pageCallTimeoutMs,
     output: TEXT_OUTPUT,
     execute: (args, exec) => {
       const a = args as { ms?: number; frame?: number }

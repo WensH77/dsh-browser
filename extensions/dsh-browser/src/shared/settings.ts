@@ -28,6 +28,10 @@ export interface Settings {
   allowCrossDomainNavigation: boolean
   /** Origins that must never be operated (reads or actions). */
   blockedOrigins: string[]
+  /** Language of every user-facing surface: the panel, the approval cards, the
+   * system notifications, and the options page. English by default, and never
+   * derived from the browser's own language. */
+  uiLanguage: 'en' | 'zh'
   /** Allow the harness to attach the debugger: screenshots, console, network,
    * response overrides, and page evaluation. Off on first install; while off,
    * those tools are not registered at all, so the model cannot see them. */
@@ -47,6 +51,7 @@ export const SETTINGS_DEFAULTS: Settings = {
   statusMode: 'floating',
   allowCrossDomainNavigation: false,
   blockedOrigins: [],
+  uiLanguage: 'en',
   allowExtensionDebug: false,
   trustJsExecution: false,
 }

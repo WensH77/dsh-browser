@@ -60,6 +60,8 @@ function mockDebugger(overrides: {
   attachError?: Error
   /** What `chrome.debugger.getTargets()` reports (foreign attachments). */
   targets?: unknown[]
+  /** What the page reports for `document.visibilityState` / `document.hasFocus()`. */
+  tabState?: { hidden?: boolean; unfocused?: boolean }
 } = {}) {
   const attach = vi.fn(async () => {
     if (overrides.attachError !== undefined) throw overrides.attachError
@@ -72,6 +74,11 @@ function mockDebugger(overrides: {
         cssVisualViewport: { clientWidth: 1280, clientHeight: 800 },
         contentSize: { width: 1280, height: 4000 },
       }
+    }
+    // The capture reads the tab's own state before shooting; a mock that answers
+    // nothing means "visible and focused", which is the note-free path.
+    if (method === 'Runtime.evaluate') {
+      return { result: { value: overrides.tabState ?? {} } }
     }
     // Domain enables answer with an empty result and must not consume a shot.
     if (method !== 'Page.captureScreenshot') return {}
@@ -104,8 +111,10 @@ describe('captureTab', () => {
     const image = await captureTab(7, { limits: LIMITS })
 
     expect(mock.attach).toHaveBeenCalledWith({ tabId: 7 }, '1.3')
-    expect(mock.sendCommand).toHaveBeenNthCalledWith(1, { tabId: 7 }, 'Page.getLayoutMetrics')
-    expect(mock.sendCommand).toHaveBeenNthCalledWith(2, { tabId: 7 }, 'Page.captureScreenshot', {
+    // The session enables `Runtime` and reads the tab's state before it shoots, so
+    // the region and the frame are calls 3 and 4.
+    expect(mock.sendCommand).toHaveBeenNthCalledWith(3, { tabId: 7 }, 'Page.getLayoutMetrics')
+    expect(mock.sendCommand).toHaveBeenNthCalledWith(4, { tabId: 7 }, 'Page.captureScreenshot', {
       format: 'png',
       clip: { x: 0, y: 0, width: 1280, height: 800, scale: 1 },
       captureBeyondViewport: false,
@@ -115,13 +124,32 @@ describe('captureTab', () => {
     expect(mock.detach).toHaveBeenCalledWith({ tabId: 7 })
   })
 
+  it('says so when the tab is not being looked at, because the frame may be the kept one', async () => {
+    const mock = mockDebugger({ tabState: { hidden: true } })
+    stubRaster(1280, 800)
+
+    const image = await captureTab(7, { limits: LIMITS })
+
+    expect(mock.sendCommand).toHaveBeenCalledWith({ tabId: 7 }, 'Runtime.evaluate', expect.anything())
+    expect(image.note).toContain('The controlled tab is hidden.')
+  })
+
+  it('leaves the note off while the tab is visible and focused', async () => {
+    mockDebugger()
+    stubRaster(1280, 800)
+
+    const image = await captureTab(7, { limits: LIMITS })
+
+    expect(image.note).toBeUndefined()
+  })
+
   it('captures the whole page beyond the viewport when asked', async () => {
     const mock = mockDebugger()
     stubRaster(1280, 4000)
 
     const image = await captureTab(7, { fullPage: true, limits: { ...LIMITS, maxPixels: 40_000_000 } })
 
-    expect(mock.sendCommand).toHaveBeenNthCalledWith(2, { tabId: 7 }, 'Page.captureScreenshot', {
+    expect(mock.sendCommand).toHaveBeenNthCalledWith(4, { tabId: 7 }, 'Page.captureScreenshot', {
       format: 'png',
       clip: { x: 0, y: 0, width: 1280, height: 4000, scale: 1 },
       captureBeyondViewport: true,
@@ -218,7 +246,7 @@ describe('captureTab', () => {
 
     const image = await captureTab(7, { fullPage: true, limits: LIMITS })
 
-    const screenshot = mock.sendCommand.mock.calls[1] as unknown as [unknown, string, { clip: { scale: number } }]
+    const screenshot = mock.sendCommand.mock.calls[3] as unknown as [unknown, string, { clip: { scale: number } }]
     expect(screenshot[2].clip.scale).toBe(1)
     expect(raster.decode).toHaveBeenCalledWith(expect.anything())
     expect(image.width).toBe(526)
@@ -233,7 +261,7 @@ describe('captureTab', () => {
     const image = await captureTab(7, { limits: { ...LIMITS, maxPixels: 1_280 * 800 / 4 } })
 
     // The capture is never asked to scale: the resize happens after decoding.
-    expect(mock.sendCommand).toHaveBeenNthCalledWith(2, { tabId: 7 }, 'Page.captureScreenshot', {
+    expect(mock.sendCommand).toHaveBeenNthCalledWith(4, { tabId: 7 }, 'Page.captureScreenshot', {
       format: 'png',
       clip: { x: 0, y: 0, width: 1280, height: 800, scale: 1 },
       captureBeyondViewport: false,

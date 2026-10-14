@@ -116,13 +116,30 @@ describe('panel layout contract', () => {
     expect(rule).toContain('background:')
   })
 
-  it('lists the newest operation first', async () => {
+  it('lists the newest operation first, without dropping the oldest', async () => {
     // The store keeps the newest at index 0. The panel used to `reverse()` it,
     // which put the newest at the BOTTOM: with a long feed, the entry that just
     // happened was the one you could not see without scrolling.
+    //
+    // It then rendered only the newest 15 (`slice(0, 15)`) while the store kept 30, so the
+    // earliest operations were not merely below the fold — they were never in the DOM, and
+    // no amount of scrolling could reach them. The whole feed is rendered now, and the list
+    // carries its own bounded, scrollable box (asserted in the next test) so a long feed
+    // cannot push the section that says what is being operated off the panel.
     const source = await readFile(resolve(import.meta.dirname, '../src/panel/App.tsx'), 'utf8')
-    expect(source).toContain('slice(0, 15).map(')
-    expect(source).not.toContain('slice(0, 15).reverse()')
+    expect(source).toContain('{(ui?.recentOps ?? []).map(')
+    expect(source).not.toContain('slice(0, 15)')
+    expect(source).not.toContain('.reverse()')
+  })
+
+  it('gives the operation feed its own scroll box', async () => {
+    const raw = await readFile(resolve(import.meta.dirname, '../src/panel/styles.css'), 'utf8')
+    const css = raw.replace(/\/\*[\s\S]*?\*\//g, '')
+    const at = css.indexOf('.ops__list {')
+    expect(at, '.ops__list exists').toBeGreaterThanOrEqual(0)
+    const rule = css.slice(at, css.indexOf('}', at))
+    expect(rule).toContain('overflow-y: auto')
+    expect(rule).toContain('max-height')
   })
 
   it('gives a ran expression its own wrapping line', async () => {

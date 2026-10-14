@@ -1,8 +1,15 @@
 // @vitest-environment jsdom
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { approvalPromptForCall, originFromUrl, setActionTrustPolicy } from '../src/background/authorization.ts'
+import { getUiLocale, setUiLocale } from '../src/i18n.ts'
+import { SETTINGS_DEFAULTS } from '../src/shared/settings.ts'
 import type { TabFrame } from '../src/background/frames.ts'
 import type { ToolCall } from '../src/background/tools.ts'
+
+afterEach(() => {
+  setUiLocale(SETTINGS_DEFAULTS.uiLanguage)
+  vi.unstubAllGlobals()
+})
 
 const FRAMES: TabFrame[] = [
   { frameId: 0, parentFrameId: -1, documentId: 'top', url: 'https://app.example/page' },
@@ -171,6 +178,18 @@ describe('approvalPromptForCall', () => {
     expect(prompt?.summary).not.toContain('my-password')
   })
 
+  it('asks for a pointer click exactly as it does for a plain click', () => {
+    // The pointer tool is a click with the same effect, so it carries the same card.
+    // It was absent from the state-changing set, which made the gate return early and
+    // let it click an untrusted origin with no prompt at all.
+    const pointer = approvalPromptForCall(call('browser_click_pointer', { index: 7 }), 'auto', FRAMES, 'zh')
+    const plain = approvalPromptForCall(call('browser_click', { index: 7 }), 'auto', FRAMES, 'zh')
+
+    expect(pointer).toMatchObject({ kind: 'action', origins: ['https://app.example'], canTrust: true })
+    expect(pointer?.origins).toEqual(plain?.origins)
+    expect(pointer?.canTrust).toBe(plain?.canTrust)
+  })
+
   it('offers persistent trust for the destination of any navigation', () => {
     const prompt = approvalPromptForCall(call('browser_navigate', {
       url: 'https://bank.example/transfer?token=secret#confirm',
@@ -198,7 +217,7 @@ describe('approvalPromptForCall', () => {
     expect(approvalPromptForCall(call('browser_wait'), 'auto', FRAMES, 'zh')).toBeUndefined()
   })
 
-  it('renders approval summaries in English for non-Chinese browsers', () => {
+  it('renders approval summaries in English when the UI language setting is English', () => {
     expect(approvalPromptForCall(call('browser_type', {
       index: 3,
       text: 'secret',
@@ -207,6 +226,25 @@ describe('approvalPromptForCall', () => {
     )
     expect(approvalPromptForCall(call('browser_snapshot'), 'ask', FRAMES, 'en')?.summary)
       .toBe('Read the current page and accessible iframes')
+  })
+
+  it('takes the default language from the UI setting, not from the browser', () => {
+    // This used to read `navigator.languages`, so a Chinese Chrome produced
+    // Chinese cards with no way to ask for English. The cards now follow
+    // `settings.uiLanguage`, which the worker applies with `setUiLocale`.
+    vi.stubGlobal('navigator', { languages: ['zh-CN'], language: 'zh-CN' })
+    setUiLocale('en')
+    expect(getUiLocale()).toBe('en')
+    expect(approvalPromptForCall(call('browser_type', {
+      index: 3,
+      text: 'secret',
+    }), 'auto', FRAMES)?.summary).toBe(
+      'Enter 6 characters in element [3] (the text is not shown in this dialog)',
+    )
+
+    setUiLocale('zh')
+    expect(approvalPromptForCall(call('browser_snapshot'), 'ask', FRAMES)?.summary)
+      .toBe('读取当前页面及可访问 iframe')
   })
 })
 

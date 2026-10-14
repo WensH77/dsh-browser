@@ -19,6 +19,7 @@
  *   ui → bg: { type: 'settings.set', patch } ⇒ Settings
  *   ui → bg: { type: 'approval.response', id, decision }
  *   ui → bg: { type: 'reconnect' } | { type: 'open-options' }
+ *   ui → bg: { type: 'update-command' } ⇒ { command } | { error }
  *   bg → ui: push.status / push.affinity / push.approval / push.approval-resolved
  *            / push.session-grants / push.op / push.ops / push.ops-cleared
  *
@@ -30,6 +31,7 @@ import {
   BRIDGE_GDRIVE_MOVE_METHOD,
   BRIDGE_OPEN_GDRIVE_FOLDER_METHOD,
   BRIDGE_PATH,
+  BRIDGE_UI_LANGUAGE_METHOD,
   MAX_BINDABLE_TABS,
   formatBindableTab,
   type BridgeCaps,
@@ -52,7 +54,7 @@ import {
   type SessionGrantRevocation,
   type SessionGrantRevocationReason,
 } from '../security/session-allowance.ts'
-import { getUiLocale } from '../i18n.ts'
+import { getUiLocale, setUiLocale } from '../i18n.ts'
 import {
   actionCoveredByTrustedOrigins,
   normalizeTrustedOrigin,
@@ -69,12 +71,13 @@ import { detachDevtoolsSession, isSessionAttached, primeSession } from './devtoo
 import { jsDebugTabIds } from './js-debug.ts'
 import { visionAvailable } from './capture.ts'
 import { debugToolRefusal } from './debug-policy.ts'
-import { affinityFailureAnswer } from './affinity-copy.ts'
+import { affinityFailureAnswer, offeringPageChoice } from './affinity-copy.ts'
 import { isExportableGdriveUrl, parseGdriveExportUrl } from './gdrive-url.ts'
 import { waitForTabCommit } from './tab-commit.ts'
 import { clearTabRules } from './net-rules.ts'
 import { readDebugEvents, recentDebugEventsText, recordDebugEvent, renderDebugEvents } from './debug-log.ts'
 import { isExtensionPageSender } from '../shared/message-sender.ts'
+import { fetchUpdateCommand } from './update-command.ts'
 import {
   SETTINGS_DEFAULTS,
   SETTINGS_STORAGE_KEY,
@@ -231,12 +234,17 @@ function normalizeSettings(candidate: Settings): Settings {
     : candidate.sharePageContent === 'ask' ? 'ask' : 'auto'
   // Unknown/absent values fall back to the floating window (the default form).
   const statusMode = candidate.statusMode === 'panel' ? 'panel' : 'floating'
+  // English is the default, and an install that predates this setting has no
+  // `uiLanguage` at all: both land here, so the copy below is the only place
+  // that decides.
+  const uiLanguage = candidate.uiLanguage === 'zh' ? 'zh' : 'en'
   return {
     ...candidate,
     sharePageContent,
     trustedActionOrigins: trusted,
     approvalNotifications: candidate.approvalNotifications !== false,
     statusMode,
+    uiLanguage,
     allowCrossDomainNavigation: candidate.allowCrossDomainNavigation === true,
     allowExtensionDebug: candidate.allowExtensionDebug === true,
     trustJsExecution: candidate.trustJsExecution === true,
@@ -259,13 +267,17 @@ async function loadSettings(): Promise<Settings> {
 async function persistSettings(next: Partial<Settings>): Promise<void> {
   settings = normalizeSettings({ ...settings, ...next })
   setActionTrustPolicy({ trustJsExecution: settings.trustJsExecution })
+  setUiLocale(settings.uiLanguage)
   await chrome.storage.local.set({ [SETTINGS_STORAGE_KEY]: settings })
+  // A save is also the moment the host's view of our language can go stale.
+  reportUiLanguage()
 }
 
 /** Settings load is shared by every lazy connection trigger. */
 const settingsReady = loadSettings().then((loaded) => {
   settings = loaded
   setActionTrustPolicy({ trustJsExecution: loaded.trustJsExecution })
+  setUiLocale(loaded.uiLanguage)
 })
 
 function armBridgeKeepalive(): void {
@@ -309,6 +321,7 @@ function uiState(): UiState {
     recentOps: activeOps(),
     sessionGrants: sessionId === null ? [] : sessionAllowances.grantsFor(sessionId),
     grantRevocation: sessionId === null ? null : sessionAllowances.revocationFor(sessionId) ?? null,
+    locale: getUiLocale(),
   }
 }
 
@@ -690,8 +703,11 @@ async function ensureInitialTabBinding(sessionId?: string): Promise<ToolAnswer |
     // chrome.debugger, so auto-binding it hands the session a page where every
     // tool fails. Measured: a bound chrome-extension:// page produced nothing
     // but "Cannot access a chrome-extension:// URL of different extension"
-    // attach refusals, over and over.
-    if (!isBindableTabUrl(summary.url)) return affinityFailureAnswer('unsupported', undefined, summary.url)
+    // attach refusals, over and over. This session has no page at all, so the
+    // host may resolve the refusal by letting the user pick one; the same
+    // answer from `resolveToolTab` (a bound tab that navigated here) does not
+    // carry that mark, because moving a bound session is the user's decision.
+    if (!isBindableTabUrl(summary.url)) return offeringPageChoice(affinityFailureAnswer('unsupported', undefined, summary.url))
     if (tabAffinity.bindInitial(summary, sessionId)) {
       keepTabAlive(summary.tabId)
       persistTabAffinity()
@@ -787,6 +803,12 @@ async function authorizeToolCall(
     await persistSettings({ sharePageContent: 'auto' })
     return 'approved'
   }
+  // Kept on purpose, offered by nothing (decided 2026-10-14). A session-scoped origin
+  // trust is a real middle ground between "once" and "always", and the card is the only
+  // thing missing: `decisionButtons` gives `trust-origin` whenever this branch's own
+  // conditions hold — the same ones — and never offers both. So this is the fallback for
+  // that grant, parked until someone wants a lighter default. Do not wire a button to it
+  // and do not delete it without deciding that question; the READMEs say it is not offered.
   if (decision === 'trust-session' && prompt.kind === 'action' && prompt.canTrust && prompt.origins.length === 1) {
     sessionTrustedActionOrigins.add(prompt.origins[0]!)
     return 'approved'
@@ -1028,6 +1050,27 @@ function settleOp(id: string, state: RecentOp['state']): void {
   if (opVisible(op)) sendUiPush({ type: 'push.op', op })
 }
 
+/**
+ * Drop an operation from the feed entirely, because it never reached the page.
+ *
+ * A call refused for want of a page (`needsPageChoice`) is a step the host takes
+ * over: it picks a page, binds it and runs the call again. Showing the refusal
+ * as a failed operation made the panel look like the bridge had just broken —
+ * the reported symptom was a red `browser_dom_query` above every "List tabs" /
+ * "Bind tab" pair — while the model never saw a failure at all. The feed is the
+ * record of what happened *to the page*, and this call never touched one. The
+ * refusal still lands in the debug ring, which is where a diagnostic readout
+ * looks for it.
+ */
+function forgetOp(id: string): void {
+  const op = recentOps.find((candidate) => candidate.id === id)
+  if (op === undefined) return
+  const visible = opVisible(op)
+  recentOps = recentOps.filter((candidate) => candidate.id !== id)
+  refreshBadge()
+  if (visible) sendUiPush({ type: 'push.ops', ops: activeOps() })
+}
+
 function originOfUrl(value: string): string | undefined {
   try {
     const url = new URL(value)
@@ -1127,6 +1170,29 @@ const pendingBridgeRpcs = new Map<string, {
   reject: (error: Error) => void
 }>()
 
+/**
+ * Tell the host which language the user reads.
+ *
+ * Two of the host's own prompts are shown to the human (the page-choice question
+ * and the "is a prompt waiting for you?" nudge), and the host cannot read this
+ * extension's settings. It accepts this rpc method and keeps the value for the
+ * life of the connection; an older host refuses the method, which is why nothing
+ * waits for the answer — the plugin keeps its English wording in that case.
+ *
+ * Sent once per connection (from the handshake) and again on every settings
+ * save, so a language change reaches the host without a reconnect.
+ */
+function reportUiLanguage(): void {
+  const socket = bridge
+  if (socket === null) return
+  socket.send({
+    t: 'rpc',
+    id: crypto.randomUUID(),
+    method: BRIDGE_UI_LANGUAGE_METHOD,
+    payload: { language: getUiLocale() },
+  })
+}
+
 function bridgeRpc(method: string, payload: unknown): Promise<unknown> {
   const id = crypto.randomUUID()
   return new Promise((resolve, reject) => {
@@ -1149,7 +1215,28 @@ function settleBridgeRpc(id: string, ok: boolean, result: unknown): void {
   if (pending === undefined) return
   pendingBridgeRpcs.delete(id)
   if (ok) pending.resolve(result)
-  else pending.reject(new Error(result instanceof Error ? result.message : String(result)))
+  else pending.reject(new Error(bridgeRpcFailureText(result)))
+}
+
+/**
+ * The reason out of an `rpc.result` failure payload.
+ *
+ * The host sends `{ code, message }`, and `String()` on that object produced
+ * "[object Object]" — a failure every caller could only report as unreadable.
+ * Unknown shapes still fall back to their string form rather than throwing.
+ *
+ * @param result - the frame's error payload.
+ * @returns text a caller can show.
+ */
+function bridgeRpcFailureText(result: unknown): string {
+  if (result instanceof Error) return result.message
+  if (typeof result === 'object' && result !== null) {
+    const { code, message } = result as { code?: unknown; message?: unknown }
+    if (typeof message === 'string' && message !== '') {
+      return typeof code === 'string' && code !== '' ? `${code}: ${message}` : message
+    }
+  }
+  return String(result)
 }
 
 /**
@@ -1502,6 +1589,12 @@ function routeToolCall(call: ToolCall): void {
         }
         settleOp(call.id, 'done')
         socket.send({ t: 'tool.result', id: call.id, ok: true, result: answer.result })
+      } else if (answer.error?.needsPageChoice === true) {
+        // The host resolves this one itself — it lists the open pages, binds
+        // one and runs the call again — so the feed shows those steps and not
+        // this refusal, which never reached a page.
+        forgetOp(call.id)
+        socket.send({ t: 'tool.result', id: call.id, ok: false, error: answer.error })
       } else {
         settleOp(call.id, 'error')
         socket.send({ t: 'tool.result', id: call.id, ok: false, error: answer.error! })
@@ -1593,6 +1686,9 @@ async function startBridge(): Promise<void> {
       },
       onHelloOk: (negotiated) => {
         caps = negotiated
+        // Every connection starts the host from nothing, so the language is
+        // reported once per handshake rather than once per worker.
+        reportUiLanguage()
         broadcastStatus()
         void pushBudgetToControlledTab(negotiated)
       },
@@ -1695,6 +1791,13 @@ chrome.runtime.onMessage.addListener((message: unknown, sender, sendResponse) =>
         () => sendResponse({ accepted: true }),
         () => sendResponse({ accepted: false }),
       )
+      return true
+    case 'update-command':
+      // The panel's Update button: ask the host for this install's command and
+      // pass it through. Nothing is run here — the command only ever reaches the
+      // user's clipboard, and every failure is answered as `error` so the panel
+      // cannot mistake it for a copied command.
+      void fetchUpdateCommand(bridgeRpc).then((answer) => { sendResponse(answer) })
       return true
     case 'reconnect': {
       // The answer depends on work that can fail; the UI must hear about that

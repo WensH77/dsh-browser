@@ -27,10 +27,10 @@ dsh 的**纯浏览器操作端**：让模型直接读取并操作你在浏览器
                         content script (snapshot/actions/privacy)
 ```
 
-- **background**（`src/background/`）：桥连接（token 认证 + 指数退避重连 + 保活）、两个桥内部 RPC 调用，以及**失败关闭地分发工具到用户受控标签页**。
+- **background**（`src/background/`）：桥连接（token 认证 + 指数退避重连 + 保活）、三个桥内部 RPC 调用，以及**失败关闭地分发工具到用户受控标签页**。
 - **content script**（`src/content/`）：文本快照（可读性主文 + 编号交互清单 + 表单字段）、**稳定编号**（`data-dsh-el`）、delta 变化、点击/输入/按键/滚动/导航动作与敏感字段掩码。
 - **截图**（`src/background/capture.ts`）：仅 Chrome，走 `chrome.debugger`（`Page.captureScreenshot`）。每次截取临时 attach、按宿主图片上限缩放重编码、`finally` 里 detach；字节只在内存中，以 base64 过桥。
-- **panel / options**（`src/panel/`、`src/options/`）：两个精简 React 页面——状态面板（依 `statusMode` 设置，也会以浮窗 popup 打开同一页面）展示连接状态、受控标签页、最近操作与待审批项；options 页管理桥 URL/token、页面共享、信任源与审批通知。
+- **panel / options**（`src/panel/`、`src/options/`）：两个精简 React 页面——状态面板（依 `statusMode` 设置，也会以浮窗 popup 打开同一页面）展示连接状态、受控标签页、最近操作与待审批项；options 页管理桥 URL/token、界面语言（默认英文）、页面共享、信任源与审批通知。
 - **协议**：`dsh-bridge-browser` workspace 包中的 `protocol.ts` 是两端共享的真源，具体通过该包的源码 export 共享。
 
 ## 构建
@@ -123,7 +123,7 @@ pnpm --filter dsh-browser-extension run test
 - **JS 弹窗会冻结页面**：原生 `alert`/`confirm`/`prompt` 阻塞渲染进程主线程，内容脚本类工具与 `Runtime.evaluate` 都会排在它后面，直到有人应答。`browser_dialog` 经 CDP 应答（确认/取消，prompt 可带文本），并回传它关掉的那句文案；弹窗出现时也会作为一条 warning 进控制台缓冲。
 - **调试类工具限定在受控标签页**：控制台/网络缓冲、响应替换与求值依赖 `chrome.debugger`（仅 Chrome，且该标签页开着 DevTools 时不可用）；阻断与改头用带 `tabIds` 的 session 规则，不碰其它标签页，随浏览器会话结束失效。`browser_eval` 默认每次都询问，只有在设置里开启「信任的站点也可直接执行 JS」后才按 origin 免询问；改头始终询问，阻断可被 origin 信任覆盖。无人应答的提示会在受控标签页变化时被撤回，工具会明确说明「什么都没执行」。
 - **先同意、后请求**：会话的首次 `browser_navigate` 先按目的地取信任/审批，批准后才创建标签，被拒绝或未应答的调用不会加载 URL；绑定标签页内的后续导航走同一条「先审批」路径。
-- **分级审批**：Google Drive 导出走同一套 action 门禁——按文档 origin 授权、可信任，只有在文档 host 未被信任时才询问。默认「自动共享」允许模型按需读取受控标签页而不额外弹窗；「每次询问」可恢复逐次读取确认，「关闭」会阻断读取。在「每次询问」模式下，读取弹窗可以仅允许一次，也可以持久切回自动读取，之后仍可在设置中关闭。状态变更工具仍然失败关闭，并显示实际 origin 和脱敏动作摘要；用户可拒绝、仅允许一次，或信任单个 origin 用于当前会话。临时信任在 Service Worker 重启时清空；永久信任需在扩展 options 页中显式管理。审批最多保留 60 秒；启用通知后，系统通知可打开状态窗供用户处理。调用方取消或桥接超时时，会先撤销尚未完成的审批，过期动作不会继续执行。
+- **分级审批**：Google Drive 导出走同一套 action 门禁——按文档 origin 授权、可信任，只有在文档 host 未被信任时才询问。默认「自动共享」允许模型按需读取受控标签页而不额外弹窗；「每次询问」可恢复逐次读取确认，「关闭」会阻断读取。在「每次询问」模式下，读取弹窗可以仅允许一次，也可以持久切回自动读取，之后仍可在设置中关闭。状态变更工具仍然失败关闭，并显示实际 origin 和脱敏动作摘要；用户可拒绝、仅允许一次，或信任单个 origin；该信任写入扩展设置、在 options 页中显式管理。代码里另保留一条「仅本会话」的信任（`trust-session`，Service Worker 重启即清空）作为它的降级方案，但当前没有入口提供。审批最多保留 60 秒；启用通知后，系统通知可打开状态窗供用户处理。调用方取消或桥接超时时，会先撤销尚未完成的审批，过期动作不会继续执行。
 
 ## 权限说明
 

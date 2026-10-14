@@ -28,7 +28,6 @@ import { recordDebugEvent } from './debug-log.ts'
 import { approvalPromptForCall } from './authorization.ts'
 import { waitForNextDocumentReady } from './navigation.ts'
 import type { ApprovalAuthorization, ApprovalPrompt, ApprovalRefusal } from '../security/approval.ts'
-import { isSessionScopableAction } from '../security/session-allowance.ts'
 
 /** A tool call from the bridge. */
 export interface ToolCall {
@@ -57,6 +56,10 @@ export interface ContentBudget {
 const CONTENT_SCRIPT_FILE = 'content.js'
 const ACTION_DELTA_TOOLS = new Set([
   'browser_click',
+  // A pointer click is a click: it settles the page and it can navigate. It was added
+  // later than these lists and never wired into them, so its results carried no page
+  // changes and a click that navigated went unnoticed.
+  'browser_click_pointer',
   'browser_type',
   'browser_press',
   'browser_scroll',
@@ -65,6 +68,10 @@ const ACTION_DELTA_TOOLS = new Set([
 const ACTION_DELTA_GUIDANCE = 'The page settled and its current changes are included below. Continue from this state; take another snapshot only when broader page context is needed.'
 const NAVIGATION_CANDIDATE_TOOLS = new Set([
   'browser_click',
+  // A pointer click is a click: it settles the page and it can navigate. It was added
+  // later than these lists and never wired into them, so its results carried no page
+  // changes and a click that navigated went unnoticed.
+  'browser_click_pointer',
   'browser_navigate',
   'browser_back',
   'browser_forward',
@@ -116,7 +123,7 @@ const PAUSED_SAFE_TOOLS = new Set([
  * with page-content sharing off these are refused up front, while the actions
  * that only move the debugger keep working.
  */
-const DEBUG_READ_ACTIONS = new Set(['scripts', 'break', 'wait', 'eval', 'list', 'unbreak'])
+const DEBUG_READ_ACTIONS = new Set(['scripts', 'break', 'wait', 'eval', 'list', 'unbreak', 'listeners'])
 const NAVIGATION_SNAPSHOT_GUIDANCE = 'Navigation completed and the current page snapshot is included below. Use it directly instead of taking an immediate duplicate snapshot.'
 /**
  * Budget for the snapshot a navigation attaches automatically.
@@ -1064,46 +1071,26 @@ type SettleApprovalResult = { approval: ApprovalPrompt } | { answer: ToolAnswer 
  * simply fails and the model decides whether to ask again.
  */
 async function settleApproval(options: SettleApprovalOptions): Promise<SettleApprovalResult> {
-  const renewable = options.approval.kind === 'read' || isSessionScopableAction(options.call.name)
-  // A read is prompted from one frame's point of view; everything else from the
-  // whole tab, so the renewed prompt is scoped exactly like the first one.
-  const renew = options.approval.kind === 'read'
-    ? async (): Promise<ApprovalPrompt | undefined> => approvalPromptForCall(
-        options.call,
-        options.sharePageContent,
-        options.frames.filter((frame) => frame.frameId === requestedFrame(options.call.args)),
-      )
-    : async (): Promise<ApprovalPrompt | undefined> => approvalPromptForCall(
-        options.call,
-        options.sharePageContent,
-        await listTabFrames(options.tab.id!, options.tab.url),
-      )
-
-  let approval = options.approval
-  for (let attempt = 0; attempt < 2; attempt += 1) {
-    const authorization: ApprovalAuthorization = options.authorize === undefined
-      ? 'unavailable'
-      : await options.authorize(approval)
-    if (isCancelled(options.call, options.signal)) return { answer: cancelled() }
-    if (options.targetStillAllowed?.() === false) return { answer: targetChanged() }
-    if (authorization === 'approved') return { approval }
-    // `renewable` is what keeps `renew` out of the refusal here: it was checked
-    // together with the result above, but TypeScript cannot narrow through it.
-    if (authorization !== 'renew' || !renewable) return { answer: approvalFailureAnswer(approval, authorization as ApprovalRefusal) }
-    const renewed = await renew()
-    if (renewed === undefined || !sameApprovalBoundary(approval, renewed)) {
-      return {
-        answer: unavailable('The page changed while the approval prompt was open: '
-          + `${invalidationReason(approval, renewed, options.call, options.frames, options.frames)}. `
-          + 'Nothing ran — call browser_snapshot again before retrying.'),
-      }
+  const approval = options.approval
+  const authorization: ApprovalAuthorization = options.authorize === undefined
+    ? 'unavailable'
+    : await options.authorize(approval)
+  if (isCancelled(options.call, options.signal)) return { answer: cancelled() }
+  if (options.targetStillAllowed?.() === false) return { answer: targetChanged() }
+  if (authorization === 'approved') return { approval }
+  // An expired prompt is answered here, not renewed. A second 60-second window is longer
+  // than the caller's own budget (90s by default), so the model was cut off mid-wait and
+  // told only that something timed out — it could not tell a card nobody answered from a
+  // page that hung, and the first reading was usually the wrong one. One window, then say
+  // plainly what happened and what to do about it.
+  if (authorization === 'renew') {
+    return {
+      answer: unavailable(`The approval prompt for "${approval.action}" expired before it was answered, so nothing ran. `
+        + 'A confirmation was waiting in Chrome — the extension marks a waiting prompt on its toolbar badge. '
+        + 'Tell the user a card is waiting for them to answer, wait for their go-ahead, then raise it again by calling the tool once more.'),
     }
-    approval = renewed
   }
-  return {
-    answer: unavailable(`The approval prompt for "${approval.action}" expired before it was answered. `
-      + 'Nothing ran — call the tool again to raise a fresh prompt in the side panel.'),
-  }
+  return { answer: approvalFailureAnswer(approval, authorization as ApprovalRefusal) }
 }
 
 function validateFrameTarget(call: ToolCall, frames: TabFrame[]): ToolAnswer | undefined {
@@ -1117,7 +1104,9 @@ function validateFrameTarget(call: ToolCall, frames: TabFrame[]): ToolAnswer | u
 }
 
 function validateElementTarget(call: ToolCall, tabId: number, frames: TabFrame[]): ToolAnswer | undefined {
-  if (call.name !== 'browser_click' && call.name !== 'browser_type') return undefined
+  // Both click tools address elements by snapshot index, so both can be handed an
+  // index from a document that has since been replaced.
+  if (call.name !== 'browser_click' && call.name !== 'browser_click_pointer' && call.name !== 'browser_type') return undefined
   // A selector targets the live document directly, so there is no snapshot
   // baseline to be stale against.
   if (typeof call.args.selector === 'string' && call.args.selector.trim() !== '') return undefined

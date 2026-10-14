@@ -6,6 +6,7 @@ import {
   BRIDGE_EXTENSION_IDS,
   BRIDGE_PROTO,
   BRIDGE_TOOLSET,
+  BRIDGE_UI_LANGUAGE_METHOD,
   EXTENSION_ID_PATTERN,
   LEGACY_TOOLSET,
   declaredProto,
@@ -15,6 +16,7 @@ import {
   isServerFrame,
   parseBindableTabs,
   parseBridgeFrame,
+  parseUiLanguagePayload,
 } from '../src/protocol.ts'
 
 describe('bindable tab lines', () => {
@@ -252,3 +254,32 @@ function serverShape(t: 'hello.ok' | 'rpc.result' | 'tool.call' | 'tool.cancel' 
     case 'ping': return { t }
   }
 }
+
+describe('UI language report', () => {
+  // The extension reports the language of its own UI over this method; the host
+  // words two of its own prompts from it. The name is a constant on both sides
+  // so a rename cannot quietly turn every report into `method-not-allowed`.
+  it('names the method the extension calls', () => {
+    expect(BRIDGE_UI_LANGUAGE_METHOD).toBe('bridge.uiLanguage')
+  })
+
+  it('reads the two supported languages', () => {
+    expect(parseUiLanguagePayload({ language: 'en' })).toBe('en')
+    expect(parseUiLanguagePayload({ language: 'zh' })).toBe('zh')
+  })
+
+  it('returns nothing for a language it has no copy for', () => {
+    // The host falls back to English on undefined, so an unusable report must
+    // not read as a language: 'auto' is the value this setting deliberately
+    // does not have.
+    expect(parseUiLanguagePayload({ language: 'auto' })).toBeUndefined()
+    expect(parseUiLanguagePayload({ language: 'ZH' })).toBeUndefined()
+    expect(parseUiLanguagePayload({ language: 'fr' })).toBeUndefined()
+    expect(parseUiLanguagePayload({ language: 42 })).toBeUndefined()
+    expect(parseUiLanguagePayload({})).toBeUndefined()
+    expect(parseUiLanguagePayload('zh')).toBeUndefined()
+    expect(parseUiLanguagePayload(null)).toBeUndefined()
+    expect(parseUiLanguagePayload(['zh'])).toBeUndefined()
+    expect(parseUiLanguagePayload(undefined)).toBeUndefined()
+  })
+})

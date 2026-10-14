@@ -47,13 +47,13 @@ npx @deepseek-ai/dsh@0.1.7-rc.1 web
 - `/api` 载体钉在回环上的方法（`settings.*`、`credentials.*`、`host.pickDirectory`、`host.openPath`）对非回环来源**即使 token 正确也拒绝**——对 `--host 0.0.0.0` 部署的纵深防御。
 - 同一时刻仅一个活动连接，新认证连接顶替旧连接。
 - 桥是 confused-deputy 边界而非通用认证层：不要把 `dsh web --host 0.0.0.0` 暴露在不信任的网络上。
-- 抽取的页面文字会标记为模型的不可信输入。页面读取遵循扩展的询问/自动/关闭策略；状态变更工具必须经过按 origin 的审批，未获批准时失败关闭。同源后续操作可只在当前会话中临时信任，永久信任仍需显式设置。
+- 抽取的页面文字会标记为模型的不可信输入。页面读取遵循扩展的询问/自动/关闭策略；状态变更工具必须经过按 origin 的审批，未获批准时失败关闭。同源后续操作可信任该 origin（写入扩展设置、持久生效）；代码里另有一条「仅本会话」的信任（`trust-session`）作为它的降级方案，当前没有入口提供。
 
 ## 线协议
 
 帧为按 `t` 判别的 JSON 对象，定义在 [`protocol.ts`](src/protocol.ts)，是通过 workspace 包的 `./src/*` export 与扩展共享的真源。构建后的包还会发布 `dsh-bridge-browser/protocol`，供外部消费方使用。
 
-- 客户端 → 服务端：`hello`（认证 + caps）、`rpc`（两个 GDrive 内部方法之一）、`tool.result`、`pong`。
+- 客户端 → 服务端：`hello`（认证 + caps）、`rpc`（两个 GDrive 方法之一，或界面语言上报）、`tool.result`、`pong`。
 - 服务端 → 客户端：`hello.ok`（回显协商后的 caps）、`rpc.result`、`tool.call`、`tool.cancel`、`ping`、`error`。
 
 `tool.call` 携带稳定 id，扩展在其 `tool.result` 中回显；`expiresAt` 让过期调用以 `timeout` 结算。桥只是请求/响应通道——认证完成后不再有事件帧。
@@ -81,7 +81,7 @@ npx @deepseek-ai/dsh@0.1.7-rc.1 web
 | `browser_status` | 宿主侧自检，扩展连没连都能用：连接状态、扩展 id/构建版本与它声明的 `proto`/`toolset` 对本插件的结论（直接说「重载扩展」还是「重启 dsh」）、**扩展是否允许调试**（截图没图时第一个要看的就是这行：它区分「开关没开」与「这个 Chrome 根本没给扩展 `chrome.debugger`」）、镜像的扩展文件是否最新、**扩展最近记录的调试事件**（开启调试能力时附上：attach/detach 及 Chrome 给出的断开原因、工具失败；存在 `chrome.storage.session`，service worker 被重启也不会丢），以及唯一一个下一步动作。不受调试开关与扩展能力级别影响。 |
 | `browser_setup` | 宿主侧装机辅助：把扩展文件重新同步到 `~/.dsh/browser-extension`、打开 `chrome://extensions`、有剪贴板工具时把该路径复制进去，并点明剩下唯一那个手动动作。幂等。 |
 | `browser_update` | 打印更新本机这套安装的命令：托管安装给一行安装器、checkout 给本地脚本、Windows 给 PowerShell 形式。它**不会执行**该命令——更新会写入 `~/.dsh`、替换 Chrome 加载的目录、首次还需要在 Chrome 点一次，所以那是用户的动作。 |
-| `browser_bind_interactive` | 列出可绑定的页面、用标准提问让用户选一个，并绑定本会话——模型只需调这一个工具。 |
+| `browser_bind_interactive` | 列出可绑定的页面、用标准提问让用户选一个，并绑定本会话——模型只需调这一个工具。页面工具遇到「本会话**根本没有**可操作的页」时（从未绑定，或原来的页面已消失），宿主会在同一次调用里自动走一遍同样的列页/选页/绑定再重试：只有一个候选页就直接绑并继续，多个候选才弹这个提问（一分钟内可作答），拒绝或超时则照旧报错。选页修不了的 refusal——别的会话占着浏览器，或已绑定的页面导航到了谁也操作不了的页——按扩展原文照报。模型显式调用本工具时，即使只有一个候选页也一定会问。 |
 | `google_drive_export` | 用已登录会话导出 Google Doc（`/document/d/…`）或 Sheet（`/spreadsheets/d/…`）；其余 Google 链接改用浏览器读。 |
 
 ## 模型体验

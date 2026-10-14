@@ -9,6 +9,7 @@
  */
 
 import type { BridgeCaps } from 'dsh-bridge-browser/src/protocol.ts'
+import type { UiLocale } from '../i18n.ts'
 import type { BridgeNotice, BridgeState } from '../background/bridge.ts'
 import type { TabAffinityState } from '../background/tab-affinity.ts'
 import type { ApprovalDecision, ApprovalRequest } from '../security/approval.ts'
@@ -58,6 +59,14 @@ export interface UiState {
    * reopened) after the fact can still explain why the next call asks again.
    */
   grantRevocation: SessionGrantRevocation | null
+  /**
+   * Language the UI should render in (`settings.uiLanguage`).
+   *
+   * The panel and the options page are separate documents and cannot read the
+   * worker's own locale state, so the snapshot carries it; a page that never
+   * received one renders in English.
+   */
+  locale: UiLocale
 }
 
 /** One-way messages a UI page may send to the background. */
@@ -73,6 +82,12 @@ export type UiRequest =
   | { type: 'session.unbind' }
   /** The panel's Log button: the background answers `{ log: string }`. */
   | { type: 'debug.log' }
+  /**
+   * The panel's Update button: the background asks the host over the bridge and
+   * answers `{ command: string }`, or `{ error: string }` when no command
+   * arrived. The command is fetched per press and never cached.
+   */
+  | { type: 'update-command' }
 
 /** Push broadcasts from the background to any open UI page. */
 export type UiPush =

@@ -109,16 +109,32 @@ interface Harness {
   settle: (id: string) => Promise<Frame>
   /** Approval ids seen so far, in the order their cards were raised. */
   approvalIds: () => string[]
+  /** Options of each approval notification raised, in the same order. */
+  approvalNotificationOptions: () => Frame[]
   /** Answer one approval the way the side panel's buttons do. */
   answer: (id: string, decision: string) => void
+  /** Client frames the extension sent to the bridge, in order. */
+  sentFrames: () => Frame[]
+  /** What the worker wrote to `chrome.storage.local` under the settings key. */
+  storedSettings: () => Frame | undefined
 }
 
-/** Boot the worker against the fakes and wait until it is really connected. */
-async function boot(activeTab: typeof APP_TAB = APP_TAB): Promise<Harness> {
+/**
+ * Boot the worker against the fakes and wait until it is really connected.
+ *
+ * `stored` is the settings object the fake storage already holds, which is how
+ * one test models an install from before a setting existed: the object simply
+ * has no key for it.
+ */
+async function boot(
+  activeTab: typeof APP_TAB = APP_TAB,
+  stored: Frame = { bridgeUrl: BRIDGE_URL },
+): Promise<Harness> {
   FakeSocket.reset()
   const messageListeners: Listener[] = []
   const notifications = vi.fn(async (_id: string, _options?: unknown) => 'notification-1')
   const runtimeMessages: Frame[] = []
+  const storageWrites: Frame[] = []
 
   const chromeApi = {
     runtime: {
@@ -131,8 +147,8 @@ async function boot(activeTab: typeof APP_TAB = APP_TAB): Promise<Harness> {
     },
     storage: {
       local: {
-        get: async () => ({ dshSettings: { bridgeUrl: BRIDGE_URL } }),
-        set: async () => undefined,
+        get: async () => ({ dshSettings: stored }),
+        set: async (value: Frame) => { storageWrites.push(value) },
       },
       session: { get: async () => ({}), set: async () => undefined, remove: async () => undefined },
     },
@@ -241,6 +257,11 @@ async function boot(activeTab: typeof APP_TAB = APP_TAB): Promise<Harness> {
       return results(id)[0]!
     },
     approvalIds,
+    approvalNotificationOptions: () => notifications.mock.calls
+      .filter(([id]) => typeof id === 'string' && id.startsWith(APPROVAL_NOTIFICATION_PREFIX))
+      .map(([, options]) => options as Frame),
+    sentFrames: () => socket.sent.map((raw) => JSON.parse(raw) as Frame),
+    storedSettings: () => storageWrites.at(-1)?.['dshSettings'] as Frame | undefined,
     answer: (id, decision) => {
       for (const listener of messageListeners) {
         (listener as (
@@ -340,5 +361,203 @@ describe('background entry consent gate', () => {
     expect(String((frame.error as { message?: string } | undefined)?.message)).toContain('Unbind')
     // Nothing was bound, so there was nothing to approve.
     expect(other.approvalIds()).toEqual([])
+    // This session has no page at all, so the host may resolve it by letting the
+    // user pick one from inside the refused call instead of failing it.
+    expect((frame.error as { needsPageChoice?: unknown } | undefined)?.needsPageChoice).toBe(true)
+  })
+
+  it('offers no page choice for a bound session whose own page became unoperable', async () => {
+    // The session owns this tab. Chrome keeping the page to itself is not a
+    // reason to move the session to some other page on its own: the answer's
+    // three ways out (switch and Unbind, browser_navigate, browser_bind_interactive)
+    // are the only moves, and the host must not read this refusal as a repair.
+    const tab = { id: 42, windowId: 1, title: 'Orders', url: 'https://app.example/orders' }
+    const bound = await boot(tab)
+    // First call binds the session (the action itself fails: this fake has no
+    // content script, which is not an affinity problem).
+    bound.call({ id: 'p1', name: 'browser_get_text', args: {}, sessionId: 's1' })
+    await bound.settle('p1')
+    tab.url = 'chrome://settings/'
+    bound.call({ id: 'p2', name: 'browser_get_text', args: {}, sessionId: 's1' })
+
+    const frame = await bound.settle('p2')
+
+    expect(frame.ok).toBe(false)
+    expect(String((frame.error as { message?: string } | undefined)?.message)).toContain('chrome://settings/')
+    expect((frame.error as { needsPageChoice?: unknown } | undefined)?.needsPageChoice).toBeUndefined()
+  })
+
+  it('keeps a refusal the host resolves out of the operation feed', async () => {
+    // The reported symptom: a red `browser_get_text` above every "List tabs" /
+    // "Bind tab" pair, for a call the host had already resolved by binding a
+    // page and running it again. The feed is what happened to the page, and
+    // this call never reached one — the debug ring keeps the record.
+    const tab = { id: 42, windowId: 1, title: 'New tab', url: 'chrome://newtab/' }
+    const harness = await boot(tab)
+    harness.call({ id: 'p1', name: 'browser_get_text', args: {}, sessionId: 's1' })
+    const frame = await harness.settle('p1')
+    expect((frame.error as { needsPageChoice?: unknown } | undefined)?.needsPageChoice).toBe(true)
+
+    // The host then does what the plugin does: list the pages, bind one, retry.
+    tab.url = 'https://app.example/orders'
+    tab.title = 'Orders'
+    harness.call({ id: 'l1', name: 'browser_list_tabs', args: {}, sessionId: 's1' })
+    await harness.settle('l1')
+    harness.call({ id: 'b1', name: 'browser_bind_tab', args: { tabId: 42 }, sessionId: 's1' })
+    await harness.settle('b1')
+
+    const state = await harness.uiRequest({ type: 'ui.state' }) as { recentOps?: Array<{ name?: string; state?: string }> }
+    const ops = state.recentOps ?? []
+    // The bind is there, so the feed really is this session's: the refused call
+    // is missing on purpose, not because the list is empty.
+    expect(ops.some((op) => op.name === 'browser_bind_tab' && op.state === 'done')).toBe(true)
+    expect(ops.filter((op) => op.name === 'browser_get_text')).toEqual([])
+  })
+})
+
+/**
+ * Where the interface language comes from, end to end.
+ *
+ * The setting is stored in the extension, so the worker is what every other
+ * surface reads it from: it applies the stored value to the modules that word
+ * user-facing copy, hands it to the panel and the options page in `ui.state`,
+ * and reports it to the host over the bridge so the two dsh questions can be
+ * worded the same way.
+ */
+describe('background entry UI language', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    vi.restoreAllMocks()
+  })
+
+  /** The `bridge.uiLanguage` frames the worker sent, in order. */
+  function languageReports(harness: Harness): Frame[] {
+    return harness.sentFrames().filter((frame) => frame.t === 'rpc' && frame.method === 'bridge.uiLanguage')
+  }
+
+  it('reports English to the host on a fresh connection', async () => {
+    const harness = await boot()
+
+    const reports = languageReports(harness)
+
+    expect(reports).toHaveLength(1)
+    expect(reports[0]).toMatchObject({ t: 'rpc', method: 'bridge.uiLanguage', payload: { language: 'en' } })
+  })
+
+  it('serves English to the UI for an install that predates the setting', async () => {
+    // An install from before `uiLanguage` existed has no key for it in storage;
+    // the load must land on the default rather than on undefined.
+    const harness = await boot(APP_TAB, { bridgeUrl: BRIDGE_URL })
+
+    const state = await harness.uiRequest({ type: 'ui.state' }) as { locale?: unknown }
+
+    expect(state.locale).toBe('en')
+    expect(languageReports(harness)[0]).toMatchObject({ payload: { language: 'en' } })
+  })
+
+  it('starts from the stored language', async () => {
+    const harness = await boot(APP_TAB, { bridgeUrl: BRIDGE_URL, uiLanguage: 'zh' })
+
+    const state = await harness.uiRequest({ type: 'ui.state' }) as { locale?: unknown }
+
+    expect(state.locale).toBe('zh')
+    expect(languageReports(harness)[0]).toMatchObject({ payload: { language: 'zh' } })
+  })
+
+  it('persists a language change, shows it to the UI, and tells the host', async () => {
+    const harness = await boot()
+    expect(languageReports(harness)).toHaveLength(1)
+
+    await harness.uiRequest({ type: 'settings.set', patch: { uiLanguage: 'zh' } })
+
+    expect(harness.storedSettings()?.['uiLanguage']).toBe('zh')
+    expect((await harness.uiRequest({ type: 'ui.state' }) as { locale?: unknown }).locale).toBe('zh')
+    // No reconnect happened, so the second report is what carries the change.
+    expect(languageReports(harness)).toHaveLength(2)
+    expect(languageReports(harness)[1]).toMatchObject({ payload: { language: 'zh' } })
+  })
+
+  it('words the system notification in the language the setting selects', async () => {
+    // Notifications are the one surface with no page to render copy in, so the
+    // worker's own locale state has to be the setting.
+    const zh = await boot(APP_TAB, { bridgeUrl: BRIDGE_URL, uiLanguage: 'zh' })
+    zh.call({ id: 'c1', name: 'browser_back', args: {}, sessionId: 's1' })
+    await card(zh, 1)
+    const zhNotification = zh.approvalNotificationOptions()
+    expect(zhNotification[0]?.title).toBe('浏览器操作等待确认')
+
+    const en = await boot()
+    en.call({ id: 'c2', name: 'browser_back', args: {}, sessionId: 's1' })
+    await card(en, 1)
+    expect(en.approvalNotificationOptions()[0]?.title).toBe('Browser action awaiting approval')
+  })
+})
+
+/**
+ * The Update button's request, end to end through the real worker.
+ *
+ * The panel asks the background, the background asks the host over the rpc
+ * channel, and the answer is what the panel copies. The wire that can silently
+ * go missing is the middle one — a handler that answers `{ error }` without ever
+ * sending the rpc, or one that sends a method name the host does not have — so
+ * this drives the real entry with the fakes and reads the frames it sent.
+ */
+describe('background entry update command', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    vi.restoreAllMocks()
+  })
+
+  /** The `bridge.updateCommand` frames the worker sent, in order. */
+  function updateRequests(harness: Harness): Frame[] {
+    return harness.sentFrames().filter((frame) => frame.t === 'rpc' && frame.method === 'bridge.updateCommand')
+  }
+
+  /** The first request's id, once the worker has sent it. */
+  async function firstRequest(harness: Harness): Promise<Frame> {
+    return await vi.waitFor(() => {
+      const [first] = updateRequests(harness)
+      expect(first).toBeDefined()
+      return first!
+    })
+  }
+
+  it('asks the host for the command and answers the panel with it', async () => {
+    const harness = await boot()
+    // Nothing is asked at boot: the command is fetched per press, because the
+    // install mode and path behind it can change.
+    expect(updateRequests(harness)).toHaveLength(0)
+
+    const answered = harness.uiRequest({ type: 'update-command' })
+    const request = await firstRequest(harness)
+    expect(request.payload).toEqual({})
+
+    FakeSocket.instances[0]!.receive({
+      t: 'rpc.result',
+      id: request.id,
+      ok: true,
+      result: './scripts/install.sh',
+    })
+
+    await expect(answered).resolves.toEqual({ command: './scripts/install.sh' })
+  })
+
+  it('answers the panel with an error when the host refuses the method', async () => {
+    // An older host: `method-not-allowed`. The panel must be able to tell this
+    // apart from a copied command, so it gets no `command` field at all.
+    const harness = await boot()
+
+    const answered = harness.uiRequest({ type: 'update-command' })
+    const request = await firstRequest(harness)
+    FakeSocket.instances[0]!.receive({
+      t: 'rpc.result',
+      id: request.id,
+      ok: false,
+      error: { code: 'method-not-allowed', message: 'bridge refuses RPC method bridge.updateCommand' },
+    })
+
+    const response = await answered as { command?: unknown, error?: unknown }
+    expect(response.command).toBeUndefined()
+    expect(String(response.error)).toContain('bridge refuses RPC method bridge.updateCommand')
   })
 })

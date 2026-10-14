@@ -14,6 +14,7 @@
  */
 
 import { base64ToBytes } from '../shared/base64.ts'
+import { tabStateNote } from '../shared/tab-state.ts'
 import type {
   CaptureLimits,
   CaptureRequest,
@@ -71,6 +72,42 @@ function assertLive(signal: AbortSignal | undefined): void {
 }
 
 /**
+ * Ask the page whether it is hidden or unfocused, over the lease the capture holds.
+ *
+ * A background tab is exactly where a screenshot stops being evidence: Chrome hands back the
+ * frame it kept rather than a fresh paint, so a blank picture reads as "the page rendered
+ * nothing". The clause is the one the content-script tools append, from the same two values. A
+ * failed read costs the note, never the capture.
+ *
+ * @param lease - the tab's debugger session, acquired with the `Runtime` domain enabled.
+ * @returns the note clause, or `''` when the page is visible and focused.
+ */
+async function readTabStateNote(lease: DebuggerLease): Promise<string> {
+  try {
+    const raw = await lease.sendCommand('Runtime.evaluate', {
+      expression: '({ hidden: document.visibilityState !== "visible", unfocused: document.hasFocus() === false })',
+      returnByValue: true,
+    }) as { result?: { value?: { hidden?: unknown; unfocused?: unknown } } }
+    const value = raw.result?.value
+    return tabStateNote(value?.hidden === true, value?.unfocused === true)
+  } catch {
+    return ''
+  }
+}
+
+/**
+ * Append the tab-state clause to a note the capture already carries.
+ *
+ * @param note - the capture's own note, if it has one.
+ * @param stateNote - the clause from {@link readTabStateNote}.
+ * @returns the combined note, or `undefined` when there is nothing to say.
+ */
+function withStateNote(note: string | undefined, stateNote: string): string | undefined {
+  if (stateNote === '') return note
+  return note === undefined ? stateNote : `${note}\n\n${stateNote}`
+}
+
+/**
  * Capture one tab's page as an in-memory raster.
  *
  * The capture is always taken at native scale (`clip.scale: 1`) and fitted here,
@@ -103,8 +140,9 @@ export async function captureTab(
   // One shared session per tab: reuse the console/network hold instead of
   // attaching a second time (Chrome refuses that, and the refusal used to read
   // as if DevTools were open).
-  const lease = await acquireDebuggerSession(tabId)
+  const lease = await acquireDebuggerSession(tabId, { runtime: true })
   try {
+    const stateNote = await readTabStateNote(lease)
     const region = await readRegion(lease, fullPage)
     const shot = await shoot(lease, region, fullPage, requested, quality)
     assertLive(signal)
@@ -121,12 +159,17 @@ export async function captureTab(
         const image = await encodeWithinLimits(viewportShot, requested, limits)
         return {
           ...image,
-          note: `the whole page would have arrived at ${Math.round(scale * 100)}% of its CSS size, too small to read, `
-            + 'so this is the viewport instead; use browser_get_text for the whole page',
+          note: withStateNote(
+            `the whole page would have arrived at ${Math.round(scale * 100)}% of its CSS size, too small to read, `
+              + 'so this is the viewport instead; use browser_get_text for the whole page',
+            stateNote,
+          ),
         }
       }
     }
-    return await encodeWithinLimits(shot, requested, limits)
+    const image = await encodeWithinLimits(shot, requested, limits)
+    const merged = withStateNote(image.note, stateNote)
+    return merged === undefined ? image : { ...image, note: merged }
   } catch (error: unknown) {
     if (error instanceof CaptureError) throw error
     throw cdpFailure(error)
