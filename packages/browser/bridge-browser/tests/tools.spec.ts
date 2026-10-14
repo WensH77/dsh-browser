@@ -8,10 +8,14 @@ import {
   GOOGLE_DRIVE_TIMEOUT_MS,
   HOST_TOOL_NAMES,
   MAX_WAIT_MS,
+  PAGE_CHOICE_WINDOW_MS,
+  SILENT_CALL_NUDGE_MS,
   TOOLSET_TOOL_NAMES,
   clampWaitMs,
+  pageToolTimeoutMs,
   registerBrowserTools,
 } from '../src/tools.ts'
+import { BridgeToolError } from '../src/server.ts'
 import type { SyncResult } from '../src/extension-assets.ts'
 import type { BridgeCaps } from '../src/protocol.ts'
 import {
@@ -48,7 +52,7 @@ describe('clampWaitMs', () => {
 })
 
 describe('registerBrowserTools', () => {
-  function makeHarness(services: Record<string, unknown> = {}, debuggerAllowed = false) {
+  function makeHarness(services: Record<string, unknown> = {}, debuggerAllowed = false, uiLanguage?: 'en' | 'zh') {
     const registered: { name: string; definition: Record<string, unknown> }[] = []
     const ctx = {
       tools: {
@@ -66,7 +70,13 @@ describe('registerBrowserTools', () => {
     const requestTool = vi.fn(async (_name: string, _args: Record<string, unknown>, _signal: AbortSignal, _timeoutMs?: number): Promise<unknown> => {
       return { text: 'ok' }
     })
-    const bridge = { requestTool, clientDebugger: () => debuggerAllowed } as unknown as BridgeServer
+    // `clientUiLanguage` is the connected extension's report; undefined models a
+    // build too old to send one, which is what keeps the prompts in English.
+    const bridge = {
+      requestTool,
+      clientDebugger: () => debuggerAllowed,
+      clientUiLanguage: () => uiLanguage,
+    } as unknown as BridgeServer
     return { ctx, bridge, requestTool, registered }
   }
 
@@ -603,6 +613,259 @@ describe('registerBrowserTools', () => {
     expect(requestTool).toHaveBeenLastCalledWith('browser_wait', { frame: 4 }, exec.signal, 1_000)
   })
 
+  /**
+   * One refused page call, and whatever the page choice made of it.
+   *
+   * `listText` is what `browser_list_tabs` answers, `ask` is the user's answer
+   * to the page question, `uiLanguage` is what the extension reported over
+   * `bridge.uiLanguage`, and everything the host sends to the extension lands
+   * in `seen` in order.
+   */
+  function pageChoiceHarness(
+    listText: string,
+    askResponse: (request: unknown) => Promise<unknown>,
+    uiLanguage?: 'en' | 'zh',
+  ) {
+    const ask = vi.fn(askResponse)
+    const seen: string[] = []
+    const { ctx, bridge, requestTool, registered } = makeHarness({ userQuestions: { ask } }, false, uiLanguage)
+    const dispatchCount = (): number => seen.filter((entry) => entry === 'browser_dom_query').length
+    requestTool.mockImplementation(async (name: string) => {
+      seen.push(name)
+      if (name === 'browser_list_tabs') return { text: listText }
+      if (name === 'browser_bind_tab') return { text: 'Bound session to tab 7: Orders' }
+      // The shape the extension reported: a session whose active tab is a page
+      // no other extension may touch, refused once per call.
+      if (dispatchCount() === 1) {
+        throw new BridgeToolError('action-failed', 'chrome://newtab/ cannot be operated.', true)
+      }
+      return { text: 'two rows' }
+    })
+    registerBrowserTools(ctx, bridge, { toolTimeoutMs: 5_000, snapshotMaxChars: 12_000, maxInteractiveItems: 60 })
+    const exec = { signal: new AbortController().signal, agent: { id: 'session-a' } }
+    const run = async (): Promise<unknown> => {
+      const definition = registered.find((entry) => entry.name === 'browser_dom_query')!.definition
+      return await (definition.execute as (a: unknown, e: typeof exec) => Promise<unknown>)({ selector: '#row' }, exec)
+    }
+    return { ask, seen, requestTool, exec, run }
+  }
+
+  it('resolves a missing page inside the call the extension refused', async () => {
+    const { ask, seen, requestTool, exec, run } = pageChoiceHarness(
+      'ID=7 | Orders | https://app.example/orders',
+      async () => ({ answers: [] }),
+    )
+
+    const result = await run()
+
+    // The same call finishes, on the page that was open — no failed call and no
+    // second tool call to bind.
+    expect(String((result as { text: string }).text)).toBe('two rows')
+    expect(seen).toEqual(['browser_dom_query', 'browser_list_tabs', 'browser_bind_tab', 'browser_dom_query'])
+    expect(requestTool).toHaveBeenLastCalledWith('browser_dom_query', { selector: '#row' }, exec.signal, 5_000, 'session-a')
+    // One open page is not a choice: a question with a single option would wait
+    // for a click that decides nothing.
+    expect(ask).not.toHaveBeenCalled()
+  })
+
+  it('asks which page to use when the session really has a choice', async () => {
+    const { ask, seen, requestTool, exec, run } = pageChoiceHarness(
+      'ID=7 | Orders | https://app.example/orders\nID=9 | Mail | https://mail.example/',
+      async () => ({ answers: [{ id: 'bind-page', selected: ['7 — Orders'] }] }),
+    )
+
+    const result = await run()
+
+    expect(String((result as { text: string }).text)).toBe('two rows')
+    expect(ask).toHaveBeenCalledTimes(1)
+    expect(seen).toEqual(['browser_dom_query', 'browser_list_tabs', 'browser_bind_tab', 'browser_dom_query'])
+    expect(requestTool).toHaveBeenCalledWith('browser_bind_tab', { tabId: 7 }, exec.signal, 5_000, 'session-a')
+  })
+
+  it('words the page question in the language the extension reported', async () => {
+    const english = pageChoiceHarness(
+      'ID=7 | Orders | https://app.example/orders\nID=9 | Mail | https://mail.example/',
+      async () => ({ answers: [{ id: 'bind-page', selected: ['7 — Orders'] }] }),
+      'en',
+    )
+    await english.run()
+    const englishQuestion = (english.ask.mock.calls[0]?.[0] as { questions: Array<{ question: string }> }).questions[0]
+    expect(englishQuestion?.question).toBe('Which open page should this session operate?')
+
+    const chinese = pageChoiceHarness(
+      'ID=7 | Orders | https://app.example/orders\nID=9 | Mail | https://mail.example/',
+      async () => ({ answers: [{ id: 'bind-page', selected: ['7 — Orders'] }] }),
+      'zh',
+    )
+    await chinese.run()
+    const chineseQuestion = (chinese.ask.mock.calls[0]?.[0] as { questions: Array<{ question: string }> }).questions[0]
+    expect(chineseQuestion?.question).toMatch(/\p{Script=Han}/u)
+  })
+
+  it('keeps the page question in English when the extension never reported a language', async () => {
+    // An extension older than `bridge.uiLanguage` sends nothing. The question
+    // must still be asked — in English — rather than failing the call.
+    const { ask, run } = pageChoiceHarness(
+      'ID=7 | Orders | https://app.example/orders\nID=9 | Mail | https://mail.example/',
+      async () => ({ answers: [{ id: 'bind-page', selected: ['7 — Orders'] }] }),
+    )
+
+    const result = await run()
+
+    expect(String((result as { text: string }).text)).toBe('two rows')
+    expect((ask.mock.calls[0]?.[0] as { questions: Array<{ question: string }> }).questions[0]?.question)
+      .toBe('Which open page should this session operate?')
+  })
+
+  it('leaves a refusal a page choice cannot fix to the model', async () => {
+    // Another session owns the browser: a bind here would fail too, and its
+    // answer ("ask the user to press Unbind") is the one the model needs.
+    const seen: string[] = []
+    const ask = vi.fn(async () => ({ answers: [] }))
+    const { ctx, bridge, requestTool, registered } = makeHarness({ userQuestions: { ask } })
+    requestTool.mockImplementation(async (name: string) => {
+      seen.push(name)
+      throw new BridgeToolError('action-failed', 'The controlled tab is already bound to session other.', false)
+    })
+    registerBrowserTools(ctx, bridge, { toolTimeoutMs: 5_000, snapshotMaxChars: 12_000, maxInteractiveItems: 60 })
+    const exec = { signal: new AbortController().signal, agent: { id: 'session-a' } }
+    const definition = registered.find((entry) => entry.name === 'browser_dom_query')!.definition
+    const run = (): Promise<unknown> =>
+      (definition.execute as (a: unknown, e: typeof exec) => Promise<unknown>)({ selector: '#row' }, exec)
+
+    await expect(run()).rejects.toThrow('already bound to session other')
+    expect(seen).toEqual(['browser_dom_query'])
+    expect(ask).not.toHaveBeenCalled()
+  })
+
+  it('keeps the extension\'s refusal when no page could be chosen', async () => {
+    const { ask, seen, run } = pageChoiceHarness(
+      'No bindable web tabs are open (open a page first).',
+      async () => ({ answers: [] }),
+    )
+
+    // Nothing was bound, so the failure the extension gave stands — its text
+    // already names both ways out for the model.
+    await expect(run()).rejects.toThrow('chrome://newtab/ cannot be operated')
+    expect(seen).toEqual(['browser_dom_query', 'browser_list_tabs'])
+    expect(ask).not.toHaveBeenCalled()
+  })
+
+  it('keeps the extension\'s refusal when the user declines the page', async () => {
+    const { ask, seen, run } = pageChoiceHarness(
+      'ID=7 | Orders | https://app.example/orders\nID=9 | Mail | https://mail.example/',
+      async () => ({ answers: [{ id: 'bind-page', selected: [] }] }),
+    )
+
+    await expect(run()).rejects.toThrow('chrome://newtab/ cannot be operated')
+    expect(seen).toEqual(['browser_dom_query', 'browser_list_tabs'])
+    expect(ask).toHaveBeenCalledTimes(1)
+  })
+
+  it('retries a refused page call once, never in a loop', async () => {
+    const seen: string[] = []
+    const { ctx, bridge, requestTool, registered } = makeHarness({
+      userQuestions: { ask: vi.fn(async () => ({ answers: [] })) },
+    })
+    requestTool.mockImplementation(async (name: string) => {
+      seen.push(name)
+      if (name === 'browser_list_tabs') return { text: 'ID=7 | Orders | https://app.example/orders' }
+      if (name === 'browser_bind_tab') return { text: 'Bound session to tab 7: Orders' }
+      // Every dispatch is refused, including the retry: the second one settles
+      // the call rather than starting another page choice.
+      throw new BridgeToolError('action-failed', 'chrome://newtab/ cannot be operated.', true)
+    })
+    registerBrowserTools(ctx, bridge, { toolTimeoutMs: 5_000, snapshotMaxChars: 12_000, maxInteractiveItems: 60 })
+    const exec = { signal: new AbortController().signal, agent: { id: 'session-a' } }
+    const definition = registered.find((entry) => entry.name === 'browser_dom_query')!.definition
+
+    await expect((definition.execute as (a: unknown, e: typeof exec) => Promise<unknown>)({ selector: '#row' }, exec))
+      .rejects.toThrow('chrome://newtab/ cannot be operated')
+    expect(seen).toEqual(['browser_dom_query', 'browser_list_tabs', 'browser_bind_tab', 'browser_dom_query'])
+  })
+
+  it('stops waiting for a page choice when its window closes', async () => {
+    // A user who is away must not leave the call holding the tool slot: the
+    // question is withdrawn and the extension's own refusal is the answer.
+    vi.useFakeTimers()
+    try {
+      const { seen, run } = pageChoiceHarness(
+        'ID=7 | Orders | https://app.example/orders\nID=9 | Mail | https://mail.example/',
+        async (request: unknown) => await new Promise((_resolve, reject) => {
+          const signal = (request as { signal?: AbortSignal }).signal
+          signal?.addEventListener('abort', () => reject(new Error('the question was withdrawn')), { once: true })
+        }),
+      )
+      const outcome = run().then(() => 'answered', (error: unknown) => String((error as Error).message))
+
+      await vi.advanceTimersByTimeAsync(PAGE_CHOICE_WINDOW_MS)
+
+      expect(await outcome).toContain('chrome://newtab/ cannot be operated')
+      expect(seen).toEqual(['browser_dom_query', 'browser_list_tabs'])
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('does not offer a page choice to a call that carries no session', async () => {
+    const seen: string[] = []
+    const { ctx, bridge, requestTool, registered } = makeHarness()
+    requestTool.mockImplementation(async (name: string) => {
+      seen.push(name)
+      throw new BridgeToolError('action-failed', 'chrome://newtab/ cannot be operated.', true)
+    })
+    registerBrowserTools(ctx, bridge, { toolTimeoutMs: 5_000, snapshotMaxChars: 12_000, maxInteractiveItems: 60 })
+    const exec = { signal: new AbortController().signal }
+    const definition = registered.find((entry) => entry.name === 'browser_dom_query')!.definition
+
+    // Binding needs a session to bind; without one there is nothing to do but
+    // report what the extension said.
+    await expect((definition.execute as (a: unknown, e: typeof exec) => Promise<unknown>)({ selector: '#row' }, exec))
+      .rejects.toThrow('chrome://newtab/ cannot be operated')
+    expect(seen).toEqual(['browser_dom_query'])
+  })
+
+  it('raises one page choice when a step calls two page tools at once', async () => {
+    // A model may batch page calls. Each is refused for the same missing page,
+    // so without sharing the choice there would be two identical dialogs and two
+    // binds, the last one winning for both retries.
+    const ask = vi.fn(async () => ({ answers: [{ id: 'bind-page', selected: ['7 — Orders'] }] }))
+    const seen: string[] = []
+    const { ctx, bridge, requestTool, registered } = makeHarness({ userQuestions: { ask } })
+    requestTool.mockImplementation(async (name: string) => {
+      seen.push(name)
+      if (name === 'browser_list_tabs') return { text: 'ID=7 | Orders | https://app.example/orders\nID=9 | Mail | https://mail.example/' }
+      if (name === 'browser_bind_tab') return { text: 'Bound session to tab 7: Orders' }
+      // Each tool's own first dispatch is refused; every retry succeeds.
+      if (seen.filter((entry) => entry === name).length === 1) {
+        throw new BridgeToolError('action-failed', 'chrome://newtab/ cannot be operated.', true)
+      }
+      return { text: `${name} ran` }
+    })
+    registerBrowserTools(ctx, bridge, { toolTimeoutMs: 5_000, snapshotMaxChars: 12_000, maxInteractiveItems: 60 })
+    const exec = { signal: new AbortController().signal, agent: { id: 'session-a' } }
+    const run = async (name: string): Promise<unknown> => {
+      const definition = registered.find((entry) => entry.name === name)!.definition
+      return await (definition.execute as (a: unknown, e: typeof exec) => Promise<unknown>)({ selector: '#row' }, exec)
+    }
+
+    const [first, second] = await Promise.all([run('browser_dom_query'), run('browser_get_text')])
+
+    expect(String((first as { text: string }).text)).toBe('browser_dom_query ran')
+    expect(String((second as { text: string }).text)).toBe('browser_get_text ran')
+    expect(ask).toHaveBeenCalledTimes(1)
+    expect(seen.filter((entry) => entry === 'browser_list_tabs')).toHaveLength(1)
+    expect(seen.filter((entry) => entry === 'browser_bind_tab')).toHaveLength(1)
+  })
+
+  it('budgets one page call as the bounded parts it is made of', () => {
+    // Pinned so the formula is not quietly rewritten: the four bridge waits the
+    // sequence can spend (the refused dispatch, the listing, the bind, the
+    // retry) plus the user's own window. Declaring less lets the timeout policy
+    // answer the model while the question is still on screen.
+    expect(pageToolTimeoutMs(5_000)).toBe(4 * 5_000 + PAGE_CHOICE_WINDOW_MS)
+  })
+
   it('normalizes every DSH parameter map to JSON Schema before registration', () => {
     const { ctx, bridge, registered } = makeHarness()
     registerBrowserTools(ctx, bridge, { toolTimeoutMs: 1_000, snapshotMaxChars: 12_000, maxInteractiveItems: 60 })
@@ -632,7 +895,13 @@ describe('registerBrowserTools', () => {
     const { ctx, bridge, registered } = makeHarness()
     registerBrowserTools(ctx, bridge, { toolTimeoutMs: 5_000, snapshotMaxChars: 12_000, maxInteractiveItems: 60 })
     for (const { name, definition } of registered) {
-      expect(definition.timeoutMs).toBe(name === 'browser_bind_interactive' ? BIND_INTERACTIVE_TIMEOUT_MS : name === 'google_drive_export' ? GOOGLE_DRIVE_TIMEOUT_MS : 5_000)
+      // A page tool may spend its time on a page choice before it runs at all,
+      // so its limit covers that window plus the bridge waits around it.
+      const expected = name === 'browser_bind_interactive' ? BIND_INTERACTIVE_TIMEOUT_MS
+        : name === 'google_drive_export' ? GOOGLE_DRIVE_TIMEOUT_MS
+          : (HOST_TOOL_NAMES as readonly string[]).includes(name) ? 5_000
+            : pageToolTimeoutMs(5_000)
+      expect(definition.timeoutMs, name).toBe(expected)
     }
   })
 
@@ -654,8 +923,125 @@ describe('registerBrowserTools', () => {
     // single description may bloat the always-sent schema payload. Raised from
     // 200 to 210 when `browser_status` took on the debugging-capability line and
     // the extension's debug log — that is the copy a model reads to tell a user
-    // why a screenshot has no image, so it is not padding.
-    expect(descriptionChars / registered.length).toBeLessThan(210)
+    // why a screenshot has no image, so it is not padding. The live value rides
+    // in the failure message: a wording pass that cannot see the headroom either
+    // overruns it or raises it blindly.
+    //
+    // Measured 2026-10-14: that assertion covers the 22 tools which register without the
+    // debugging switch. With it on, the surface is 28 tools and averages 253.25 — the
+    // debugging half documents a bigger contract (browser_debug 531, browser_dialog 519,
+    // browser_network 435, browser_capture 424 at the time), so it gets its own ceiling
+    // rather than being averaged in with the rest and hidden from this test, which is what
+    // had been happening: a wording pass could not see either number.
+    const average = descriptionChars / registered.length
+    expect(average, `average model-facing description length: ${average.toFixed(2)} over ${registered.length} tools`).toBeLessThan(210)
+
+    const debugHarness = makeHarness({}, true)
+    const debugTools = registerBrowserTools(debugHarness.ctx, debugHarness.bridge, { toolTimeoutMs: 5_000, snapshotMaxChars: 12_000, maxInteractiveItems: 60 })
+    debugTools.setDebugToolsEnabled(true)
+    const fullChars = debugHarness.registered.reduce((sum, { definition }) => sum + String(definition.description).length, 0)
+    const fullAverage = fullChars / debugHarness.registered.length
+    expect(
+      fullAverage,
+      `average length with debugging on: ${fullAverage.toFixed(2)} over ${debugHarness.registered.length} tools`,
+    ).toBeLessThan(265)
+  })
+
+  it('asks the human about a call that has gone quiet, and keeps waiting', async () => {
+    // The card the extension raises lives in Chrome, out of sight of whoever started the
+    // call, and a silent wait is indistinguishable from a hung page. So the plugin asks.
+    vi.useFakeTimers()
+    try {
+      const ask = vi.fn(async () => ({ answers: [] }))
+      const { ctx, bridge, requestTool, registered } = makeHarness({ userQuestions: { ask } })
+      requestTool.mockImplementation(async () => await new Promise((resolve) => {
+        setTimeout(() => resolve({ text: 'clicked' }), 30_000)
+      }))
+      registerBrowserTools(ctx, bridge, { toolTimeoutMs: 5_000, snapshotMaxChars: 12_000, maxInteractiveItems: 60 })
+      const definition = registered.find((entry) => entry.name === 'browser_click')!.definition
+      const exec = { signal: new AbortController().signal, agent: { id: 'session-a' } }
+      const pending = (definition.execute as (a: unknown, e: typeof exec) => Promise<unknown>)({ index: 3 }, exec)
+
+      await vi.advanceTimersByTimeAsync(SILENT_CALL_NUDGE_MS)
+
+      expect(ask).toHaveBeenCalledTimes(1)
+      expect(String((ask.mock.calls[0]?.[0] as { questions: Array<{ question: string }> }).questions[0]?.question))
+        .toContain('browser_click')
+      // The question does not decide anything: the call runs on to its own answer.
+      await vi.advanceTimersByTimeAsync(15_000)
+      expect(await pending).toMatchObject({ text: 'clicked' })
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  /** Run one silent call to its nudge and return the ask request it produced. */
+  async function nudgeRequest(uiLanguage?: 'en' | 'zh'): Promise<unknown> {
+    const ask = vi.fn(async () => ({ answers: [] }))
+    const { ctx, bridge, requestTool, registered } = makeHarness({ userQuestions: { ask } }, false, uiLanguage)
+    requestTool.mockImplementation(async () => await new Promise((resolve) => {
+      setTimeout(() => resolve({ text: 'clicked' }), 30_000)
+    }))
+    registerBrowserTools(ctx, bridge, { toolTimeoutMs: 5_000, snapshotMaxChars: 12_000, maxInteractiveItems: 60 })
+    const definition = registered.find((entry) => entry.name === 'browser_click')!.definition
+    const exec = { signal: new AbortController().signal, agent: { id: 'session-a' } }
+    const pending = (definition.execute as (a: unknown, e: typeof exec) => Promise<unknown>)({ index: 3 }, exec)
+    await vi.advanceTimersByTimeAsync(SILENT_CALL_NUDGE_MS)
+    // Let the call settle so its timer cannot outlive the test.
+    await vi.advanceTimersByTimeAsync(30_000)
+    await pending
+    return ask.mock.calls[0]?.[0]
+  }
+
+  it('words the nudge and its answers in the language the extension reported', async () => {
+    vi.useFakeTimers()
+    try {
+      const chinese = (await nudgeRequest('zh') as {
+        questions: Array<{ question: string; options: Array<{ label: string }> }>
+      }).questions[0]!
+
+      expect(chinese.question).toContain('browser_click')
+      expect(chinese.question).toMatch(/\p{Script=Han}/u)
+      expect(chinese.options.map((option) => option.label)).toEqual(['没有——没有东西在等', '有——我正在处理'])
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('words the nudge in English when the extension reported nothing usable', async () => {
+    // No report (an extension older than the method) and a report the host
+    // refused both leave the language unknown, and English is the fallback.
+    vi.useFakeTimers()
+    try {
+      const english = (await nudgeRequest() as {
+        questions: Array<{ question: string; options: Array<{ label: string }> }>
+      }).questions[0]!
+
+      expect(english.question).toContain('browser_click')
+      expect(english.question).not.toMatch(/\p{Script=Han}/u)
+      expect(english.options.map((option) => option.label))
+        .toEqual(['No — nothing is waiting', 'Yes — I am answering it'])
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('leaves a call that answers quickly, and a tool that asks by design, alone', async () => {
+    const ask = vi.fn(async () => ({ answers: [] }))
+    const { ctx, bridge, registered } = makeHarness({ userQuestions: { ask } })
+    registerBrowserTools(ctx, bridge, { toolTimeoutMs: 5_000, snapshotMaxChars: 12_000, maxInteractiveItems: 60 })
+    const exec = { signal: new AbortController().signal }
+    const run = async (name: string, args: Record<string, unknown>): Promise<unknown> => {
+      const definition = registered.find((entry) => entry.name === name)!.definition
+      return await (definition.execute as (a: unknown, e: typeof exec) => Promise<unknown>)(args, exec)
+    }
+
+    await run('browser_click', { index: 3 })
+    expect(ask).not.toHaveBeenCalled()
+
+    // `browser_bind_interactive` asks its own question and can legitimately take minutes.
+    await run('browser_bind_interactive', {})
+    expect(ask).not.toHaveBeenCalled()
   })
 
   it('exposes optional frame routing on frame-local tools only', () => {

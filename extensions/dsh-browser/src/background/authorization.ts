@@ -18,6 +18,11 @@ const PAGE_READS = new Set([
 const UNTRUSTABLE_ACTIONS = new Set(['browser_eval', 'browser_headers', 'browser_dialog', 'browser_debug'])
 const STATE_CHANGING_ACTIONS = new Set([
   'browser_click',
+  // The pointer click is a click: same target, same effect, so it carries the same
+  // prompt. It used to be missing from this set, which meant the gate at line 165
+  // returned early and the tool clicked on an untrusted origin with no card at all —
+  // a model could sidestep the confirmation by picking the other click tool.
+  'browser_click_pointer',
   'browser_type',
   'browser_press',
   'browser_navigate',
@@ -216,6 +221,9 @@ function debugActionSummary(action: unknown, locale: UiLocale): string {
     case 'step': return localized(locale, 'step one statement', '单步执行一条语句')
     case 'wait': return localized(locale, 'read the pause, including frame variables', '读取暂停现场（含调用帧变量）')
     case 'eval': return localized(locale, 'evaluate an expression in the paused frame', '在暂停的调用帧里求值')
+    // The card has to name what the user is approving: "control the debugger" tells them
+    // nothing about a read that returns the page's handlers and their script locations.
+    case 'listeners': return localized(locale, 'list the event listeners on a page element', '列出页面元素上注册的事件监听器')
     default: return localized(locale, 'control the debugger', '控制调试器')
   }
 }
@@ -255,6 +263,9 @@ function summarizeAction(call: ToolCall, locale: UiLocale): string {
   const index = typeof call.args.index === 'number' ? call.args.index : '?'
   const selector = typeof call.args.selector === 'string' && call.args.selector.trim() !== '' ? call.args.selector.trim() : undefined
   switch (call.name) {
+    // The pointer tool prompts now, so the card has to read like the click it is:
+    // the fallback would have shown the user nothing but the tool's own name.
+    case 'browser_click_pointer':
     case 'browser_click': {
       // A select-option call is not the click its name suggests: the user must
       // see the value that will be chosen, not just the element it lands on.

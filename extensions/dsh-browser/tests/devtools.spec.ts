@@ -134,6 +134,56 @@ describe('network buffer', () => {
     expect(answer.ok).toBe(false)
     expect(answer.error?.message).toContain('No captured request has id nope')
   })
+
+  it('reports the payload a request carried', async () => {
+    await harness.devtools.readNetwork(1, {}, 32_000)
+    harness.emit(1, 'Network.requestWillBeSent', {
+      requestId: 'p1',
+      request: { url: 'https://app.example/save', method: 'POST', postData: '{"duration":60}' },
+      type: 'XHR',
+    })
+    harness.emit(1, 'Network.responseReceived', { requestId: 'p1', response: { status: 200 }, type: 'XHR' })
+
+    // The list marks a payload rather than printing every body inline; the marker is
+    // the pointer to the id worth reading.
+    const list = await harness.devtools.readNetwork(1, {}, 32_000)
+    expect(list.result?.text).toContain('id=p1 POST 200 +body')
+
+    const one = await harness.devtools.readNetwork(1, { requestId: 'p1' }, 32_000)
+    expect(one.result?.text).toContain('request body:\n{"duration":60}')
+    expect(one.result?.text).toContain('response body:\n{"ok":true}')
+  })
+
+  it('still answers with the payload when the response has no body', async () => {
+    // 204s, redirects and cache hits have no response body — the request's own payload
+    // is often the whole reason the caller asked, so it must survive that failure.
+    await harness.devtools.readNetwork(1, {}, 32_000)
+    harness.emit(1, 'Network.requestWillBeSent', {
+      requestId: 'p2',
+      request: { url: 'https://app.example/save', method: 'POST', postData: 'a=1' },
+      type: 'XHR',
+    })
+    harness.sendCommand.mockImplementation(async (_target: unknown, method: string) => {
+      if (method === 'Network.getResponseBody') throw new Error('No resource with given identifier found')
+      return {}
+    })
+
+    const one = await harness.devtools.readNetwork(1, { requestId: 'p2' }, 32_000)
+    expect(one.result?.text).toContain('request body:\na=1')
+    expect(one.result?.text).toContain('(no response body)')
+  })
+
+  it('says a multipart payload has no text form instead of leaving it blank', async () => {
+    await harness.devtools.readNetwork(1, {}, 32_000)
+    harness.emit(1, 'Network.requestWillBeSent', {
+      requestId: 'p3',
+      request: { url: 'https://app.example/upload', method: 'POST', postDataEntries: [{ bytes: 'AA==' }] },
+      type: 'XHR',
+    })
+
+    const one = await harness.devtools.readNetwork(1, { requestId: 'p3' }, 32_000)
+    expect(one.result?.text).toContain('no text form; Chrome reported 1 base64 entry')
+  })
 })
 
 describe('response overrides', () => {

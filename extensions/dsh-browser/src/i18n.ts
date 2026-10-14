@@ -1,28 +1,59 @@
-/** Languages supported by the extension UI. */
+/**
+ * UI language of the extension's user-facing surfaces.
+ *
+ * The language is a user setting (`settings.uiLanguage`, default `'en'`), not a
+ * property of the browser: a user on a Chinese Chrome may still want the English
+ * panel. The background worker is the only document that reads the setting, so
+ * it is the only one that calls {@link setUiLocale}; the panel and the options
+ * page are separate documents, take the language from the `ui.state` snapshot
+ * (`localeFromUiState`), and fall back to English when it is missing.
+ *
+ * @module
+ */
+
+/** Languages the extension UI speaks. */
 export type UiLocale = 'en' | 'zh'
 
-/**
- * Chinese browser locales use Chinese; every other locale deliberately falls
- * back to English so an untranslated third language never leaks into the UI.
- */
-export function localeFromLanguage(language: string | null | undefined): UiLocale {
-  const normalized = language?.trim().toLowerCase() ?? ''
-  return normalized === 'zh' || normalized.startsWith('zh-') ? 'zh' : 'en'
+/** The UI language before settings load, and whenever the stored one is unusable. */
+const DEFAULT_UI_LOCALE: UiLocale = 'en'
+
+let uiLocale: UiLocale = DEFAULT_UI_LOCALE
+
+/** @param value - anything a stored setting or a wire frame carried. */
+export function isUiLocale(value: unknown): value is UiLocale {
+  return value === 'en' || value === 'zh'
 }
 
-/** Read the browser's first preferred language, with the extension UI locale as a fallback. */
+/**
+ * Apply the user's language setting.
+ *
+ * Anything that is not `'en'` or `'zh'` falls back to English rather than
+ * throwing: this runs on every settings load and every save, and a stored value
+ * from a build with a language this one does not know must not stop the worker.
+ *
+ * @param value - the stored or patched `uiLanguage`.
+ */
+export function setUiLocale(value: unknown): void {
+  uiLocale = isUiLocale(value) ? value : DEFAULT_UI_LOCALE
+}
+
+/** @returns the language the extension's own surfaces should speak. */
 export function getUiLocale(): UiLocale {
-  let language: string | undefined
-  if (typeof navigator !== 'undefined') {
-    const preferred = navigator.languages?.find((candidate) => candidate.trim() !== '') ?? navigator.language
-    language = preferred.trim() === '' ? undefined : preferred
-  }
-  if (language === undefined && typeof chrome !== 'undefined' && chrome.i18n?.getUILanguage !== undefined) {
-    try {
-      language = chrome.i18n.getUILanguage()
-    } catch {
-      // A partially mocked or stale extension context may expose an unusable API.
-    }
-  }
-  return localeFromLanguage(language)
+  return uiLocale
+}
+
+/**
+ * Read the language out of a UI-state snapshot.
+ *
+ * The panel and the options page are separate documents from the worker, so they
+ * cannot see {@link getUiLocale}'s module state; the background carries `locale`
+ * in `ui.state` instead. A snapshot that never arrived (or one from a worker too
+ * old to send it) leaves the page in English.
+ *
+ * @param state - the snapshot, or null/undefined when none arrived.
+ * @returns the language to render in.
+ */
+export function localeFromUiState(state: { locale?: unknown } | null | undefined): UiLocale {
+  const value = state?.locale
+  return isUiLocale(value) ? value : DEFAULT_UI_LOCALE
 }

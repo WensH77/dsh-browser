@@ -6,9 +6,11 @@
  * fence (which only guards the client-connection routes), so the bridge brings
  * its own authentication: a bearer token presented in the `hello` frame within
  * HELLO_TIMEOUT_MS. The bridge is a pure tool channel: it carries no chat,
- * settings, credentials, or gateway passthrough. Two bridge-internal RPCs
- * remain (`bridge.gdrive.moveIntoSession`, `bridge.openGDriveFolder`),
- * serviced directly by plugin dependencies; every other RPC method is refused.
+ * settings, credentials, or gateway passthrough. Four bridge-internal RPCs
+ * remain (`bridge.gdrive.moveIntoSession`, `bridge.openGDriveFolder`,
+ * `bridge.uiLanguage`, `bridge.updateCommand`), serviced directly by plugin
+ * dependencies or recorded for this connection; every other RPC method is
+ * refused.
  *
  * One active connection at a time: a new authenticated socket replaces the
  * previous one (the old socket is closed and its in-flight tool calls settle
@@ -26,17 +28,22 @@ import {
   EXTENSION_UNVERIFIED_CLOSE_CODE,
   BRIDGE_GDRIVE_MOVE_METHOD,
   BRIDGE_OPEN_GDRIVE_FOLDER_METHOD,
+  BRIDGE_UI_LANGUAGE_METHOD,
+  BRIDGE_UPDATE_COMMAND_METHOD,
   HANDSHAKE_MISMATCH_CLOSE_CODE,
   HELLO_TIMEOUT_MS,
   PING_INTERVAL_MS,
   handshakeRefusal,
   parseBridgeFrame,
+  parseUiLanguagePayload,
   type BridgeFrame,
   type BridgeCaps,
   type ClientFrame,
   type ToolErrorCode,
+  type UiLanguage,
 } from './protocol.ts'
 import { verifyToken } from './token.ts'
+import { currentPlatform, updateCommand } from './update-source.ts'
 
 /** Loopback IPv4/IPv6 literals (IPv4-mapped included). Exported for tests and reuse. */
 export function isLoopbackAddress(address: string | undefined): boolean {
@@ -63,6 +70,12 @@ export class BridgeToolError extends Error {
   constructor(
     readonly code: ToolErrorCode,
     message: string,
+    /**
+     * Whether a page choice would let the caller retry this call successfully;
+     * see {@link ToolError.needsPageChoice}. False for every failure this host
+     * raises itself — those name a transport or argument problem, not a page.
+     */
+    readonly needsPageChoice = false,
   ) {
     super(message)
     this.name = 'BridgeToolError'
@@ -81,6 +94,14 @@ export interface BridgeServerDeps {
   openGDriveFolder: () => void | Promise<void>
   /** Move a finished Google download into ~/.dsh/gdrive/<sessionId>/. */
   gdriveMoveIntoSession: (sourcePath: string, sessionId: string) => Promise<{ filePath: string }>
+  /**
+   * The command that updates this installation, as `bridge.updateCommand`
+   * answers it. Defaults to this install's own command
+   * (`updateCommand(currentInstallMode(), currentPlatform())`); the seam exists
+   * so a test can answer for a managed and a checkout install without either
+   * being on disk. Production never sets it.
+   */
+  updateCommand?: () => string
   /**
    * Test seam: force the remote address seen by the hello loopback gate. The
    * sandbox cannot bind arbitrary loopback literals, so the non-loopback
@@ -133,6 +154,25 @@ export function messageToText(data: Buffer | ArrayBuffer | Buffer[]): string {
 }
 
 /**
+ * The update command `bridge.updateCommand` hands the panel's Update button.
+ *
+ * Sampled per request rather than cached: the platform is a property of the running host,
+ * and a caller that asks now must not get a command composed for a different machine.
+ *
+ * **Always the published installer, by the user's ruling (2026-10-14).** The button used to
+ * answer with this installation's own mode — `./scripts/install.sh` for a checkout — and the
+ * user asked for the `curl … | bash` line in every case. The trade-off is worth writing down
+ * where the code is: on a checkout install that command fetches and runs the *published*
+ * installer, so it installs the released tree rather than the local one. To apply local
+ * work, run `./scripts/install.sh` from the repository instead (the guide says so).
+ *
+ * @returns one runnable command line, with no explanation text.
+ */
+function defaultUpdateCommand(): string {
+  return updateCommand('managed', currentPlatform())
+}
+
+/**
  * Token-authenticated bridge server. Construct once per plugin instance;
  * dispose with {@link close}.
  */
@@ -142,6 +182,14 @@ export class BridgeServer {
 
   /** Capabilities the connected extension reported in its last `hello`. */
   private clientCaps: BridgeCaps | undefined
+  /**
+   * Language the connected extension reported over `bridge.uiLanguage`.
+   *
+   * Per connection, like {@link clientCaps}: the extension reports it once per
+   * handshake, so a reconnect starts from "unknown" rather than from the
+   * previous socket's answer.
+   */
+  private uiLanguage: UiLanguage | undefined
   private readonly pendingTools = new Map<string, PendingTool>()
   private closed = false
 
@@ -208,7 +256,14 @@ export class BridgeServer {
         cancel(new BridgeToolError('bridge-closed', 'tool call cancelled before the extension answered'))
       }
       timer = setTimeout(() => {
-        cancel(new BridgeToolError('timeout', `browser action "${name}" timed out after ${timeoutMs}ms`))
+        // Not "the action failed": this budget is the bridge's own. An unanswered approval no
+        // longer lands here at all — the extension answers it at 60 seconds, inside this
+        // budget — so what is left is a page that stopped answering, or a card the user
+        // answered and an action still running. Say that, and the next step.
+        cancel(new BridgeToolError('timeout',
+          `browser action "${name}" got no answer within ${timeoutMs}ms — the bridge's own budget (toolTimeoutMs), not a verdict on the action. `
+          + 'The page may be stuck, or the action may still be running after a confirmation was answered. '
+          + 'Check Chrome (the extension marks a waiting prompt on its toolbar badge), then retry or raise toolTimeoutMs.'))
       }, timeoutMs)
       signal.addEventListener('abort', onAbort, { once: true })
       this.pendingTools.set(id, { resolve, reject, timer })
@@ -377,6 +432,21 @@ export class BridgeServer {
     return this.clientCaps?.extensionVersion
   }
 
+  /**
+   * Language the connected extension's user-facing UI speaks, when it said.
+   *
+   * The two prompts this plugin raises for a human are worded from it; an
+   * extension too old to report (or one that has not reported yet on this
+   * connection) leaves it undefined, and those prompts stay English. Cheap and
+   * cached: the value is written once per connection by the extension's own
+   * report, not fetched per prompt.
+   *
+   * @returns `'en'`, `'zh'`, or undefined when nothing was reported.
+   */
+  clientUiLanguage(): UiLanguage | undefined {
+    return this.uiLanguage
+  }
+
   private handleReadyFrame(frame: BridgeFrame): void {
     switch (frame.t) {
       case 'rpc':
@@ -394,7 +464,7 @@ export class BridgeServer {
   }
 
   /**
-   * Service the two bridge-internal RPC methods only; every other method is
+   * Service the four bridge-internal RPC methods only; every other method is
    * refused. The bridge carries no gateway passthrough: chat, settings, and
    * credentials all belong to standard dsh clients now.
    */
@@ -403,6 +473,18 @@ export class BridgeServer {
     /* v8 ignore next -- replacement race: a frame can land between a socket
     replacement and the next promotion; the re-check keeps the handler total */
     if (conn === null) return
+    if (frame.method === BRIDGE_UI_LANGUAGE_METHOD) {
+      const language = parseUiLanguagePayload(frame.payload)
+      if (language === undefined) {
+        sendFrame(conn.ws, { t: 'rpc.result', id: frame.id, ok: false, error: { code: 'bad-request', message: 'language must be "en" or "zh"' } })
+        return
+      }
+      // Recorded for this connection; the plugin reads it when it words a
+      // prompt. Nobody waits on the report, but every rpc frame is answered.
+      this.uiLanguage = language
+      sendFrame(conn.ws, { t: 'rpc.result', id: frame.id, ok: true, result: { language } })
+      return
+    }
     if (frame.method === BRIDGE_GDRIVE_MOVE_METHOD) {
       const movePayload = gdriveMovePayload(frame.payload)
       if (movePayload === null) {
@@ -433,6 +515,18 @@ export class BridgeServer {
       }
       return
     }
+    if (frame.method === BRIDGE_UPDATE_COMMAND_METHOD) {
+      // The bare command line, nothing else: the panel puts this on the user's
+      // clipboard and the user runs it. `browserUpdateText`'s multi-line
+      // explanation is addressed to the model, not to a clipboard.
+      sendFrame(conn.ws, {
+        t: 'rpc.result',
+        id: frame.id,
+        ok: true,
+        result: (this.deps.updateCommand ?? defaultUpdateCommand)(),
+      })
+      return
+    }
     sendFrame(conn.ws, {
       t: 'rpc.result',
       id: frame.id,
@@ -447,13 +541,16 @@ export class BridgeServer {
     clearTimeout(pending.timer)
     this.pendingTools.delete(id)
     if (ok) pending.resolve(payload)
-    else pending.reject(new BridgeToolError(payloadCode(payload), payloadMessage(payload)))
+    else pending.reject(new BridgeToolError(payloadCode(payload), payloadMessage(payload), payloadNeedsPageChoice(payload)))
   }
 
   /** Close the current connection (if any) and settle its in-flight calls. */
   private replaceConnection(): void {
     const hadCaps = this.clientCaps !== undefined
     this.clientCaps = undefined
+    // The language belonged to that socket too: the next extension reports its
+    // own, and until it does the prompts stay English.
+    this.uiLanguage = undefined
     if (hadCaps) this.deps.onCapabilities?.(undefined)
     const conn = this.current
     if (conn === null) return
@@ -500,6 +597,23 @@ export function payloadMessage(payload: unknown): string {
     return 'browser action failed'
   }
   return 'browser action failed'
+}
+
+/**
+ * Tool error payload → whether a page choice resolves it.
+ *
+ * Strictly `true` on the wire: a build that predates the field sends nothing,
+ * and anything else (a string "true", a 1) is read as "not a page problem" so a
+ * malformed frame can never send the caller into a bind the extension did not
+ * ask for. Exported for the same reason as {@link payloadCode}.
+ *
+ * @param payload - extension-reported error payload.
+ * @returns true only when the extension set the flag.
+ */
+export function payloadNeedsPageChoice(payload: unknown): boolean {
+  return typeof payload === 'object'
+    && payload !== null
+    && (payload as { needsPageChoice?: unknown }).needsPageChoice === true
 }
 
 

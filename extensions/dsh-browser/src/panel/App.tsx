@@ -1,12 +1,21 @@
 import { useEffect, useState, type ReactElement } from 'react'
-import { getUiLocale } from '../i18n.ts'
+import { localeFromUiState, type UiLocale } from '../i18n.ts'
 import { opLabel, type OpCopy } from './op-label.ts'
 import { sendUiRequest, type SessionGrantsPush, type UiState } from '../shared/messages.ts'
 import { noticeText } from '../shared/notice-copy.ts'
 import { decisionButtons } from './approval-buttons.ts'
 import { applySessionGrantsPush, grantsLine, revocationLine, type SessionGrantsView } from './session-grants.ts'
+import { showsReconnect } from './reconnect-visibility.ts'
+import { requestUpdateCommand, updateButtonView, type UpdateOutcome } from './update-command.ts'
 
-const zh = {
+/**
+ * The panel's strings, one object per language.
+ *
+ * Exported so a test can check the two sides carry the same keys: a missing
+ * translation renders as `undefined` in the panel, which reads as a missing
+ * button rather than as a missing string.
+ */
+export const zh = {
   appName: 'AI 浏览器助手',
   connecting: '连接中…',
   connected: '已连接',
@@ -19,6 +28,12 @@ const zh = {
   log: '日志',
   logCopied: '已复制',
   logFailed: '复制失败',
+  update: '更新',
+  updateHint: '把更新命令复制到剪贴板（只复制，不执行；跑完请在 chrome://extensions 手动 Reload）',
+  updateCopied: '已复制',
+  updateFailed: '复制失败',
+  updateNeedsBridge: '需要先连上桥（后台未连接 dsh）',
+  updateUnavailable: '宿主没有返回更新命令（插件版本可能过旧，或该方法被拒绝）',
   reconnect: '重连',
   pendingApprovals: '等待确认的浏览器操作',
   allowOnce: '允许一次',
@@ -64,11 +79,12 @@ const zh = {
   opListTabs: '列出标签页',
   opBindTab: '绑定标签页',
   opChars: '个字符',
-  clear: '清除',
+  clear: '清除操作',
   unbind: '解除关联',
   bound: '当前页面',
 }
-const en = {
+/** The English side of the same key set; see {@link zh}. */
+export const en = {
   appName: 'AI Browser Assistant',
   connecting: 'Connecting…',
   connected: 'Connected',
@@ -81,6 +97,12 @@ const en = {
   log: 'Log',
   logCopied: 'Copied',
   logFailed: 'Copy failed',
+  update: 'Update',
+  updateHint: 'Copy the update command to the clipboard (copies only — it does not update; reload the extension in chrome://extensions afterwards)',
+  updateCopied: 'Copied',
+  updateFailed: 'Copy failed',
+  updateNeedsBridge: 'Connect the bridge first (dsh is not connected to this extension)',
+  updateUnavailable: 'The host returned no update command (the plugin may be too old, or it refused the request)',
   reconnect: 'Reconnect',
   pendingApprovals: 'Browser actions awaiting approval',
   allowOnce: 'Allow once',
@@ -128,15 +150,22 @@ const en = {
   opListTabs: 'List tabs',
   opBindTab: 'Bind tab',
   opChars: ' chars',
-  clear: 'Clear',
+  clear: 'Clear operations',
   unbind: 'Unbind',
   bound: 'Bound page',
 }
 
-const locale = getUiLocale()
-const copy = locale === 'zh' ? zh : en
+/** The panel's own name, for the document title behind the panel. */
+export function appName(locale: UiLocale): string {
+  return locale === 'zh' ? zh.appName : en.appName
+}
 
-function statusLabel(state: string): string {
+/** The strings of one language; the panel reads the language from `ui.state`. */
+function copyFor(locale: UiLocale): typeof en {
+  return locale === 'zh' ? zh : en
+}
+
+function statusLabel(state: string, copy: typeof en): string {
   switch (state) {
     case 'connected': return copy.connected
     case 'connecting': return copy.connecting
@@ -179,7 +208,7 @@ function opCode(op: import('../shared/messages.ts').RecentOp): string | undefine
   return typeof expression === 'string' && expression.trim() !== '' ? expression.trim() : undefined
 }
 
-function opStateLabel(state: string): string | undefined {
+function opStateLabel(state: string, copy: typeof en): string | undefined {
   switch (state) {
     case 'running': return copy.opRunning
     case 'waiting': return copy.opWaiting
@@ -193,6 +222,25 @@ export function App(): ReactElement {
   const [ui, setUi] = useState<UiState | null>(null)
   /** Feedback for the Log button: it copies, so it has to say whether it did. */
   const [logCopy, setLogCopy] = useState<'idle' | 'copied' | 'failed'>('idle')
+  /** Feedback for the Update button, the same shape for the same reason. */
+  const [updateOutcome, setUpdateOutcome] = useState<UpdateOutcome>('idle')
+
+  /**
+   * Copy the host's update command.
+   *
+   * It is copied and never run: the installer writes into the user's dsh home
+   * and the extension still needs a manual reload, so running it is the user's
+   * call. Nothing here says "updated" — the outcomes are copied and failed.
+   */
+  const copyUpdateCommand = async (): Promise<void> => {
+    const attempt = await requestUpdateCommand({ send: sendUiRequest, copy: copyTextToClipboard })
+    // The button says copied or failed; the reason itself (an old host refusing
+    // the method, a background that never answered) goes to the debug ring the
+    // Log button copies.
+    if (attempt.reason !== null) console.warn(`[dsh-browser] update command not copied: ${attempt.reason}`)
+    setUpdateOutcome(attempt.outcome)
+    window.setTimeout(() => setUpdateOutcome('idle'), 2_000)
+  }
 
   /** Copy the extension's recent debugging events for a bug report. */
   const copyLog = async (): Promise<void> => {
@@ -262,6 +310,8 @@ export function App(): ReactElement {
 
   const state = ui?.bridgeState ?? 'stopped'
   const connected = state === 'connected'
+  const locale = localeFromUiState(ui)
+  const copy = copyFor(locale)
   const controlled = ui?.controlled ?? null
   const operating = connected && controlled !== null
   const pending = ui?.pendingApprovals ?? []
@@ -271,21 +321,26 @@ export function App(): ReactElement {
     grantRevocation: ui?.grantRevocation ?? null,
   }
   const showsGrants = grantsView.grants.length > 0 || grantsView.grantRevocation !== null
+  const updateButton = updateButtonView(state, updateOutcome, copy)
 
   return (
     <div className="panel">
       <header className="panel__header">
         <span className={`dot ${connected ? 'dot--on' : 'dot--off'}`} />
-        <span className="panel__state">{statusLabel(state)}</span>
+        <span className="panel__state">{statusLabel(state, copy)}</span>
         <span className="panel__header-fill" />
-        <button
-          type="button"
-          className="btn btn--ghost btn--sm"
-          title={copy.reconnect}
-          onClick={() => { void sendUiRequest({ type: 'reconnect' }) }}
-        >
-          {copy.reconnect}
-        </button>
+        {/* Only the terminal state gets it: see `reconnect-visibility.ts` for
+            why a healthy or already-retrying connection must not. */}
+        {showsReconnect(state) && (
+          <button
+            type="button"
+            className="btn btn--ghost btn--sm"
+            title={copy.reconnect}
+            onClick={() => { void sendUiRequest({ type: 'reconnect' }) }}
+          >
+            {copy.reconnect}
+          </button>
+        )}
       </header>
 
       {ui?.notice != null && (
@@ -342,9 +397,12 @@ export function App(): ReactElement {
                   newest operation at index 0. Reversing put the newest at the
                   BOTTOM of the list, so with a long feed the entry that just
                   happened landed below the fold and the only way to find it was
-                  to scroll -- while the oldest entry sat at the top. */}
-              {[...(ui?.recentOps ?? [])].slice(0, 15).map((op) => {
-                const stateText = opStateLabel(op.state)
+                  to scroll -- while the oldest entry sat at the top.
+                  The whole feed is rendered now, not the newest 15: the store already
+                  caps it at 30, and dropping everything older made the earliest
+                  operations unreachable rather than merely off-screen. */}
+              {(ui?.recentOps ?? []).map((op) => {
+                const stateText = opStateLabel(op.state, copy)
                 const code = opCode(op)
                 return (
                   <li className="ops__row" key={op.id} title={opTitle(op)}>
@@ -402,6 +460,19 @@ export function App(): ReactElement {
           </button>
         </span>
         <span className="panel__footer-actions">
+          <button
+            type="button"
+            className="btn btn--ghost btn--sm"
+            disabled={updateButton.disabled}
+            title={updateButton.title}
+            /* The reason is the accessible name too: a disabled button that
+               only showed "Update" would leave a screen reader with no way to
+               learn why it cannot be pressed. */
+            aria-label={updateButton.reason ?? undefined}
+            onClick={() => { void copyUpdateCommand() }}
+          >
+            {updateButton.label}
+          </button>
           <button
             type="button"
             className="btn btn--ghost btn--sm"

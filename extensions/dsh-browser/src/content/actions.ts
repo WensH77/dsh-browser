@@ -572,10 +572,14 @@ async function clickAction(
   const resolved = targetOrThrow(args, ctx.ids)
   const el = resolved.element
   const option = typeof args.option === 'string' ? args.option.trim() : ''
-  if (el instanceof HTMLSelectElement) return chooseSelectOption(el, option, resolved.label, ctx)
-  if (option !== '') {
+  if (option !== '' && !(el instanceof HTMLSelectElement)) {
     throw new ActionError('bad-args', `option chooses a value in a <select>, but ${resolved.label} is a <${el.localName}>. Drop option, or target the select itself.`)
   }
+  // A real press blurs the focused field before the target acts on it; a synthesized
+  // click never does. One call site covers every press this action makes — select, link
+  // and button alike (see settleFocusForActivation).
+  settleFocusForActivation(el)
+  if (el instanceof HTMLSelectElement) return chooseSelectOption(el, option, resolved.label, ctx)
   const label = accessibleName(el)
   el.scrollIntoView({ block: 'center', behavior: 'instant' })
   if (el instanceof HTMLAnchorElement) {
@@ -712,6 +716,43 @@ function selectOptionsField(select: HTMLSelectElement): string {
   return truncate(`${parts.join(' | ')}${more}`, SELECT_OPTIONS_CHARS).text
 }
 
+/** Whether an element can hold text focus the way a form field does. */
+function isEditableElement(el: Element | null): el is HTMLElement {
+  return el instanceof HTMLElement
+    && (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement || el.isContentEditable)
+}
+
+/**
+ * Give up the focused field's focus the way a real press does, before activating a target.
+ *
+ * A real mousedown blurs whatever held focus; a synthesized `click` never does. A field that
+ * commits its value on blur therefore never commits, and the save that follows posts the stale
+ * value: measured on intranet-v2's consultation sidebar, the input showed 49 while the request
+ * carried 45, and the value did reach the database once the blur was delivered.
+ *
+ * `blur()` is the faithful call, because it moves `document.activeElement` too. But a document
+ * that does not hold system focus — a background tab, or a window that lost focus — receives no
+ * events from it at all: **the property still moves and nothing is delivered**, so the call is
+ * watched for the event it is supposed to fire rather than for the property it moves. When that
+ * event never arrives, both are dispatched instead; React's delegated `onBlur` listens on the
+ * document in the capture phase, which a dispatched `blur` reaches.
+ *
+ * @param target - the element about to be activated; focusing it is the caller's business, not
+ *   this function's, so the focus is only given up when it belongs to some other field.
+ */
+function settleFocusForActivation(target: Element): void {
+  const active = document.activeElement
+  if (active === target || !isEditableElement(active)) return
+  let delivered = false
+  const observe = (): void => { delivered = true }
+  active.addEventListener('blur', observe)
+  active.blur()
+  active.removeEventListener('blur', observe)
+  if (delivered) return
+  active.dispatchEvent(new FocusEvent('blur'))
+  active.dispatchEvent(new FocusEvent('focusout', { bubbles: true }))
+}
+
 /**
  * Activate one element the way a user click would.
  *
@@ -788,6 +829,12 @@ async function typeAction(args: Record<string, unknown>, ctx: ActionContext): Pr
   if (!(el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement || contentEditable)) {
     throw new ActionError('action-failed', `Element ${resolved.label} is not editable (${el.tagName.toLowerCase()}).`)
   }
+  // Typing into a field is what a user does by clicking into it: the field that held focus
+  // gives it up first, and this one takes it. Without both halves a form whose fields commit
+  // on blur keeps every value but the last one typed — the first field is never blurred, so it
+  // never commits, and the save reports the field the case filled as empty.
+  settleFocusForActivation(el)
+  if (el instanceof HTMLElement) el.focus()
   if (contentEditable) {
     if (replace) el.textContent = ''
     el.textContent = `${el.textContent ?? ''}${text}`

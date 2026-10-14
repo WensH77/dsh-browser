@@ -52,6 +52,14 @@ interface NetworkEntry {
   failed?: string
   at: number
   endedAt?: number
+  /**
+   * What the request itself carried, as `Network.requestWillBeSent` reported it.
+   *
+   * The event has always been in hand; only the url and method used to be kept, so a
+   * caller that needed the payload had to inject an XHR hook through `browser_eval` —
+   * which dies on reload and cannot tell "nothing was sent" from "the hook is gone".
+   */
+  requestBody?: string
 }
 
 /** One installed response-override rule (Fetch interception). */
@@ -133,6 +141,11 @@ function pushConsole(tabId: number, level: string, text: string): void {
   if (session.console.length > CONSOLE_BUFFER_MAX) session.console.splice(0, session.console.length - CONSOLE_BUFFER_MAX)
 }
 
+/** Keep one payload inside the buffer's size budget, saying so when it is cut. */
+function capBody(text: string, label: string): string {
+  return text.length > BODY_MAX ? `${text.slice(0, BODY_MAX)}\n…(${label} truncated)` : text
+}
+
 function pushNetwork(tabId: number, patch: Partial<NetworkEntry> & { requestId: string }): void {
   const session = sessionFor(tabId)
   const existing = session.networkIndex.get(patch.requestId)
@@ -151,6 +164,7 @@ function pushNetwork(tabId: number, patch: Partial<NetworkEntry> & { requestId: 
     ...patch.status === undefined ? {} : { status: patch.status },
     ...patch.failed === undefined ? {} : { failed: patch.failed },
     ...patch.endedAt === undefined ? {} : { endedAt: patch.endedAt },
+    ...patch.requestBody === undefined ? {} : { requestBody: patch.requestBody },
   }
   session.network.push(entry)
   session.networkIndex.set(entry.requestId, entry)
@@ -189,12 +203,25 @@ function onCdpEvent(source: chrome.debugger.Debuggee, method: string, params?: o
       return
     }
     case 'Network.requestWillBeSent': {
-      const request = event.request as { url?: unknown; method?: unknown } | undefined
+      const request = event.request as {
+        url?: unknown
+        method?: unknown
+        postData?: unknown
+        postDataEntries?: unknown
+      } | undefined
+      // Multipart payloads arrive as base64 `postDataEntries` and carry no `postData`;
+      // saying which of the two happened keeps "no body" from reading as "nothing was sent".
+      const entries = Array.isArray(request?.postDataEntries) ? request.postDataEntries.length : 0
       pushNetwork(tabId, {
         requestId: String(event.requestId ?? ''),
         url: typeof request?.url === 'string' ? request.url : '',
         method: typeof request?.method === 'string' ? request.method : 'GET',
         ...typeof event.type === 'string' ? { resourceType: event.type } : {},
+        ...typeof request?.postData === 'string'
+          ? { requestBody: capBody(request.postData, 'request body') }
+          : entries > 0
+            ? { requestBody: `(no text form; Chrome reported ${entries} base64 entr${entries === 1 ? 'y' : 'ies'})` }
+            : {},
         at: Date.now(),
       })
       return
@@ -623,13 +650,24 @@ export async function readNetwork(
       if (entry === undefined) {
         return { ok: false, error: { code: 'action-failed', message: `No captured request has id ${requestId}. Call browser_network first and use an id from its list.` } }
       }
-      const raw = await chrome.debugger.sendCommand({ tabId }, 'Network.getResponseBody', { requestId }) as { body?: unknown; base64Encoded?: unknown }
-      if (typeof raw.body !== 'string') {
-        return { ok: false, error: { code: 'action-failed', message: `Chrome returned no body for ${entry.url} (redirects, streams, and served-from-cache responses may have none).` } }
+      // A request whose response has no body (204, a redirect, a cache hit) still carries
+      // its own payload — often the very thing the caller came for — so failing to read
+      // the response must not hide the request.
+      let responseText = ''
+      try {
+        const raw = await chrome.debugger.sendCommand({ tabId }, 'Network.getResponseBody', { requestId }) as { body?: unknown; base64Encoded?: unknown }
+        if (typeof raw.body === 'string') {
+          responseText = capBody(raw.base64Encoded === true ? '(binary body, base64 omitted)' : raw.body, 'body')
+        }
+      } catch {
+        responseText = ''
       }
-      const body = raw.base64Encoded === true ? '(binary body, base64 omitted)' : raw.body
-      const truncated = body.length > BODY_MAX ? `${body.slice(0, BODY_MAX)}\n…(body truncated)` : body
-      return { ok: true, result: { text: `${entry.method} ${entry.url}\nstatus: ${entry.status ?? 'unknown'}\n---\n${truncated}` } }
+      const requestText = entry.requestBody === undefined ? '' : `request body:\n${entry.requestBody}\n---\n`
+      if (requestText === '' && responseText === '') {
+        return { ok: false, error: { code: 'action-failed', message: `Chrome returned no body for ${entry.url} (redirects, streams, and served-from-cache responses may have none), and the request carried none.` } }
+      }
+      const bodyText = responseText === '' ? '(no response body)' : `response body:\n${responseText}`
+      return { ok: true, result: { text: `${entry.method} ${entry.url}\nstatus: ${entry.status ?? 'unknown'}\n---\n${requestText}${bodyText}` } }
     }
     const cursor = numberArg(args, 'cursor') ?? 0
     const limit = Math.min(Math.max(numberArg(args, 'limit') ?? 50, 1), 200)
@@ -645,7 +683,9 @@ export async function readNetwork(
     const lines = items.map((entry) => {
       const status = entry.failed !== undefined ? `FAILED ${entry.failed}` : String(entry.status ?? 'pending')
       const ms = entry.endedAt === undefined ? '' : ` ${entry.endedAt - entry.at}ms`
-      return `[${entry.seq}] id=${entry.requestId} ${entry.method} ${status}${ms} ${entry.resourceType ?? ''} ${entry.url}`.trimEnd()
+      // `+body` is the pointer to a payload the list will not print: read that request id.
+      const body = entry.requestBody === undefined ? '' : ' +body'
+      return `[${entry.seq}] id=${entry.requestId} ${entry.method} ${status}${ms}${body} ${entry.resourceType ?? ''} ${entry.url}`.trimEnd()
     })
     const head = `network entries ${items.length === 0 ? '(none new)' : `(buffer holds ${session.network.length})`}`
     const next = items.length === 0 ? Math.max(cursor, session.networkSeq) : items[items.length - 1]!.seq

@@ -195,7 +195,9 @@ describe('real Loader composition', () => {
     expect(browserPrompt).toContain('A refusal is a boundary, not a puzzle')
     // The two host tools are the advertised first stop when the bridge is down.
     expect(browserPrompt).toContain('call browser_status first')
-    expect(browserPrompt).toContain('call browser_setup to prepare the files')
+    // browser_setup's trigger moved into the guide; what must stay here is the
+    // pointer that sends the model to it when tools are missing.
+    expect(browserPrompt).toContain('load the dsh-browser-bridge-guide skill')
     // Reading text comes before scripting the DOM.
     expect(browserPrompt).toContain('slice it yourself')
     // Page pictures go through browser_image, not a screenshot.
@@ -204,7 +206,7 @@ describe('real Loader composition', () => {
     expect(browserPrompt).toContain('stop and tell the user what contradicted')
     // Slides is an ordinary page now that the export narrowed to Docs/Sheets:
     // the prompt must not still route every Drive link to the exporter.
-    expect(browserPrompt).toContain('Slides, Drive files, and every other link are ordinary pages')
+    expect(browserPrompt).toContain('every other Google link — Slides included — is a page')
     expect(browserPrompt).not.toContain('are not readable as web pages')
     expect(browserPrompt).not.toMatch(/\p{Script=Han}/u)
 

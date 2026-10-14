@@ -380,6 +380,223 @@ describe('teardown', () => {
   })
 })
 
+describe('event listeners', () => {
+  /**
+   * A page shaped like the one this action exists for: the input has no handler
+   * of its own, and the `blur` handler sits on `document` in the capture phase
+   * — legacy React 15 delegation, where the node-level answer is empty while
+   * the field does submit on blur.
+   */
+  const NODES: Record<string, { className: string; description: string; parent?: string }> = {
+    'obj-input': { className: 'HTMLInputElement', description: 'input#email', parent: 'obj-form' },
+    'obj-form': { className: 'HTMLFormElement', description: 'form#signup', parent: 'obj-body' },
+    'obj-body': { className: 'HTMLBodyElement', description: 'body', parent: 'obj-doc' },
+    'obj-doc': { className: 'HTMLDocument', description: '#document' },
+  }
+
+  function stubChain(listeners: Record<string, Array<Record<string, unknown>>>, start = 'obj-input'): void {
+    harness.sendCommand.mockImplementation(async (_target: unknown, method: string, params?: Record<string, unknown>) => {
+      if (method === 'Runtime.evaluate') {
+        return { result: { objectId: start, className: NODES[start]!.className, description: NODES[start]!.description } }
+      }
+      if (method === 'DOMDebugger.getEventListeners') {
+        return { listeners: listeners[String(params?.objectId)] ?? [] }
+      }
+      if (method === 'Runtime.callFunctionOn') {
+        const parent = NODES[String(params?.objectId)]?.parent
+        if (parent === undefined) return { result: { type: 'object', subtype: 'null', value: null } }
+        return { result: { objectId: parent, className: NODES[parent]!.className, description: NODES[parent]!.description } }
+      }
+      return {}
+    })
+  }
+
+  it('lists every chain level, empty ones included, and pairs document listeners with the delegation warning', async () => {
+    await harness.js.jsDebugAnswer(1, { action: 'scripts' }, 32_000)
+    harness.emit(1, 'Debugger.scriptParsed', { scriptId: '7', url: 'https://app.example/vendor.js' })
+    stubChain({
+      'obj-doc': [
+        { type: 'blur', useCapture: true, passive: false, once: false, scriptId: '7', lineNumber: 1204, columnNumber: 11 },
+        { type: 'click', useCapture: false, passive: true, once: true, scriptId: '99', lineNumber: 3, columnNumber: 0 },
+      ],
+    })
+
+    const answer = await harness.js.jsDebugAnswer(1, { action: 'listeners', selector: 'input#email' }, 32_000)
+
+    expect(harness.sendCommand).toHaveBeenCalledWith({ tabId: 1 }, 'Runtime.evaluate', {
+      expression: 'document.querySelector("input#email")',
+      returnByValue: false,
+      silent: true,
+    })
+    // Node-only: Chrome's own default would fold each child's listeners into its parent.
+    // `pierce` is off because it also reports other extensions' isolated worlds: on the
+    // real page the document level came back with 1390 listeners, most of them foreign.
+    expect(harness.sendCommand).toHaveBeenCalledWith({ tabId: 1 }, 'DOMDebugger.getEventListeners', {
+      objectId: 'obj-doc',
+      depth: 0,
+      pierce: false,
+    })
+
+    const text = answer.result?.text ?? ''
+    // The empty levels are the answer: they are what "the element has none,
+    // document has one" is read from.
+    expect(text).toContain('[1] element <input#email>: none')
+    expect(text).toContain('[2] parent <form#signup>: none')
+    expect(text).toContain('[3] parent <body>: none')
+    expect(text).toContain('[4] document: 2')
+    expect(text).toContain('blur capture @ https://app.example/vendor.js:1204:11')
+    // A listener in a script the buffer does not hold is named, not dropped.
+    expect(text).toContain('click bubble (passive, once) @ (script 99 is not in the script buffer):3:0')
+    expect(text).toContain('a "none" level is not a verdict')
+    expect(text).toContain('can still submit on blur')
+
+    // Handles do not leak: every object consulted is released.
+    for (const objectId of ['obj-input', 'obj-form', 'obj-body', 'obj-doc']) {
+      expect(harness.sendCommand).toHaveBeenCalledWith({ tabId: 1 }, 'Runtime.releaseObject', { objectId })
+    }
+  })
+
+  it('reads document when no selector is given', async () => {
+    await harness.js.jsDebugAnswer(1, { action: 'scripts' }, 32_000)
+    harness.emit(1, 'Debugger.scriptParsed', { scriptId: '5', url: '' })
+    stubChain({ 'obj-doc': [{ type: 'blur', useCapture: true, scriptId: '5', lineNumber: 9, columnNumber: 1 }] }, 'obj-doc')
+
+    const answer = await harness.js.jsDebugAnswer(1, { action: 'listeners' }, 32_000)
+
+    expect(harness.sendCommand).toHaveBeenCalledWith({ tabId: 1 }, 'Runtime.evaluate', {
+      expression: 'document',
+      returnByValue: false,
+      silent: true,
+    })
+    expect(answer.result?.text).toContain('[1] document: 1')
+    expect(answer.result?.text).toContain('blur capture @ (anonymous script):9:1')
+    // `document` is the end of the chain: no parent hop is attempted.
+    expect(harness.sendCommand).not.toHaveBeenCalledWith({ tabId: 1 }, 'Runtime.callFunctionOn', expect.anything())
+  })
+
+  it('says the whole chain is empty without letting it read as "the field ignores blur"', async () => {
+    stubChain({})
+
+    const answer = await harness.js.jsDebugAnswer(1, { action: 'listeners', selector: 'input#email' }, 32_000)
+
+    const text = answer.result?.text ?? ''
+    expect(text).toContain('none found')
+    expect(text).toContain('up to document')
+    expect(text).toContain('a "none" level is not a verdict')
+    expect(text).toContain('can still respond')
+    // The comparison the note depends on is visible: every level is listed.
+    expect(text).toContain('[1] element <input#email>: none')
+    expect(text).toContain('[4] document: none')
+  })
+
+  it('names a selector that matches nothing, and one that is not CSS', async () => {
+    harness.sendCommand.mockImplementation(async (_target: unknown, method: string) => {
+      if (method === 'Runtime.evaluate') return { result: { type: 'object', subtype: 'null', value: null } }
+      return {}
+    })
+    const missing = await harness.js.jsDebugAnswer(1, { action: 'listeners', selector: 'input#nope' }, 32_000)
+    expect(missing.ok).toBe(false)
+    expect(missing.error?.message).toContain('Nothing on this page matches "input#nope"')
+    expect(missing.error?.message).toContain('browser_dom_query')
+
+    harness.sendCommand.mockImplementation(async (_target: unknown, method: string) => {
+      if (method === 'Runtime.evaluate') {
+        return { exceptionDetails: { exception: { description: 'SyntaxError: "input#" is not a valid selector' } } }
+      }
+      return {}
+    })
+    const invalid = await harness.js.jsDebugAnswer(1, { action: 'listeners', selector: 'input#' }, 32_000)
+    expect(invalid.ok).toBe(false)
+    expect(invalid.error?.message).toContain('"input#" is not a usable CSS selector')
+    expect(invalid.error?.message).toContain('not a valid selector')
+  })
+
+  it('refuses on a paused page instead of waiting on a renderer that cannot answer', async () => {
+    await harness.js.jsDebugAnswer(1, { action: 'wait' }, 32_000)
+    harness.emit(1, 'Debugger.paused', { reason: 'other', callFrames: [FRAME] })
+    harness.sendCommand.mockClear()
+
+    const answer = await harness.js.jsDebugAnswer(1, { action: 'listeners', selector: 'input#email' }, 32_000)
+
+    expect(answer.ok).toBe(false)
+    expect(answer.error?.message).toContain('paused at https://app.example/app.js:41:5')
+    expect(answer.error?.message).toContain('Action "resume"')
+    expect(harness.sendCommand).not.toHaveBeenCalledWith({ tabId: 1 }, 'Runtime.evaluate', expect.anything())
+    // `Runtime` is not even enabled on the way to the refusal: a stopped
+    // renderer is the one place this action must not queue a call on.
+    expect(harness.sendCommand).not.toHaveBeenCalledWith({ tabId: 1 }, 'Runtime.enable')
+  })
+
+  it('narrows to the event types the caller names, and says which', async () => {
+    // The question is nearly always "does anything here handle blur?" — and a real
+    // document carries a thousand listeners, so the unfiltered dump answered it by luck.
+    stubChain({
+      'obj-doc': [
+        { type: 'blur', useCapture: true, passive: false, once: false, scriptId: '7', lineNumber: 4, columnNumber: 0 },
+        { type: 'click', useCapture: false, passive: false, once: false, scriptId: '7', lineNumber: 9, columnNumber: 0 },
+        { type: 'focus', useCapture: true, passive: false, once: false, scriptId: '7', lineNumber: 5, columnNumber: 0 },
+      ],
+    })
+
+    const answer = await harness.js.jsDebugAnswer(1, { action: 'listeners', selector: 'input#email', type: 'BLUR, focus' }, 32_000)
+
+    const text = answer.result?.text ?? ''
+    // The counts have to mean what they say, so the filter runs before they are taken.
+    expect(text).toContain('of type "blur", "focus"')
+    expect(text).toContain('[4] document: 2')
+    expect(text).toContain('blur capture')
+    expect(text).toContain('focus capture')
+    expect(text).not.toContain('click')
+  })
+
+  it('reads document directly when the walk runs out of levels first', async () => {
+    // The first real page this ran on had the control 12 wrappers deep, and the walk ran out
+    // exactly one level short of `document` — the level the whole action exists to report.
+    // The ceiling may cut the middle of the chain; it must never cut the end.
+    const deep: Record<string, { className: string; description: string; parent?: string }> = {}
+    for (let index = 0; index < 40; index += 1) {
+      deep[`deep-${index}`] = {
+        className: index === 0 ? 'HTMLInputElement' : 'HTMLDivElement',
+        description: index === 0 ? 'input#deep' : `div.wrap-${index}`,
+        ...(index < 39 ? { parent: `deep-${index + 1}` } : {}),
+      }
+    }
+    deep['obj-doc'] = { className: 'HTMLDocument', description: '#document' }
+    let documentReads = 0
+    harness.sendCommand.mockImplementation(async (_target: unknown, method: string, params?: Record<string, unknown>) => {
+      if (method === 'Runtime.evaluate') {
+        if (String(params?.expression) === 'document') {
+          documentReads += 1
+          return { result: { objectId: 'obj-doc', className: 'HTMLDocument', description: '#document' } }
+        }
+        return { result: { objectId: 'deep-0', className: 'HTMLInputElement', description: 'input#deep' } }
+      }
+      if (method === 'DOMDebugger.getEventListeners') {
+        return {
+          listeners: String(params?.objectId) === 'obj-doc'
+            ? [{ type: 'blur', useCapture: true, passive: false, once: false, scriptId: '7', lineNumber: 4, columnNumber: 0 }]
+            : [],
+        }
+      }
+      if (method === 'Runtime.callFunctionOn') {
+        const parent = deep[String(params?.objectId)]?.parent
+        if (parent === undefined) return { result: { type: 'object', subtype: 'null', value: null } }
+        return { result: { objectId: parent, className: deep[parent]!.className, description: deep[parent]!.description } }
+      }
+      return {}
+    })
+
+    const answer = await harness.js.jsDebugAnswer(1, { action: 'listeners', selector: 'input#deep' }, 32_000)
+
+    const text = answer.result?.text ?? ''
+    expect(documentReads).toBe(1)
+    expect(text).toContain('document (reached directly')
+    expect(text).not.toContain('document was not reached')
+    // The point of reaching it: the delegated handler is visible after all.
+    expect(text).toContain('blur capture')
+  })
+})
+
 describe('unknown action', () => {
   it('names the actions that exist', async () => {
     const answer = await harness.js.jsDebugAnswer(1, { action: 'breakdance' }, 32_000)

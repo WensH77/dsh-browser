@@ -25,6 +25,13 @@ import type { ToolAnswer } from './tools.ts'
  * `file://` URL. Both content scripts and `chrome.debugger` are refused there,
  * so every tool would fail; saying which page it is beats letting the session
  * collect attach errors.
+ *
+ * `missing`, `unsupported` and `lost` all leave the session with no page it can
+ * operate. When that is *why* there is none — the session never bound a page, or
+ * the page it had is gone — the host may fix it inside the call it refused:
+ * list the open pages, let the user pick one, bind it and run the call again.
+ * Those answers therefore carry `needsPageChoice` (see
+ * {@link offeringPageChoice}); a refusal a page choice cannot fix does not.
  */
 export type AffinityFailureKind = 'handoff' | 'lost' | 'missing' | 'taken' | 'unsupported'
 
@@ -37,7 +44,30 @@ export interface BindingHolder {
 }
 
 /**
+ * Add "a page choice resolves this" to a refusal, for the host to act on.
+ *
+ * Only for the refusals where the session has no page *at all*, and picking one
+ * is strictly better than the failure. It is deliberately not part of
+ * {@link affinityFailureAnswer} for `unsupported`: that one answer also covers a
+ * session that is already bound and whose own tab navigated somewhere no
+ * extension may touch (`resolveToolTab`). Moving such a session to another page
+ * is the user's decision, not a repair the host may make on its own — the
+ * answer's three ways out are the only moves offered there.
+ *
+ * @param answer - the refusal to mark.
+ * @returns the same refusal carrying `needsPageChoice`.
+ */
+export function offeringPageChoice(answer: ToolAnswer): ToolAnswer {
+  if (answer.ok || answer.error === undefined) return answer
+  return { ...answer, error: { ...answer.error, needsPageChoice: true } }
+}
+
+/**
  * Build the failure answer for one affinity problem.
+ *
+ * `missing` and `lost` carry `needsPageChoice` on their own: both mean the
+ * session has no page at all. `unsupported` does not — see
+ * {@link offeringPageChoice} for the two situations it covers.
  *
  * @param kind - handoff (no session binding and no decided target), lost (tab
  * closed), missing (never bound), taken (bound to another session),
@@ -92,6 +122,7 @@ export function affinityFailureAnswer(kind: AffinityFailureKind, holder?: Bindin
       ok: false,
       error: {
         code: 'content-unavailable',
+        needsPageChoice: true,
         message: 'The controlled tab was closed. Call browser_navigate to open a page in a new tab, '
           + 'or browser_bind_interactive to let the user pick one of the pages still open.',
       },
@@ -101,6 +132,7 @@ export function affinityFailureAnswer(kind: AffinityFailureKind, holder?: Bindin
     ok: false,
     error: {
       code: 'no-active-tab',
+      needsPageChoice: true,
       message: 'No page is bound to this session yet, and the tab the user is looking at is the dsh UI itself, which is never handed to a session. '
         + 'Either call browser_navigate with the target URL (it opens a new tab and binds this session to it), '
         + 'or call browser_bind_interactive, which lists the open pages and asks the user which one to use.',

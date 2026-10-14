@@ -1,7 +1,7 @@
 {
   "name": "dsh-bridge-browser",
   "description": "Bridge plugin: token-authenticated WebSocket carrier for the browser extension plus the browser_* tools that drive the user's Chrome via that extension",
-  "version": "0.0.10",
+  "version": "0.0.15",
   "author": "Yuxiang Lin",
   "license": "MIT",
   "private": true,
@@ -31,6 +31,7 @@
     "lib/protocol.js",
     "lib/types/**/*.d.ts",
     "extension",
+    "assets",
     "cordis.patch.yml",
     "src"
   ],
@@ -51,9 +52,10 @@
   "scripts": {
     "test": "vitest run",
     "typecheck": "tsc -b --pretty false",
-    "build": "tsc -b --pretty false && tsdown && node scripts/copy-extension.mjs",
+    "build": "tsc -b --pretty false && tsdown && node scripts/copy-extension.mjs && node scripts/copy-skills.mjs",
     "copy-extension": "node scripts/copy-extension.mjs",
-    "prepack": "node scripts/copy-extension.mjs"
+    "copy-skills": "node scripts/copy-skills.mjs",
+    "prepack": "node scripts/copy-extension.mjs && node scripts/copy-skills.mjs"
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "4.0.4",
@@ -71,6 +73,7 @@
     "@deepseek-ai/dsh-session-persistence": "0.1.7-rc.1",
     "@deepseek-ai/dsh-session-projection": "0.1.7-rc.1",
     "@deepseek-ai/dsh-settings": "0.1.7-rc.1",
+    "@deepseek-ai/dsh-skill": "0.1.7-rc.1",
     "@deepseek-ai/dsh-system-prompt": "0.1.7-rc.1",
     "@deepseek-ai/dsh-tools": "0.1.7-rc.1",
     "@deepseek-ai/dsh-typert-protocol": "0.1.7-rc.1",

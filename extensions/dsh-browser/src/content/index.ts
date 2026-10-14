@@ -12,6 +12,7 @@
 import { DEFAULT_SNAPSHOT_MAX_CHARS } from 'dsh-bridge-browser/src/protocol.ts'
 import { runAction, ActionError } from './actions.ts'
 import { ElementIds } from './ids.ts'
+import { liveTabStateNote } from '../shared/tab-state.ts'
 import type { SnapshotBudget } from './snapshot.ts'
 
 /** Negotiated snapshot budgets, patched in from the background via message. */
@@ -59,7 +60,7 @@ function onMessage(message: unknown, _sender: chrome.runtime.MessageSender, send
     budget: actionBudget,
     includePageDelta: actionMsg.includePageDelta === true,
   }).then(
-    (result) => { sendResponse({ ok: true, result }) },
+    (result) => { sendResponse({ ok: true, result: withTabState(result) }) },
     (error: unknown) => {
       const code = error instanceof ActionError ? error.code : 'action-failed'
       const messageText = error instanceof Error ? error.message : String(error)
@@ -67,6 +68,17 @@ function onMessage(message: unknown, _sender: chrome.runtime.MessageSender, send
     },
   )
   return true // async response
+}
+
+/**
+ * Attach the tab's own state to a successful result when that state can explain a
+ * silent no-op. One place, so every content-script tool answers the same way: the
+ * caller otherwise has no way to tell "the page ignored this" from "the page is not
+ * being looked at" (see `shared/tab-state.ts`).
+ */
+function withTabState(result: NonNullable<ToolResult['result']>): NonNullable<ToolResult['result']> {
+  const note = liveTabStateNote()
+  return note === '' ? result : { ...result, text: `${result.text}\n\n${note}` }
 }
 
 // executeScript is used to recover tabs opened before extension install/reload.

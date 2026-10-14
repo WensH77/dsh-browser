@@ -2,9 +2,10 @@ import { createServer, type Server } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { afterEach, describe, expect, it } from 'vitest'
 import WebSocket from 'ws'
-import { BridgeServer, BridgeToolError, isLoopbackAddress, messageToText, payloadCode, payloadMessage } from '../src/server.ts'
+import { BridgeServer, BridgeToolError, isLoopbackAddress, messageToText, payloadCode, payloadMessage, payloadNeedsPageChoice } from '../src/server.ts'
 import type { BridgeFrame } from '../src/protocol.ts'
 import { BRIDGE_EXTENSION_IDS, BRIDGE_PROTO, BRIDGE_TOOLSET, EXTENSION_UNVERIFIED_CLOSE_CODE, HANDSHAKE_MISMATCH_CLOSE_CODE } from '../src/protocol.ts'
+import { UPDATE_RAW_BASE, currentInstallMode, currentPlatform, updateCommand } from '../src/update-source.ts'
 
 const TOKEN = 'deadbeefdeadbeefdeadbeefdeadbeef'
 
@@ -94,6 +95,18 @@ describe('BridgeServer', () => {
     expect(payloadMessage({ code: 'x', message: '' })).toBe('browser action failed')
     expect(payloadMessage({ code: 'x', message: 42 })).toBe('browser action failed')
     expect(payloadMessage('garbage')).toBe('browser action failed')
+  })
+
+  it('reads the page-choice flag, and only when the extension set it', () => {
+    // The flag sends the host into a bind, so anything but a literal true — an
+    // older build's silence, or a malformed frame — must read as "not a page
+    // problem" rather than as consent to bind.
+    expect(payloadNeedsPageChoice({ code: 'x', message: 'm', needsPageChoice: true })).toBe(true)
+    expect(payloadNeedsPageChoice({ code: 'x', message: 'm' })).toBe(false)
+    expect(payloadNeedsPageChoice({ code: 'x', message: 'm', needsPageChoice: 'true' })).toBe(false)
+    expect(payloadNeedsPageChoice({ code: 'x', message: 'm', needsPageChoice: 1 })).toBe(false)
+    expect(payloadNeedsPageChoice(null)).toBe(false)
+    expect(payloadNeedsPageChoice('garbage')).toBe(false)
   })
 
   it('authenticates a valid hello and acknowledges caps', async () => {
@@ -256,7 +269,7 @@ describe('BridgeServer', () => {
     expect(ws.readyState).toBe(WebSocket.CLOSED)
   })
 
-  it('refuses every RPC method except the two GDrive-internal ones', async () => {
+  it('refuses an RPC method the bridge does not service', async () => {
     const h = await startBridge()
     harnesses.push(h)
     const { ws, frames } = await connect(h.url)
@@ -267,6 +280,60 @@ describe('BridgeServer', () => {
     expect(frames.find((f) => f.t === 'rpc.result'))
       .toMatchObject({ t: 'rpc.result', id: 'rpc-1', ok: false, error: { code: 'method-not-allowed' } })
     ws.close()
+  })
+
+  it('records the UI language the extension reports over the rpc channel', async () => {
+    const h = await startBridge()
+    harnesses.push(h)
+    const { ws, frames } = await connect(h.url)
+    send(ws, { t: 'hello', token: TOKEN, caps: CAPS })
+    await waitFor(() => frames.some((f) => f.t === 'hello.ok'))
+    expect(h.bridge.clientUiLanguage()).toBeUndefined()
+
+    send(ws, { t: 'rpc', id: 'lang-1', method: 'bridge.uiLanguage', payload: { language: 'zh' } })
+    await waitFor(() => frames.some((f) => f.t === 'rpc.result'))
+
+    expect(frames.find((f) => f.t === 'rpc.result')).toMatchObject({ id: 'lang-1', ok: true, result: { language: 'zh' } })
+    // Cached: the prompts read it per ask, not per rpc round trip.
+    expect(h.bridge.clientUiLanguage()).toBe('zh')
+    ws.close()
+  })
+
+  it('refuses an unusable language and keeps the prompts in English', async () => {
+    const h = await startBridge()
+    harnesses.push(h)
+    const { ws, frames } = await connect(h.url)
+    send(ws, { t: 'hello', token: TOKEN, caps: CAPS })
+    await waitFor(() => frames.some((f) => f.t === 'hello.ok'))
+
+    // `auto` is the value this setting deliberately does not have; a build that
+    // sends it must not make the host render a language it has no copy for.
+    send(ws, { t: 'rpc', id: 'lang-2', method: 'bridge.uiLanguage', payload: { language: 'auto' } })
+    await waitFor(() => frames.some((f) => f.t === 'rpc.result' && f.id === 'lang-2'))
+
+    expect(frames.find((f) => f.t === 'rpc.result' && f.id === 'lang-2'))
+      .toMatchObject({ ok: false, error: { code: 'bad-request' } })
+    expect(h.bridge.clientUiLanguage()).toBeUndefined()
+    ws.close()
+  })
+
+  it('drops the reported language when the connection is replaced', async () => {
+    const h = await startBridge()
+    harnesses.push(h)
+    const first = await connect(h.url)
+    send(first.ws, { t: 'hello', token: TOKEN, caps: CAPS })
+    await waitFor(() => first.frames.some((f) => f.t === 'hello.ok'))
+    send(first.ws, { t: 'rpc', id: 'lang-3', method: 'bridge.uiLanguage', payload: { language: 'zh' } })
+    await waitFor(() => h.bridge.clientUiLanguage() === 'zh')
+
+    // A new socket starts from nothing: the language reports once per
+    // connection, so the next extension has to say its own.
+    const second = await connect(h.url)
+    send(second.ws, { t: 'hello', token: TOKEN, caps: CAPS })
+    await waitFor(() => second.frames.some((f) => f.t === 'hello.ok'))
+
+    expect(h.bridge.clientUiLanguage()).toBeUndefined()
+    second.ws.close()
   })
 
 
@@ -547,5 +614,62 @@ describe('BridgeServer', () => {
     await new Promise((resolve) => { setTimeout(resolve, 50) })
     expect(ws.readyState).toBe(WebSocket.OPEN)
     ws.close()
+  })
+
+  /**
+   * `bridge.updateCommand` answers the panel's Update button, which copies the
+   * answer to the user's clipboard. Two properties matter: the method is on the
+   * whitelist at all, and what comes back is the bare command line — the
+   * multi-line explanation `browser_update` hands the model must not ride along,
+   * and the command has to match the install it was asked about.
+   */
+  describe('bridge.updateCommand', () => {
+    async function askUpdateCommand(
+      overrides: Parameters<typeof startBridge>[0] = {},
+    ): Promise<{ answer: BridgeFrame | undefined, frames: BridgeFrame[], ws: WebSocket }> {
+      const h = await startBridge(overrides)
+      harnesses.push(h)
+      const { ws, frames } = await connect(h.url)
+      send(ws, { t: 'hello', token: TOKEN, caps: CAPS })
+      await waitFor(() => frames.some((f) => f.t === 'hello.ok'))
+      send(ws, { t: 'rpc', id: 'upd-1', method: 'bridge.updateCommand', payload: {} })
+      await waitFor(() => frames.some((f) => f.t === 'rpc.result' && f.id === 'upd-1'))
+      return { answer: frames.find((f) => f.t === 'rpc.result' && f.id === 'upd-1'), frames, ws }
+    }
+
+    it('accepts the method and answers a managed install with the one-line installer', async () => {
+      const { answer, ws } = await askUpdateCommand({ updateCommand: () => updateCommand('managed', 'posix') })
+      expect(answer).toEqual({ t: 'rpc.result', id: 'upd-1', ok: true, result: updateCommand('managed', 'posix') })
+      const command = (answer as { result: string }).result
+      expect(command).toBe(`curl -fsSL ${UPDATE_RAW_BASE}/scripts/install.sh | bash`)
+      // The clipboard gets a command, not a report about one.
+      expect(command).not.toContain('run this yourself')
+      expect(command).not.toContain('browser bridge update')
+      expect(command).not.toContain('\n')
+      ws.close()
+    })
+
+    it('answers with whatever the injected command builds (the test seam)', async () => {
+      const { answer, ws } = await askUpdateCommand({ updateCommand: () => updateCommand('checkout', 'posix') })
+      expect(answer).toEqual({ t: 'rpc.result', id: 'upd-1', ok: true, result: './scripts/install.sh' })
+      ws.close()
+    })
+
+    it('always answers the published installer, whatever this install is', async () => {
+      // The default path is what production runs. It hands back the `curl … | bash` line even
+      // on a checkout install — the user's ruling, so the button never depends on where the
+      // host happens to live. The cost is recorded in the function it calls: on a checkout that
+      // command installs the released tree, not the local one.
+      const { answer, frames, ws } = await askUpdateCommand()
+      const expected = updateCommand('managed', currentPlatform())
+      expect(answer).toEqual({ t: 'rpc.result', id: 'upd-1', ok: true, result: expected })
+      expect(String((answer as { result: string }).result)).toContain(`curl -fsSL ${UPDATE_RAW_BASE}/scripts/install.sh | bash`)
+      // A payload the method does not read changes nothing.
+      send(ws, { t: 'rpc', id: 'upd-2', method: 'bridge.updateCommand', payload: { install: 'checkout' } })
+      await waitFor(() => frames.some((f) => f.t === 'rpc.result' && f.id === 'upd-2'))
+      expect(frames.find((f) => f.t === 'rpc.result' && f.id === 'upd-2'))
+        .toEqual({ t: 'rpc.result', id: 'upd-2', ok: true, result: expected })
+      ws.close()
+    })
   })
 })

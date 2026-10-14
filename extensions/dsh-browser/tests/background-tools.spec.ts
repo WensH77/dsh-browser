@@ -312,6 +312,65 @@ describe('dispatchToolCall', () => {
     }, { documentId: 'document-33' })
   })
 
+  it('treats the pointer click as a click for deltas and navigation', async () => {
+    // The pointer tool was added after these lists and never wired into them: its
+    // results carried no page changes, and a click that navigated went unnoticed.
+    const call: ToolCall = { id: 'tool-delta-pointer', name: 'browser_click_pointer', args: { index: 3 } }
+    const budget = { maxItems: 10, maxChars: 1_000 }
+    const chromeMock = mockChrome({
+      tab: { id: 33, url: 'https://app.example/' },
+      respond: (message) => (message as { action?: string }).action === 'browser_snapshot'
+        ? { ok: true, result: { text: 'Initial page' } }
+        : {
+            ok: true,
+            result: {
+              text: 'Pressed [3].',
+              pageContent: 'Page change v2\nChanged main content:\nOrder complete',
+            },
+          },
+    })
+    await dispatchToolCall(CALL, 'auto', budget)
+    chromeMock.sendMessage.mockClear()
+
+    const answer = await dispatchToolCall(call, 'auto', budget, async () => 'approved')
+
+    expect(answer.ok).toBe(true)
+    const result = answer.result as { text: string }
+    expect(result.text).toContain('Continue from this state')
+    expect(result.text).toContain('Order complete')
+    expect(chromeMock.sendMessage).toHaveBeenCalledWith(33, {
+      type: 'DSH_ACTION',
+      action: 'browser_click_pointer',
+      args: { index: 3 },
+      budget,
+      includePageDelta: true,
+    }, { documentId: 'document-33' })
+  })
+
+  it('answers an expired approval prompt instead of renewing it', async () => {
+    // A second 60-second window runs past the caller's own budget (90s by default), so the
+    // model was cut off mid-wait and told only that something timed out: it could not tell a
+    // card nobody answered from a page that hung, and the first reading was the wrong one.
+    const call: ToolCall = { id: 'tool-expired', name: 'browser_click', args: { index: 3 } }
+    const budget = { maxItems: 10, maxChars: 1_000 }
+    mockChrome({
+      tab: { id: 33, url: 'https://app.example/' },
+      respond: () => ({ ok: true, result: { text: 'Clicked [3].' } }),
+    })
+    await dispatchToolCall(CALL, 'auto', budget)
+
+    const authorize = vi.fn(async () => 'renew' as const)
+    const answer = await dispatchToolCall(call, 'auto', budget, authorize)
+
+    expect(answer.ok).toBe(false)
+    const message = answer.error?.message ?? ''
+    expect(message).toContain('expired before it was answered')
+    expect(message).toContain('toolbar badge')
+    expect(message).toContain('go-ahead')
+    // One window only: the prompt is not raised a second time.
+    expect(authorize).toHaveBeenCalledTimes(1)
+  })
+
   it('does not extract or forward an action delta when reads require approval', async () => {
     const call: ToolCall = { id: 'tool-private-delta', name: 'browser_click', args: { index: 2 } }
     const chromeMock = mockChrome({
