@@ -57,7 +57,7 @@
 | F | `browser_get_text` 的 `maxChars` 实际硬顶 8000，schema 写 500–32000 | `content/actions.ts:665,704` vs `packages/.../tools.ts:1248` | 请求 20000 静默只回 8000 | 确定 |
 | G | `browser_wait` 的 `ms` 无上界，sleep 不响应取消 | `content/actions.ts:724-729`；宿主 schema 无边界 | 宿主 90s 结算并发 `tool.cancel`，内容脚本仍睡到 ms 结束 | 确定 |
 | H | attach 记账失败后既不 detach 也不清 hold | `debugger-session.ts:206-219` | Chrome 侧保持附着（调试横幅常驻），记账与实际不一致 | 较可能 |
-| I | `bridgeRpc` 断连不 reject，报 15s 假超时 | `index.ts:952-967`，断连路径 `:1311-1315` 不清 pending | 错误原因写成"超时"而非"桥断开" | 确定 |
+| I | `bridgeRpc` 断连不 reject，报 15s 假超时 | `index.ts:952-967`，断连路径 `:1311-1315` 不清 pending | 错误原因写成"超时"而非"桥接断开" | 确定 |
 
 ### 1.4 【低危】我自己发现的一处：不可信内容边界在函数契约上可被截断（生产路径不可达）
 
@@ -126,7 +126,7 @@
 
 - 证据：`packages/browser/bridge-browser/src/server.ts:263-279`：`loopbackNoToken = isLoopbackAddress(remote) && origin.startsWith('chrome-extension://')`——不校验具体扩展 ID，也不比对 token。`promote`（`:307-318`）会踢掉现有连接。
 - 攻击者：本机其它 Chrome 扩展（哪怕零权限）可凭自己的 `chrome-extension://<id>` origin 连上；本机任意进程可自行伪造该 HTTP 头。
-- 影响：接管唯一工具执行端 → 收到全部 `tool.call`（含模型要输入的文本、URL），可回任意 `tool.result`（宿主 `tools.ts:950-955` 直接透传，不经不可信内容边界，等于把伪造指令送进模型上下文），并把真扩展挤下线。与 `server.ts:1-11` 自述「桥自带 bearer token 鉴权」不一致：回环下鉴权约等于无。
+- 影响：接管唯一工具执行端 → 收到全部 `tool.call`（含模型要输入的文本、URL），可回任意 `tool.result`（宿主 `tools.ts:950-955` 直接透传，不经不可信内容边界，等于把伪造指令送进模型上下文），并把真扩展挤下线。与 `server.ts:1-11` 自述「桥接自带 bearer token 鉴权」不一致：回环下鉴权约等于无。
 - 置信度：确定（代码）；「其它扩展能发出该 origin」较可能。
 
 ### 2.5 【中危】

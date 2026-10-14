@@ -5,7 +5,7 @@
 
 ## 背景
 
-本仓库桥插件（`dsh-bridge-browser`）的依赖长期 pin 在 dsh `0.1.2-rc.1`
+本仓库桥接插件（`dsh-bridge-browser`）的依赖长期 pin 在 dsh `0.1.2-rc.1`
 （peerDeps / devDeps / 根 CLI 统一此线），而实际运行的 harness（本机 GUI 与
 `/opt/homebrew` 全局安装）已是 `0.1.5-alpha.1`。需要核实插件与当前 harness
 的兼容性，并决定依赖是否对齐。
@@ -42,7 +42,7 @@ tests/composition.spec.ts → '@deepseek-ai/dsh-session' does not provide an exp
 ```
 
 根因：仓库 `.npmrc` 设了 `auto-install-peers=false`，而 `dsh-agent-loop@0.1.5-alpha.1`
-等运行时 import 的 peer 包（`dsh-session-persistence` 等）未在桥插件 devDeps 显式声明，
+等运行时 import 的 peer 包（`dsh-session-persistence` 等）未在桥接插件 devDeps 显式声明，
 pnpm 复用了旧 lockfile 里的 `0.1.1-rc.1` 实例；该旧版从已升级的
 `dsh-session@0.1.5-alpha.1` 请求被移除的导出。
 
@@ -59,7 +59,7 @@ pnpm 复用了旧 lockfile 里的 `0.1.1-rc.1` 实例；该旧版从已升级的
 | 扩展 build（vite ×4） | ✅ |
 | 插件测试 | ✅ 63/63（7 files，含真实 Loader 组合 composition.spec） |
 | 扩展测试 | ✅ 116/116（20 files） |
-| 启动冒烟 | ✅ 隔离 `$DSH_HOME` + 全新 `web` profile（dsh-base / dsh-web-app / 桥插件），`/ext/bridge-config` 返回 `{"wsUrl":"ws://127.0.0.1:3180/ext/bridge"}` |
+| 启动冒烟 | ✅ 隔离 `$DSH_HOME` + 全新 `web` profile（dsh-base / dsh-web-app / 桥接插件），`/ext/bridge-config` 返回 `{"wsUrl":"ws://127.0.0.1:3180/ext/bridge"}` |
 
 ## 遗留与后续
 

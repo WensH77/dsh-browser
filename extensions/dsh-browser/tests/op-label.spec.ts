@@ -11,6 +11,9 @@ const copy: OpCopy = {
   opReload: 'Reload', opListTabs: 'List tabs', opBindTab: 'Bind tab', opEval: 'Run JS', opBlock: 'Block',
   opHeaders: 'Headers', opCapture: 'Capture', opConsole: 'Console', opNetwork: 'Network',
   opDialog: 'Answer dialog', opChars: ' chars', opElement: 'element',
+  opDomQuery: 'Query elements', opClickPointer: 'Press-sequence click', opImage: 'Read image',
+  opDebug: 'Debug page', opStatus: 'Check bridge status', opSetup: 'Prepare extension files',
+  opUpdate: 'Print update command', opBindInteractive: 'Choose a page to bind', opSlidesPage: 'Open slide',
 }
 
 const op = (patch: Partial<RecentOp> & Pick<RecentOp, 'name'>): RecentOp => ({
@@ -33,6 +36,19 @@ describe('opLabel', () => {
     expect(opLabel(op({ name: 'browser_click', args: { index: 12 }, label: 'Email Specialists' }), copy))
       .toBe('Click Email Specialists')
     expect(opLabel(op({ name: 'browser_click', args: { index: 12 } }), copy)).toBe('Click [12]')
+  })
+
+  it('names the page a bind landed on, not just the tab number', () => {
+    // The extension resolves the tab it bound and records `42 — https://…`. The id alone told
+    // a user nothing: "Bind tab 42" is the same row whichever page 42 happens to be, and the
+    // whole point of the row is to show which page the session now operates.
+    expect(opLabel(op({
+      name: 'browser_bind_tab',
+      args: { tabId: 42 },
+      label: 'https://app.example/orders',
+    }), copy)).toBe('Bind tab https://app.example/orders')
+    // A bind recorded before the extension resolved anything still shows what it has.
+    expect(opLabel(op({ name: 'browser_bind_tab', args: { tabId: 42 } }), copy)).toBe('Bind tab 42')
   })
 
   it('falls back to the selector when nothing was resolved', () => {
@@ -100,6 +116,19 @@ describe('panel layout contract', () => {
     expect(rule('.panel__body')).toContain('overflow: auto')
   })
 
+  it('carries the window height down the whole chain', async () => {
+    // `height: 100%` resolves against the parent, so every link has to carry it: html/body,
+    // then the React mount point, then `.panel`. `#root` was missing, so the panel collapsed
+    // to its content height: the footer sat directly under the feed and the rest of the window
+    // stayed empty below it. `.panel { height: 100% }` looked correct the whole time.
+    const raw = await readFile(resolve(import.meta.dirname, '../src/panel/styles.css'), 'utf8')
+    const css = raw.replace(/\/\*[\s\S]*?\*\//g, '')
+    expect(css).toContain('html, body { margin: 0; height: 100%; }')
+    const at = css.indexOf('#root {')
+    expect(at, '#root carries the height').toBeGreaterThanOrEqual(0)
+    expect(css.slice(at, css.indexOf('}', at))).toContain('height: 100%')
+  })
+
   it('keeps a pending approval on screen instead of letting the feed push it away', async () => {
     // The prompt is the one thing the user must act on, and the feed above it can
     // be arbitrarily long. As a flow element it scrolled away and the call then
@@ -124,22 +153,47 @@ describe('panel layout contract', () => {
     // It then rendered only the newest 15 (`slice(0, 15)`) while the store kept 30, so the
     // earliest operations were not merely below the fold — they were never in the DOM, and
     // no amount of scrolling could reach them. The whole feed is rendered now, and the list
-    // carries its own bounded, scrollable box (asserted in the next test) so a long feed
-    // cannot push the section that says what is being operated off the panel.
+    // takes the height that is left and scrolls inside it (asserted in the next test).
     const source = await readFile(resolve(import.meta.dirname, '../src/panel/App.tsx'), 'utf8')
     expect(source).toContain('{(ui?.recentOps ?? []).map(')
     expect(source).not.toContain('slice(0, 15)')
     expect(source).not.toContain('.reverse()')
   })
 
-  it('gives the operation feed its own scroll box', async () => {
+  it('gives the operation feed the height that is left, and scrolls inside it', async () => {
+    // A fixed `max-height: 42vh` left the bottom half of the panel empty whenever the feed was
+    // longer than the cap. The list fills what is left above the status strip instead, and
+    // scrolls inside that box; the strip and the footer do not move when it scrolls.
     const raw = await readFile(resolve(import.meta.dirname, '../src/panel/styles.css'), 'utf8')
     const css = raw.replace(/\/\*[\s\S]*?\*\//g, '')
-    const at = css.indexOf('.ops__list {')
-    expect(at, '.ops__list exists').toBeGreaterThanOrEqual(0)
-    const rule = css.slice(at, css.indexOf('}', at))
-    expect(rule).toContain('overflow-y: auto')
-    expect(rule).toContain('max-height')
+    const rule = (selector: string): string => {
+      const at = css.indexOf(`${selector} {`)
+      expect(at, `${selector} exists`).toBeGreaterThanOrEqual(0)
+      return css.slice(at, css.indexOf('}', at))
+    }
+
+    expect(rule('.ops')).toContain('flex: 1 1 auto')
+    expect(rule('.ops')).toContain('min-height: 0')
+    const list = rule('.ops__list')
+    expect(list).toContain('overflow-y: auto')
+    expect(list).toContain('min-height: 0')
+    expect(list).not.toContain('max-height')
+  })
+
+  it('keeps the operating status out of the scrolling body', async () => {
+    // It used to be the last item inside `.panel__body`: a long feed scrolled it out of view,
+    // and a short one left it floating under the list with empty space beneath. It is status,
+    // so it belongs between the body and the footer, where it always lands in the same place.
+    const source = await readFile(resolve(import.meta.dirname, '../src/panel/App.tsx'), 'utf8')
+    const bodyEnd = source.indexOf('</main>')
+    const status = source.indexOf('className="panel__status"')
+    const footer = source.indexOf('className="panel__footer"')
+    expect(bodyEnd, 'the body closes').toBeGreaterThanOrEqual(0)
+    expect(status, 'the status strip exists').toBeGreaterThan(bodyEnd)
+    expect(footer, 'the footer follows it').toBeGreaterThan(status)
+
+    const raw = await readFile(resolve(import.meta.dirname, '../src/panel/styles.css'), 'utf8')
+    expect(raw.replace(/\/\*[\s\S]*?\*\//g, '')).toContain('.panel__status {')
   })
 
   it('gives a ran expression its own wrapping line', async () => {
@@ -175,5 +229,24 @@ describe('operation labels are self-explanatory', () => {
     }
     expect(await label('opNetwork', 'zh')).toContain('网络请求')
     expect(await label('opNetwork', 'en')).toContain('network requests')
+  })
+})
+
+describe('every tool the bridge can run has a name of its own', () => {
+  it('never falls back to the raw tool name, in either language', async () => {
+    // The feed printed `browser_dom_query` and `browser_click_pointer` verbatim because the
+    // mapping had no case for them: nine of the twenty-seven tools had no name at all, and
+    // nothing failed when a tool was added without one. This is that failure, as a test.
+    const { en: enCopy, zh: zhCopy } = await import('../src/panel/App.tsx')
+    const { BROWSER_TOOL_NAMES, HOST_TOOL_NAMES } = await import('dsh-bridge-browser/src/tools.ts')
+    const tools: readonly string[] = [...BROWSER_TOOL_NAMES, ...HOST_TOOL_NAMES, 'browser_bind_interactive']
+
+    for (const name of tools) {
+      for (const [locale, localeCopy] of [['zh', zhCopy], ['en', enCopy]] as const) {
+        const label = opLabel(op({ name }), localeCopy as OpCopy)
+        expect(label, `${name} has a label in ${locale}`).not.toBe(name)
+        expect(label.trim(), `${name} label is not empty in ${locale}`).not.toBe('')
+      }
+    }
   })
 })

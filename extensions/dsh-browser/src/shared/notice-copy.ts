@@ -28,7 +28,7 @@ export function noticeText(notice: BridgeNotice, locale: UiLocale): string {
       case 'extension-stale':
         return `宿主没能确认本扩展的身份${detail}：这是扩展侧版本过旧（宿主已按固定 ID 校验，而旧构建不会上报自己的 ID）——在 chrome://extensions 重载本扩展即可，不需要重启 dsh。`
       case 'bridge-replaced':
-        return `另一个连接占用了唯一的桥槽位，本扩展已主动停连${detail}：在侧栏点「重连」即可抢回；心跳按设计不会自动争抢。`
+        return `另一个连接占用了唯一的桥接槽位，本扩展已主动停连${detail}：在侧栏点「重连」即可抢回；心跳按设计不会自动争抢。`
       case 'host-rejected':
         return `宿主拒绝了握手${detail}：按提示重启 dsh，然后重载本扩展。`
       case 'host-silent':

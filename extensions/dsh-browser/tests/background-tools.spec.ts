@@ -489,6 +489,32 @@ describe('dispatchToolCall', () => {
     expect(text.length).toBeLessThanOrEqual(1_000)
   })
 
+  it('leaves the read answers exactly as they were when the feed marks a miss', async () => {
+    // The panel's "no match" chip is derived in the background from the answer.
+    // The answer itself must stay what the model already receives: a flag
+    // smuggled into `result` would change the wire format for every client.
+    const miss = { ok: true, result: { text: 'No element matched selector: #nope' } }
+    mockChrome({ tab: { id: 26, url: 'https://app.example/' }, responses: [miss] })
+
+    const text = await dispatchToolCall({ id: 'shape-1', name: 'browser_get_text', args: { selector: '#nope' } }, 'auto', { maxItems: 10, maxChars: 1_000 })
+
+    expect(text.ok).toBe(true)
+    expect(Object.keys(text)).toEqual(['ok', 'result'])
+    expect(Object.keys(text.result as object)).toEqual(['text'])
+    expect((text.result as { text: string }).text).toContain('No element matched selector: #nope')
+    expect(JSON.stringify(text)).not.toContain('noMatch')
+
+    const domMiss = { ok: true, result: { text: 'dom query: 0 matches for "#nope" in this frame.' } }
+    mockChrome({ tab: { id: 27, url: 'https://app.example/' }, responses: [domMiss] })
+
+    const queried = await dispatchToolCall({ id: 'shape-2', name: 'browser_dom_query', args: { selector: '#nope' } }, 'auto', { maxItems: 10, maxChars: 500 })
+
+    expect(queried.ok).toBe(true)
+    expect(Object.keys(queried)).toEqual(['ok', 'result'])
+    expect(Object.keys(queried.result as object)).toEqual(['text'])
+    expect(JSON.stringify(queried)).not.toContain('noMatch')
+  })
+
   it('returns the explicit user denial before reading', async () => {
     const authorize = vi.fn(async () => 'denied' as const)
     const chromeMock = mockChrome({

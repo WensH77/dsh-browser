@@ -71,12 +71,13 @@ import { detachDevtoolsSession, isSessionAttached, primeSession } from './devtoo
 import { jsDebugTabIds } from './js-debug.ts'
 import { visionAvailable } from './capture.ts'
 import { debugToolRefusal } from './debug-policy.ts'
-import { affinityFailureAnswer, offeringPageChoice } from './affinity-copy.ts'
+import { affinityFailureAnswer } from './affinity-copy.ts'
 import { isExportableGdriveUrl, parseGdriveExportUrl } from './gdrive-url.ts'
 import { waitForTabCommit } from './tab-commit.ts'
 import { clearTabRules } from './net-rules.ts'
 import { readDebugEvents, recentDebugEventsText, recordDebugEvent, renderDebugEvents } from './debug-log.ts'
 import { isExtensionPageSender } from '../shared/message-sender.ts'
+import { isEmptyAnswer } from '../shared/empty-answer.ts'
 import { fetchUpdateCommand } from './update-command.ts'
 import {
   SETTINGS_DEFAULTS,
@@ -109,7 +110,7 @@ const LEGACY_LOCAL_URL = 'ws://127.0.0.1:3080'
 /** Lines the panel's Log button copies: enough for one failure, short enough to paste. */
 const PANEL_LOG_EVENTS = 30
 
-/** 探测本机 dsh 的桥地址：fetch /ext/bridge-config 直到成功。 */
+/** 探测本机 dsh 的桥接地址：fetch /ext/bridge-config 直到成功。 */
 async function discoverBridge(shouldContinue: () => boolean = () => true): Promise<string | undefined> {
   for (const port of DISCOVERY_PORTS) {
     if (!shouldContinue()) return undefined
@@ -122,7 +123,7 @@ async function discoverBridge(shouldContinue: () => boolean = () => true): Promi
       const body = await response.json() as { wsUrl?: unknown }
       if (typeof body.wsUrl === 'string' && body.wsUrl.startsWith('ws://')) return body.wsUrl
     } catch {
-      // 该端口没有 dsh 或未挂桥：试下一个。
+      // 该端口没有 dsh 或未挂桥接：试下一个。
     }
   }
   return undefined
@@ -671,52 +672,61 @@ async function restoreTabAffinity(): Promise<void> {
 const affinityReady = restoreTabAffinity()
 
 /**
- * Bind a session's controlled tab on its first browser call. The chat panel
- * used to bind at prompt submission; with the pure-tool bridge the first
- * `tool.call` for an unbound session takes the page the user is currently
- * viewing (bindInitial semantics), so a chat-less agent can still operate a
- * real tab.
+ * Release a binding a session-scoped call can no longer use.
  *
- * @returns undefined once the session owns a tab, else the answer that settles
- * the call — "another session holds the browser" when that is why.
+ * The panel's Unbind takes these four steps (`session.unbind`); this is the same
+ * release, driven by the call that finds the session has no page rather than by
+ * the button. The tab-close handler has usually pruned the entry already, so
+ * `unbindSession` most often has nothing left to delete — but it still clears
+ * the panel's focused session when that is this one, and the push is what shows
+ * the panel that this session is unbound, so the sequence runs either way
+ * instead of being skipped because it had nothing to remove.
+ *
+ * The reason is `closed`, not `unbound`: what ended this binding is the tab
+ * going away, and `unbound` is the panel's own word for the user pressing
+ * Unbind. The panel reads the reason to explain why the next call asks again.
+ *
+ * @param sessionId - the session whose page is gone; a call with no session
+ * leaves nothing to release.
  */
-async function ensureInitialTabBinding(sessionId?: string): Promise<ToolAnswer | undefined> {
-  await affinityReady
-  const alreadyBound = sessionId === undefined
-    ? tabAffinity.resolveTarget().kind !== 'initial'
-    : tabAffinity.hasBinding(sessionId)
-  if (alreadyBound) return undefined
-  // One controlled tab, one session: a second session cannot take the page by
-  // calling a tool. Nothing is bound and nothing runs until the user frees it.
-  const holder = sessionId === undefined ? undefined : tabAffinity.competingBinding(sessionId)
-  if (holder !== undefined) return takenBindingAnswer(holder)
-  try {
-    const tab = await syncActiveTab()
-    const summary = tab === undefined ? null : summarizeTab(tab)
-    if (summary === null) return affinityFailureAnswer('missing')
-    // Never hand the dsh web page itself to a session: the user chats there.
-    // For a URL-less first call the user should switch to the target page (or
-    // let browser_navigate open a fresh, separately approved tab).
-    if (isDshPageUrl(summary.url)) return affinityFailureAnswer('missing')
-    // A page Chrome keeps to its own extension — another extension's page, a
-    // chrome:// page, a file:// URL — accepts neither content scripts nor
-    // chrome.debugger, so auto-binding it hands the session a page where every
-    // tool fails. Measured: a bound chrome-extension:// page produced nothing
-    // but "Cannot access a chrome-extension:// URL of different extension"
-    // attach refusals, over and over. This session has no page at all, so the
-    // host may resolve the refusal by letting the user pick one; the same
-    // answer from `resolveToolTab` (a bound tab that navigated here) does not
-    // carry that mark, because moving a bound session is the user's decision.
-    if (!isBindableTabUrl(summary.url)) return offeringPageChoice(affinityFailureAnswer('unsupported', undefined, summary.url))
-    if (tabAffinity.bindInitial(summary, sessionId)) {
-      keepTabAlive(summary.tabId)
-      persistTabAffinity()
-      broadcastTabAffinity()
-    }
-    return undefined
-  } catch {
-    return affinityFailureAnswer('missing')
+function releaseLostBinding(sessionId?: string): void {
+  const sid = sessionId?.trim()
+  if (sid === undefined || sid === '') return
+  tabAffinity.unbindSession(sid)
+  forgetSession(sid, 'closed')
+  persistTabAffinity()
+  broadcastTabAffinity()
+}
+
+/**
+ * The answer for a call this session cannot run for want of a page.
+ *
+ * Getting a page is the user's decision: this session's tab is gone (or it
+ * never bound one), and binding whichever tab the user happens to be looking at
+ * is how a session started driving a page nobody approved — the assistant's tab
+ * was closed, the user had moved on, and the next call took that page. Both
+ * answers carry `needsPageChoice`, so the host asks the user which page to use;
+ * the refusal, not an implicit bind, is the way out.
+ *
+ * The competing check stays here on purpose. One session owns the browser at a
+ * time (`competingBinding`), and with `ensureInitialTabBinding` gone this is the
+ * only place a session-scoped call with no page learns about the holder: without
+ * it the session would be told "no page" and would ask the user to pick a page
+ * that another session is already driving.
+ *
+ * @param kind - `lost` when this session's page was closed, `missing` when the
+ * call carries no session and nothing is bound at all.
+ * @param sessionId - the calling session; absent for a call that binds nothing.
+ * @returns the refusal to settle the call with.
+ */
+function noPageRefusal(kind: 'lost' | 'missing', sessionId?: string): ToolAnswer {
+  const sid = sessionId?.trim()
+  if (sid !== undefined && sid !== '') {
+    const holder = tabAffinity.competingBinding(sid)
+    if (holder !== undefined) return takenBindingAnswer(holder)
+    releaseLostBinding(sid)
   }
+  return affinityFailureAnswer(kind)
 }
 
 /** The answer for a call that wants a browser another session already owns. */
@@ -732,21 +742,24 @@ async function resolveToolTab(sessionId?: string): Promise<Pick<chrome.tabs.Tab,
     const resolution = tabAffinity.resolveTarget(sessionId)
     if (resolution.kind === 'handoff') return affinityFailureAnswer('handoff')
     if (resolution.kind === 'lost') {
-      // A session-scoped call with no binding yet auto-binds the page the
-      // user is currently viewing (pure-tool bridge has no chat prompt to
-      // bind on). A previously bound tab that was closed re-binds on the
-      // next call; failing that, report the tab as unavailable.
-      if (sessionId !== undefined && sessionId.trim() !== '') {
-        const bindingFailure = await ensureInitialTabBinding(sessionId)
-        if (bindingFailure !== undefined) return bindingFailure
-        continue
-      }
-      return affinityFailureAnswer('lost')
+      // A session-scoped call with no page: its tab was closed (the entry is
+      // pruned with the tab) or it never bound one. It used to bind whichever
+      // tab the user was looking at, which meant the assistant's tab was closed,
+      // the user had moved on to another page, and the next call quietly began
+      // operating that page. Now the binding is released and the call refused;
+      // `lost` carries `needsPageChoice`, so the host asks the user which page to
+      // use, and browser_navigate / browser_bind_interactive stay the explicit
+      // ways to get one.
+      return noPageRefusal('lost', sessionId)
     }
     if (resolution.kind === 'initial') {
-      const bindingFailure = await ensureInitialTabBinding(sessionId)
-      if (bindingFailure !== undefined) return bindingFailure
-      continue
+      // Nothing is bound and this call names no session (`resolveTarget` answers
+      // `initial` only when it is asked without one), so there is no binding to
+      // release and no competitor to name — the holder check lives in the `lost`
+      // branch above, which is where every session-scoped call with no page
+      // lands. Binding the page the user is looking at is the same takeover one
+      // step removed; `missing` carries `needsPageChoice`, so the host asks.
+      return noPageRefusal('missing', sessionId)
     }
     try {
       const tab = await chrome.tabs.get(resolution.tab.tabId)
@@ -1041,10 +1054,19 @@ function labelOp(id: string, label: string): void {
   if (opVisible(op)) sendUiPush({ type: 'push.op', op })
 }
 
-function settleOp(id: string, state: RecentOp['state']): void {
+/**
+ * Settle one operation, optionally recording that its answer held no content.
+ *
+ * `noMatch` is only ever consulted for the successful path (see
+ * `isEmptyAnswer`), and a settle that does not carry it clears any earlier
+ * value, so a state change can never leave a stale mark behind.
+ */
+function settleOp(id: string, state: RecentOp['state'], noMatch: boolean = false): void {
   const index = recentOps.findIndex((op) => op.id === id)
   if (index === -1) return
-  const op = { ...recentOps[index]!, state, ...(state === 'running' || state === 'waiting' ? {} : { endedAt: Date.now() }) }
+  const op: RecentOp = { ...recentOps[index]!, state, ...(state === 'running' || state === 'waiting' ? {} : { endedAt: Date.now() }) }
+  if (noMatch) op.noMatch = true
+  else delete op.noMatch
   recentOps = [op, ...recentOps.filter((o) => o.id !== id)].slice(0, RECENT_OPS_MAX)
   refreshBadge()
   if (opVisible(op)) sendUiPush({ type: 'push.op', op })
@@ -1459,6 +1481,11 @@ async function handleVirtualTool(call: ToolCall, signal: AbortSignal): Promise<T
     keepTabAlive(summary.tabId)
     persistTabAffinity()
     broadcastTabAffinity()
+    // The feed names the page, not just the number: "bound tab 42" tells a user nothing about
+    // which page the session now operates, and the URL is what makes a wrong pick obvious.
+    // The URL alone, not `42 — <url>`: the row truncates at 48 characters, and the id spent
+    // twelve of them on a number the user never asked about. Hovering the row shows it all.
+    labelOp(call.id, summary.url)
     return { ok: true, result: { text: `Bound session to tab ${summary.tabId}: ${summary.title}` } }
   }
   return { ok: false, error: { code: 'action-failed', message: `Unknown virtual tool ${call.name}` } }
@@ -1529,7 +1556,7 @@ function routeToolCall(call: ToolCall): void {
       if (socket === null) return
       recordToolFailure(call, answer)
       if (answer.ok) {
-        settleOp(call.id, 'done')
+        settleOp(call.id, 'done', isEmptyAnswer(call.name, answer.result, call.args))
         socket.send({ t: 'tool.result', id: call.id, ok: true, result: answer.result })
       } else {
         settleOp(call.id, 'error')
@@ -1587,7 +1614,7 @@ function routeToolCall(call: ToolCall): void {
           const label = (answer.result as { label?: unknown }).label
           if (typeof label === 'string' && label.trim() !== '') labelOp(call.id, label)
         }
-        settleOp(call.id, 'done')
+        settleOp(call.id, 'done', isEmptyAnswer(call.name, answer.result, call.args))
         socket.send({ t: 'tool.result', id: call.id, ok: true, result: answer.result })
       } else if (answer.error?.needsPageChoice === true) {
         // The host resolves this one itself — it lists the open pages, binds
@@ -1646,7 +1673,7 @@ async function startBridge(): Promise<void> {
     if (discovered === undefined) return
     url = discovered
   }
-  // 手动填的地址常只有主机部分（如 ws://127.0.0.1:3080）；桥路径是协议
+  // 手动填的地址常只有主机部分（如 ws://127.0.0.1:3080）；桥接路径是协议
   // 常量，缺省时自动补全，避免连到根路径失败。
   try {
     const parsed = new URL(url)

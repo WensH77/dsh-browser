@@ -2,7 +2,7 @@
 
 [English](README.md) | 中文
 
-dsh 的**纯浏览器操作端**：让模型直接读取并操作你在浏览器里打开的页面——抓取内容、点击元素、填写表单、滚动与导航，全部在真实页面执行、登录态保留。这是**纯工具扩展**：面板里没有聊天。对话与会话请用官方 dsh 界面；扩展启动即连 dsh 桥（自动探测），会话第一次浏览器调用时把当前标签页交给 Agent，并提供最小状态视图（正在操作哪个页面）、options 页（连接/共享/信任源/通知）与 action popup（待审批操作）。
+dsh 的**纯浏览器操作端**：让模型直接读取并操作你在浏览器里打开的页面——抓取内容、点击元素、填写表单、滚动与导航，全部在真实页面执行、登录态保留。这是**纯工具扩展**：面板里没有聊天。对话与会话请用官方 dsh 界面；扩展启动即连 dsh 桥接（自动探测），会话第一次浏览器调用时把当前标签页交给 Agent，并提供最小状态视图（正在操作哪个页面）、options 页（连接/共享/信任源/通知）与 action popup（待审批操作）。
 
 ## 模型能做什么
 
@@ -27,10 +27,10 @@ dsh 的**纯浏览器操作端**：让模型直接读取并操作你在浏览器
                         content script (snapshot/actions/privacy)
 ```
 
-- **background**（`src/background/`）：桥连接（token 认证 + 指数退避重连 + 保活）、三个桥内部 RPC 调用，以及**失败关闭地分发工具到用户受控标签页**。
+- **background**（`src/background/`）：桥接连接（token 认证 + 指数退避重连 + 保活）、三个桥接内部 RPC 调用，以及**失败关闭地分发工具到用户受控标签页**。
 - **content script**（`src/content/`）：文本快照（可读性主文 + 编号交互清单 + 表单字段）、**稳定编号**（`data-dsh-el`）、delta 变化、点击/输入/按键/滚动/导航动作与敏感字段掩码。
-- **截图**（`src/background/capture.ts`）：仅 Chrome，走 `chrome.debugger`（`Page.captureScreenshot`）。每次截取临时 attach、按宿主图片上限缩放重编码、`finally` 里 detach；字节只在内存中，以 base64 过桥。
-- **panel / options**（`src/panel/`、`src/options/`）：两个精简 React 页面——状态面板（依 `statusMode` 设置，也会以浮窗 popup 打开同一页面）展示连接状态、受控标签页、最近操作与待审批项；options 页管理桥 URL/token、界面语言（默认英文）、页面共享、信任源与审批通知。
+- **截图**（`src/background/capture.ts`）：仅 Chrome，走 `chrome.debugger`（`Page.captureScreenshot`）。每次截取临时 attach、按宿主图片上限缩放重编码、`finally` 里 detach；字节只在内存中，以 base64 经桥接。
+- **panel / options**（`src/panel/`、`src/options/`）：两个精简 React 页面——状态面板（依 `statusMode` 设置，也会以浮窗 popup 打开同一页面）展示连接状态、受控标签页、最近操作与待审批项；options 页管理桥接 URL/token、界面语言（默认英文）、页面共享、信任源与审批通知。
 - **协议**：`dsh-bridge-browser` workspace 包中的 `protocol.ts` 是两端共享的真源，具体通过该包的源码 export 共享。
 
 ## 构建
@@ -59,7 +59,7 @@ pnpm --filter dsh-browser-extension run test
    $s="$env:TEMP\dsh-install.ps1"; irm https://raw.githubusercontent.com/WensH77/dsh-browser/refs/heads/main/scripts/install.ps1 -OutFile $s; powershell -NoProfile -ExecutionPolicy Bypass -File $s
    ```
 
-   脚本会把托管 workspace 下载到 `~/.dsh/dsh-browser`，构建桥插件，把它的官方 bundle 注册到本机 dsh 的 `web` profile，再构建扩展并把产物复制到稳定目录 `~/.dsh/browser-extension`，然后打开 `chrome://extensions`。开启开发者模式，选择「加载已解压的扩展程序」，加载扩展目录。再次运行该命令会更新托管安装。
+   脚本会把托管 workspace 下载到 `~/.dsh/dsh-browser`，构建桥接插件，把它的官方 bundle 注册到本机 dsh 的 `web` profile，再构建扩展并把产物复制到稳定目录 `~/.dsh/browser-extension`，然后打开 `chrome://extensions`。开启开发者模式，选择「加载已解压的扩展程序」，加载扩展目录。再次运行该命令会更新托管安装。
 
    clone 得到的 checkout 也使用同一个安装器，而且不会下载或覆盖源码：
 
@@ -71,7 +71,7 @@ pnpm --filter dsh-browser-extension run test
 
    Windows checkout 请运行 `.\scripts\install.ps1`。
 
-2. **启动 dsh 并挂载桥插件**。可以使用 workspace 固定的运行时：
+2. **启动 dsh 并挂载桥接插件**。可以使用 workspace 固定的运行时：
 
    ```sh
    cd ~/.dsh/dsh-browser && pnpm start
@@ -89,7 +89,7 @@ pnpm --filter dsh-browser-extension run test
 
    **DSH Desktop 用户**：桌面版默认让系统随机分配本地 Web 端口（`dsh-desktop.port: 0`），自动探测无法预知随机端口。请在桌面版设置中把端口固定为 `43189`（见 [deepseek-harness-desktop 用户指南](https://github.com/anywhere-labs/deepseek-harness-desktop/blob/master/docs/user-guide.md)），扩展的自动探测会覆盖该端口；或直接在扩展 options 中手动填写 `http://127.0.0.1:<端口>`。
 
-   扩展加载后即连接自动探测到的桥，并带退避持续重连；即使你在其它标签页工作，审批也能在状态窗中弹出。连接掉线或被另一浏览器 Profile 顶替时，扩展会自动重连。
+   扩展加载后即连接自动探测到的桥接，并带退避持续重连；即使你在其它标签页工作，审批也能在状态窗中弹出。连接掉线或被另一浏览器 Profile 顶替时，扩展会自动重连。
 
 3. **开始使用**：打开普通的 `http://` 或 `https://` 页面，点击 DeepSeek 鲸鱼图标。扩展会自动探测本机 dsh，回环连接无需地址或 Token。
 
@@ -116,7 +116,7 @@ pnpm --filter dsh-browser-extension run test
 - **标签页绑定**：首次浏览器工具调用时会把当时的活动标签页绑定给该会话。手动切换标签页或窗口后，后续工具会暂停，并通过状态窗中的审批询问助手继续原页面还是跟随当前页。选择原页面后允许后台操作，但不会改变用户正在看的页面；选择跟随后会重置页面引用状态。受控页关闭后失败关闭，直到下一次调用显式选择页面；切页还会撤销尚未完成的操作审批。
 - **只绑定普通网页**：Chrome 只允许扩展操作它自己的页面，所以另一个扩展的页面（`chrome-extension://…`）、浏览器内部页（`chrome://…`）与 `file://` 既不能注入内容脚本，也不能附加 `chrome.debugger`；自动绑定会拒绝这类顶层页面并说明原因，已经绑上的在面板按 Unbind 换成普通 `http(s)` 页面即可。**但还有第二种情形**：顶层是普通 `http(s)` 页面、而页面内部嵌了另一个扩展的 frame（密码管理器/阅读器的注入 UI、PDF 查看器，或扩展先建 `about:blank` 再填自己文档的 iframe）——Chrome 附加前会遍历整棵 frame 树，于是一个这样的子 frame 就让**整个标签页**不可调试，而错误只说 `Cannot access a chrome-extension:// URL of different extension`。这种情况下日志里会多一条 `foreign-frames tab <id>: chrome-extension://…`，直接点名是哪个扩展（只记 `scheme//host`，不记页面 URL）。
 - **外来 frame 摘掉、重试、立刻放回**：Chrome 只在 attach 那一刻检查 frame 树，所以上一条那个限制是可以绕开的，而且 frame 只需要**缺席那一瞬**——遇到这条拒绝时，扩展**逐个 frame 定向询问并汇总**（实测：子 frame 里的扩展 frame 同样会让整个标签页不可调试，所以不能只看主 frame；而一次广播只带回第一个 frame 的回答，主 frame 的"我这儿没有"会掩盖子 frame 已经摘掉的事实），各 frame 执行 `browser_remove_foreign_frames`，把 `chrome-extension://`/`chrome://`/`file://` 的 iframe、"`about:blank` 却被换成了别人文档"的 iframe，以及 PDF 渲染（`type="application/pdf"` 或 src 以 `.pdf` 结尾的 `<embed>`/`<object>`——那由 Chrome 自己的查看器扩展渲染）从 DOM 上**取下来**，重新 attach 一次，然后立刻用一个 `browser_restore_foreign_frames` 把取下的元素**按原位置插回去**（若那个扩展已经自己重建了等价 frame，就不重复插）。所以那个扩展的 UI 只消失**几毫秒**，不是"消失到刷新为止"；日志记 `foreign-frames-removed tab <id>: …`，之后截图/console/网络/求值都正常，文本快照等不需要调试器的工具从头就不受影响。这是扩展**唯一**为自己而非为模型执行的动作，只在这条拒绝之后触发，也不作为工具暴露给模型。要亲手复现这个场景，见 [`test-extensions/culprit-frame/`](test-extensions/culprit-frame/README.md)（手动加载的测试扩展，dsh 自己从不加载它）。
-- **调试能力默认关闭**：截图、控制台、网络、响应替换与页面内执行 JS 都走 `chrome.debugger`，只有扩展设置里开着「允许 dsh 使用浏览器调试能力」时才注册（首次安装为关）。关闭时宿主根本不注册这些工具，模型看不到也调不到；切换该开关会重连桥，让能力随握手同步过去。
+- **调试能力默认关闭**：截图、控制台、网络、响应替换与页面内执行 JS 都走 `chrome.debugger`，只有扩展设置里开着「允许 dsh 使用浏览器调试能力」时才注册（首次安装为关）。关闭时宿主根本不注册这些工具，模型看不到也调不到；切换该开关会重连桥接，让能力随握手同步过去。
 - **构建错配会明说，不靠猜**：`hello`/`hello.ok` 带 `proto`（握手版本）与 `toolset`（扩展能力级别）。宿主若服务不了本构建，会用可读原因拒绝握手，扩展把该原因原样显示在选项页与侧栏，并给出下一步（重启 dsh，或重载扩展）；宿主若从不回应，也会给出对应提示，而不是一个没有解释的「连接中…」。反方向同理：宿主会按本扩展声明的能力级别收窄模型可见的工具面，旧构建不会拿到它无法解析的 `selector`。
 - **缓冲区随绑定开启**：开着调试能力时，绑定页面就 attach 调试器并打开控制台/网络缓冲，页面自己加载期的请求与早期报错会被记下来，而不是从模型第一次读取才开始。关掉调试、解绑或关闭标签页都会释放会话；用户点掉调试提示条也会被识别，下次 affinity 变化时重新预热。
 - **调试现场留痕**：`src/background/debug-log.ts` 维护一圈最近 60 条调试事件——service worker 的启动、每次 attach 及其失败原因、每次 detach（含 Chrome 自己给出的原因：`canceled_by_user`、`target_closed`、`replaced_with_devtools` 等）、以及失败的工具调用。它存在 `chrome.storage.session`，所以 worker 被重启也不会把证据一起抹掉（worker 重启本身会留下一条启动记录，这正是"调试横幅出现几秒后自己消失"的头号嫌疑）。宿主 `browser_status` 会把这段日志附在自检输出后面，因此别人机器上的失败不需要日志收集工具也能读回来。只有固定的事件种类、Chrome 的错误文本与工具名进这圈缓冲，没有页面内容。
@@ -133,7 +133,7 @@ pnpm --filter dsh-browser-extension run test
 
 ## 已知限制
 
-- 同时只有一个扩展连接桥。未打开侧栏的浏览器 Profile 不会抢占连接；另一个浏览器 Profile 顶替连接后，被替换的一端会主动让权，不再反复重连互踢。
+- 同时只有一个扩展连接桥接。未打开侧栏的浏览器 Profile 不会抢占连接；另一个浏览器 Profile 顶替连接后，被替换的一端会主动让权，不再反复重连互踢。
 - 标签页绑定属于整个扩展连接，而不是单个对话会话。
 - 可访问的跨源 iframe 会进入快照，并通过稳定的 `(frame, index)` 地址执行操作；受保护或已销毁的 frame 会标记为不可访问，不影响整页快照。
 - 验证码/纯图片按钮无法处理——工具结果会标注"存在无文本可访问名的元素"，提示用户手动完成该步。

@@ -450,12 +450,29 @@ export function clampWaitMs(value: unknown): number {
   return Math.min(Math.floor(value), MAX_WAIT_MS)
 }
 
+/** The page a page choice bound this session to. */
+interface PickedPage {
+  /** Chrome tab id, from the `browser_list_tabs` entry the user chose. */
+  id: number
+  /** That entry's URL. */
+  url: string
+}
+
 /** What one page choice did, and what to tell the model about it. */
 interface PageChoice {
   /** Whether the session now owns a page. False leaves it exactly as it was. */
   bound: boolean
   /** Model-facing text: the bind result, or why nothing was bound. */
   text: string
+  /**
+   * The page the user picked, present only once the bind succeeded.
+   *
+   * A caller that retries its own call needs this. The retried text is the
+   * page's own, and a page that answers with nothing (or with an unremarkable
+   * snapshot) does not say which page answered — so without this, a user who
+   * picked a different page than the model assumed is invisible to it.
+   */
+  picked?: PickedPage
 }
 
 /** How one page choice is asked and how long each of its steps may take. */
@@ -513,7 +530,9 @@ function choiceWindow(upstream: AbortSignal, timeoutMs?: number): { signal: Abor
  * @param bridge - the authenticated bridge server.
  * @param exec - the running call, for its session and its cancellation.
  * @param options - whether a single page needs asking, and the two windows.
- * @returns whether a page was bound, with the text describing it.
+ * @returns whether a page was bound, the text describing it, and — when one
+ * was bound — the page the user picked, for a caller that has to name it after
+ * a call that already ran.
  * @throws when the listing or the bind fails at the transport — that is the
  * bridge or the extension talking, not a page the user could choose.
  */
@@ -570,16 +589,58 @@ async function choosePage(
       wait.dispose()
     }
   }
-  if (pickedId === undefined || !entries.some((entry) => entry.id === pickedId)) {
+  // Resolve the answer back to the entry it named, so the binding names the
+  // page the question was about. An answer this list does not contain binds
+  // nothing, exactly as no answer does.
+  const picked = pickedId === undefined ? undefined : entries.find((entry) => entry.id === pickedId)
+  if (picked === undefined) {
     return { bound: false, text: 'No page was chosen, so nothing was bound.' }
   }
   // 3) Bind the session to the chosen tab (extension virtual action). A refusal
   // here is reported as-is: the extension's own reason (another session holds
   // the browser, the tab is gone) is more use than anything this layer could
   // add, and swallowing it into text would hide that it failed.
-  const bound = await bridge.requestTool('browser_bind_tab', { tabId: pickedId }, exec.signal, options.waitMs, sessionId)
+  const bound = await bridge.requestTool('browser_bind_tab', { tabId: picked.id }, exec.signal, options.waitMs, sessionId)
   const boundText = (bound as { text?: unknown }).text
-  return { bound: true, text: typeof boundText === 'string' ? boundText : `Bound session to tab ${pickedId}.` }
+  return {
+    bound: true,
+    text: typeof boundText === 'string' ? boundText : `Bound session to tab ${picked.id}.`,
+    picked: { id: picked.id, url: picked.url },
+  }
+}
+
+/**
+ * The one line that tells the model which page it is now on.
+ *
+ * One line, because it rides on every call the user answered with a page
+ * choice and the tool's own text follows it. It names the tab and the URL the
+ * user picked: without the URL the model cannot tell that the page it is
+ * reading is not the one it meant to work on.
+ *
+ * @param picked - the tab the user chose, once the bind succeeded.
+ * @returns the model-facing line, without its trailing newline.
+ */
+function boundPageLine(picked: PickedPage): string {
+  return `Bound this session to tab ${picked.id} — ${picked.url} (chosen by the user, not by the bridge).`
+}
+
+/**
+ * Put the binding line in front of a result without changing the result's shape.
+ *
+ * The retried call keeps whatever payload the extension sent: the visual tools
+ * read the image off the same object, so only `text` is rewritten. A payload
+ * with no text has nothing to precede and is returned untouched.
+ *
+ * @param result - the raw dispatch result.
+ * @param line - the line to put first.
+ * @returns the same result shape, with the line opening its text.
+ */
+function withBoundPageLine(result: unknown, line: string): unknown {
+  if (typeof result === 'string') return `${line}\n${result}`
+  if (typeof result === 'object' && result !== null && typeof (result as { text?: unknown }).text === 'string') {
+    return { ...result, text: `${line}\n${(result as { text: string }).text}` }
+  }
+  return result
 }
 
 /** Run the interactive binding flow inside one tool call. */
@@ -595,7 +656,10 @@ async function bindInteractiveRun(
     silentWhenSingle: false,
     waitMs: BIND_INTERACTIVE_TIMEOUT_MS,
   })
-  return { text: choice.text }
+  // The bind answer names the tab but not its URL, so the line goes in front of
+  // it; an answer that already carries the URL is left alone.
+  if (choice.picked === undefined || choice.text.includes(choice.picked.url)) return { text: choice.text }
+  return { text: `${boundPageLine(choice.picked)}\n${choice.text}` }
 }
 
 /** Per-CSV preview length and max number of previewed sheets in one reply. */
@@ -1446,7 +1510,12 @@ export function registerBrowserTools(
       // out): the failure the extension gave is still the best answer, and its
       // text already names the two ways out.
       if (!choice.bound || exec.signal.aborted) throw error
-      return await dispatch(exec, name, args, sessionId)
+      const result = await dispatch(exec, name, args, sessionId)
+      // The retried text belongs to the page, which may answer with nothing or
+      // with a snapshot of a page the model never asked for. Name the page the
+      // user picked in front of it, or binding to the wrong page looks exactly
+      // like the call the model meant to make.
+      return choice.picked === undefined ? result : withBoundPageLine(result, boundPageLine(choice.picked))
     }
   }
   const call = async (exec: Pick<ToolRunContext, 'agent' | 'signal'>, name: string, args: Record<string, unknown>): Promise<TextResult> => {

@@ -115,8 +115,16 @@ interface Harness {
   answer: (id: string, decision: string) => void
   /** Client frames the extension sent to the bridge, in order. */
   sentFrames: () => Frame[]
+  /** UI pushes the worker broadcast to the panel, in order. */
+  uiPushes: () => Frame[]
   /** What the worker wrote to `chrome.storage.local` under the settings key. */
   storedSettings: () => Frame | undefined
+  /** The affinity record the worker last wrote to `chrome.storage.session`. */
+  storedAffinity: () => Frame | undefined
+  /** Bind one session the way the host's page choice does, and wait for it. */
+  bind: (tabId: number, sessionId: string) => Promise<void>
+  /** Close a tab: the real `chrome.tabs.onRemoved` handler runs, as in Chrome. */
+  closeTab: (tabId: number) => void
 }
 
 /**
@@ -129,12 +137,21 @@ interface Harness {
 async function boot(
   activeTab: typeof APP_TAB = APP_TAB,
   stored: Frame = { bridgeUrl: BRIDGE_URL },
+  /**
+   * Stand in for a content script, whose answer is what the page "did". Omitted
+   * by default, so an action still fails at its dispatch step exactly as it did
+   * before this parameter existed.
+   */
+  contentScript?: (message: Frame) => unknown,
 ): Promise<Harness> {
   FakeSocket.reset()
   const messageListeners: Listener[] = []
   const notifications = vi.fn(async (_id: string, _options?: unknown) => 'notification-1')
   const runtimeMessages: Frame[] = []
   const storageWrites: Frame[] = []
+  const sessionStorageWrites: Frame[] = []
+  const tabRemovedListeners: Listener[] = []
+  const closedTabs = new Set<number>()
 
   const chromeApi = {
     runtime: {
@@ -150,21 +167,33 @@ async function boot(
         get: async () => ({ dshSettings: stored }),
         set: async (value: Frame) => { storageWrites.push(value) },
       },
-      session: { get: async () => ({}), set: async () => undefined, remove: async () => undefined },
+      session: {
+        get: async () => ({}),
+        set: async (value: Frame) => { sessionStorageWrites.push(value) },
+        remove: async () => undefined,
+      },
     },
     tabs: {
       query: async () => [activeTab],
-      get: async () => activeTab,
+      get: async (tabId?: number) => {
+        if (tabId !== undefined && closedTabs.has(tabId)) throw new Error(`No tab with id: ${tabId}`)
+        return activeTab
+      },
       update: async () => activeTab,
       create: async () => activeTab,
       // No content script in this fake. An approved call therefore fails at its
       // action step — which is fine: this spec is about whether a card was
-      // raised, not about what the page did.
-      sendMessage: async () => { throw new Error('Could not establish connection. Receiving end does not exist.') },
+      // raised, not about what the page did. A test that does care hands in one.
+      sendMessage: async (_tabId: number, message: Frame) => {
+        if (contentScript === undefined) throw new Error('Could not establish connection. Receiving end does not exist.')
+        return contentScript(message)
+      },
       onActivated: { addListener: () => undefined },
       onUpdated: { addListener: () => undefined },
       onReplaced: { addListener: () => undefined },
-      onRemoved: { addListener: () => undefined },
+      // Real listener on purpose: closing a tab is what prunes the binding, and
+      // a test that skips this handler would test a state Chrome never reaches.
+      onRemoved: { addListener: (listener: Listener) => { tabRemovedListeners.push(listener) } },
     },
     webNavigation: {
       // Force `listTabFrames` onto its single-main-frame fallback.
@@ -229,15 +258,24 @@ async function boot(
     .filter((value): value is string => typeof value === 'string' && value.startsWith(APPROVAL_NOTIFICATION_PREFIX))
     .map((value) => value.slice(APPROVAL_NOTIFICATION_PREFIX.length))
 
+  /** Deliver one `tool.call` frame, the way the bridge plugin's dispatch does. */
+  const deliverCall = (call: ToolCallSpec): void => socket.receive({
+    t: 'tool.call',
+    id: call.id,
+    name: call.name,
+    args: call.args ?? {},
+    expiresAt: Date.now() + 30_000,
+    ...call.sessionId === undefined ? {} : { sessionId: call.sessionId },
+  })
+
+  /** Wait for one call to settle and hand back its result frame. */
+  const settleCall = async (id: string): Promise<Frame> => {
+    await vi.waitFor(() => { expect(results(id)).toHaveLength(1) })
+    return results(id)[0]!
+  }
+
   return {
-    call: (call) => socket.receive({
-      t: 'tool.call',
-      id: call.id,
-      name: call.name,
-      args: call.args ?? {},
-      expiresAt: Date.now() + 30_000,
-      ...call.sessionId === undefined ? {} : { sessionId: call.sessionId },
-    }),
+    call: deliverCall,
     uiRequest: (message) => new Promise((resolve) => {
       for (const listener of messageListeners) {
         (listener as (
@@ -252,16 +290,27 @@ async function boot(
       }
     }),
     results,
-    settle: async (id) => {
-      await vi.waitFor(() => { expect(results(id)).toHaveLength(1) })
-      return results(id)[0]!
-    },
+    settle: settleCall,
     approvalIds,
     approvalNotificationOptions: () => notifications.mock.calls
       .filter(([id]) => typeof id === 'string' && id.startsWith(APPROVAL_NOTIFICATION_PREFIX))
       .map(([, options]) => options as Frame),
     sentFrames: () => socket.sent.map((raw) => JSON.parse(raw) as Frame),
+    uiPushes: () => [...runtimeMessages],
     storedSettings: () => storageWrites.at(-1)?.['dshSettings'] as Frame | undefined,
+    storedAffinity: () => sessionStorageWrites
+      .filter((value) => value['dshTabAffinity'] !== undefined)
+      .at(-1)?.['dshTabAffinity'] as Frame | undefined,
+    bind: async (tabId, sessionId) => {
+      const id = `bind-${sessionId}-${tabId}`
+      deliverCall({ id, name: 'browser_bind_tab', args: { tabId }, sessionId })
+      const frame = await settleCall(id)
+      if (frame.ok !== true) throw new Error(`binding tab ${tabId} for ${sessionId} failed: ${JSON.stringify(frame)}`)
+    },
+    closeTab: (tabId) => {
+      closedTabs.add(tabId)
+      for (const listener of tabRemovedListeners) (listener as (tabId: number) => void)(tabId)
+    },
     answer: (id, decision) => {
       for (const listener of messageListeners) {
         (listener as (
@@ -301,6 +350,9 @@ describe('background entry consent gate', () => {
   })
 
   it('raises one card for a session-scoped action and runs the repeat without asking again', async () => {
+    // A page first: with no implicit binding, a call with no page is refused and
+    // raises no card at all, so the grant this test is about needs a binding.
+    await harness.bind(APP_TAB.id, 's1')
     harness.call({ id: 'c1', name: 'browser_headers', args: { pattern: '/api/' }, sessionId: 's1' })
     harness.answer(await card(harness, 1), 'allow-in-session')
     await harness.settle('c1')
@@ -316,6 +368,7 @@ describe('background entry consent gate', () => {
   })
 
   it('does not let one action grant silence a different action', async () => {
+    await harness.bind(APP_TAB.id, 's1')
     harness.call({ id: 'c1', name: 'browser_headers', args: { pattern: '/api/' }, sessionId: 's1' })
     harness.answer(await card(harness, 1), 'allow-in-session')
     await harness.settle('c1')
@@ -346,24 +399,24 @@ describe('background entry consent gate', () => {
     expect(response.log).toContain('worker-start')
   })
 
-  it('refuses to auto-bind a page that belongs to another extension', async () => {
-    // Measured report: the session auto-bound whichever tab was active, and a
-    // `chrome-extension://` page accepts neither content scripts nor
-    // `chrome.debugger`, so every tool failed with
-    // "Cannot access a chrome-extension:// URL of different extension".
+  it('never binds a page no other extension may operate', async () => {
+    // A `chrome-extension://` page accepts neither content scripts nor
+    // `chrome.debugger`: "Cannot access a chrome-extension:// URL of different
+    // extension" for every tool. The session must end this call with no page —
+    // the refusal below is the same one any page-less call gets, and no bind
+    // happens at all, so there is no unoperable binding to recover from.
     const other = await boot({ id: 99, windowId: 1, title: 'Some other extension', url: 'chrome-extension://abcdefghijklmnop/panel.html' })
     other.call({ id: 'p1', name: 'browser_get_text', args: {}, sessionId: 's1' })
 
     const frame = await other.settle('p1')
 
     expect(frame.ok).toBe(false)
-    expect(String((frame.error as { message?: string } | undefined)?.message)).toContain('another extension')
-    expect(String((frame.error as { message?: string } | undefined)?.message)).toContain('Unbind')
     // Nothing was bound, so there was nothing to approve.
     expect(other.approvalIds()).toEqual([])
     // This session has no page at all, so the host may resolve it by letting the
     // user pick one from inside the refused call instead of failing it.
     expect((frame.error as { needsPageChoice?: unknown } | undefined)?.needsPageChoice).toBe(true)
+    expect(other.storedAffinity()?.['sessionTabs']).toBeUndefined()
   })
 
   it('offers no page choice for a bound session whose own page became unoperable', async () => {
@@ -373,10 +426,7 @@ describe('background entry consent gate', () => {
     // are the only moves, and the host must not read this refusal as a repair.
     const tab = { id: 42, windowId: 1, title: 'Orders', url: 'https://app.example/orders' }
     const bound = await boot(tab)
-    // First call binds the session (the action itself fails: this fake has no
-    // content script, which is not an affinity problem).
-    bound.call({ id: 'p1', name: 'browser_get_text', args: {}, sessionId: 's1' })
-    await bound.settle('p1')
+    await bound.bind(42, 's1')
     tab.url = 'chrome://settings/'
     bound.call({ id: 'p2', name: 'browser_get_text', args: {}, sessionId: 's1' })
 
@@ -411,9 +461,203 @@ describe('background entry consent gate', () => {
     // The bind is there, so the feed really is this session's: the refused call
     // is missing on purpose, not because the list is empty.
     expect(ops.some((op) => op.name === 'browser_bind_tab' && op.state === 'done')).toBe(true)
+    // The row says which page, not only which number: a bind to the wrong tab is otherwise
+    // indistinguishable from the right one in the feed.
+    const bind = ops.find((op) => op.name === 'browser_bind_tab') as { label?: string } | undefined
+    expect(bind?.label).toBe('https://app.example/orders')
     expect(ops.filter((op) => op.name === 'browser_get_text')).toEqual([])
   })
+
+  it('marks a read that succeeded with nothing found, in the push and in the snapshot', async () => {
+    // The whole path this feature exists for: a real content script answers "no
+    // match", the background answers the model `ok: true` as it always has, and
+    // the operation the panel receives says the answer held no content.
+    const harness = await boot(APP_TAB, { bridgeUrl: BRIDGE_URL }, (message) => {
+      if (message.action !== 'browser_get_text') return { ok: true, result: { text: 'page' } }
+      return { ok: true, result: { text: 'text search: no match for "kw" in the whole page (case-insensitive, 12 characters searched).' } }
+    })
+    await harness.bind(APP_TAB.id, 's1')
+
+    harness.call({ id: 'n1', name: 'browser_get_text', args: { find: 'kw' }, sessionId: 's1' })
+    const frame = await harness.settle('n1')
+
+    // The model's half is unchanged: a success, and the sentence it always got.
+    expect(frame.ok).toBe(true)
+    const modelText = (frame.result as { text?: string } | undefined)?.text ?? ''
+    expect(modelText).toContain('text search: no match for "kw" in the whole page')
+    expect(Object.keys(frame.result as object)).toEqual(['text'])
+    expect(JSON.stringify(frame)).not.toContain('noMatch')
+
+    const pushed = harness.uiPushes()
+      .filter((candidate) => candidate.type === 'push.op')
+      .map((candidate) => candidate.op as { id?: string; name?: string; state?: string; noMatch?: unknown })
+      .filter((op) => op.id === 'n1')
+    expect(pushed.at(-1)).toMatchObject({ name: 'browser_get_text', state: 'done', noMatch: true })
+
+    const state = await harness.uiRequest({ type: 'ui.state' }) as { recentOps?: Array<{ id?: string; noMatch?: unknown }> }
+    expect((state.recentOps ?? []).find((op) => op.id === 'n1')).toMatchObject({ noMatch: true })
+  })
+
+  it('leaves a read that returned content unmarked', async () => {
+    // The same path with a page that answered: the feed must not mark it, so the
+    // mark above cannot be arriving from somewhere else.
+    const harness = await boot(APP_TAB, { bridgeUrl: BRIDGE_URL }, () => (
+      { ok: true, result: { text: 'Orders\nTotal 12' } }
+    ))
+    await harness.bind(APP_TAB.id, 's1')
+
+    harness.call({ id: 'c1', name: 'browser_get_text', args: {}, sessionId: 's1' })
+    await harness.settle('c1')
+
+    const marked = harness.uiPushes()
+      .filter((candidate) => candidate.type === 'push.op')
+      .map((candidate) => candidate.op as { id?: string; noMatch?: unknown; state?: string })
+      .filter((op) => op.id === 'c1')
+    expect(marked.at(-1)).toMatchObject({ state: 'done' })
+    expect(marked.at(-1)?.noMatch).toBeUndefined()
+  })
 })
+
+/**
+ * What a session gets when it has no page to operate.
+ *
+ * Binding used to happen implicitly on the first call of a page-less session:
+ * it took whatever tab the user was looking at. Measured consequence — the
+ * assistant's tab was closed, the user had moved on to another page, and the
+ * next call quietly began operating that page. These cases pin the replacement:
+ * a refusal the host can resolve by asking the user for a page, a release of the
+ * dead binding, and the one competing-session answer that must survive the
+ * removal of the implicit binding.
+ */
+describe('background entry page-less sessions', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    vi.restoreAllMocks()
+  })
+
+  /** The affinity view one `ui.state` request reports. */
+  async function affinity(harness: Harness): Promise<Frame> {
+    const state = await harness.uiRequest({ type: 'ui.state' }) as Frame
+    return state.affinity as Frame
+  }
+
+  /** How many affinity pushes the panel has received so far. */
+  function affinityPushes(harness: Harness): number {
+    return harness.uiPushes().filter((frame) => frame.type === 'push.affinity').length
+  }
+
+  it('refuses the next call after the bound tab was closed without taking the tab the user moved to', async () => {
+    const tab = { id: 42, windowId: 1, title: 'Orders', url: 'https://app.example/orders' }
+    const harness = await boot(tab)
+    await harness.bind(42, 's1')
+
+    // The user closes the page this session owned and carries on in another one.
+    tab.id = 77
+    tab.title = 'Inbox'
+    tab.url = 'https://mail.example/inbox'
+    harness.closeTab(42)
+    await vi.waitFor(async () => {
+      expect((await affinity(harness)).status).toBe('lost')
+    })
+
+    harness.call({ id: 'c1', name: 'browser_get_text', args: {}, sessionId: 's1' })
+    const frame = await harness.settle('c1')
+
+    expect(frame.ok).toBe(false)
+    expect((frame.error as { code?: string }).code).toBe('content-unavailable')
+    // The mark the host reads as "ask the user which page to use".
+    expect((frame.error as { needsPageChoice?: unknown }).needsPageChoice).toBe(true)
+
+    const state = await harness.uiRequest({ type: 'ui.state' }) as Frame
+    // Nothing was bound — and in particular not the page the user is viewing.
+    expect(state.controlled).toBeNull()
+    expect((state.affinity as Frame).controlled).toBeNull()
+    expect((state.affinity as Frame).status).toBe('lost')
+    // Nothing reached the affinity record a worker restart rehydrates from.
+    expect(harness.storedAffinity()?.['sessionTabs']).toBeUndefined()
+    expect(harness.storedAffinity()?.['controlledTabId']).toBeUndefined()
+  })
+
+  it('refuses a page-less call that carries no session, and binds nothing', async () => {
+    // The "never bound" case with no session at all: the call is answered
+    // `missing`, which tells the host to ask the user for a page.
+    const harness = await boot()
+    harness.call({ id: 'c1', name: 'browser_get_text', args: {} })
+
+    const frame = await harness.settle('c1')
+
+    expect(frame.ok).toBe(false)
+    expect((frame.error as { code?: string }).code).toBe('no-active-tab')
+    expect((frame.error as { needsPageChoice?: unknown }).needsPageChoice).toBe(true)
+    const state = await harness.uiRequest({ type: 'ui.state' }) as Frame
+    expect(state.controlled).toBeNull()
+    expect((state.affinity as Frame).status).toBe('unbound')
+    expect((state.affinity as Frame).controlled).toBeNull()
+  })
+
+  it('refuses a session that never bound a page, and binds nothing', async () => {
+    // The same case for a session: a session-scoped call with no entry is
+    // `lost` to the affinity controller — "never bound" and "its tab closed"
+    // are the same absence there — so the answer is the `content-unavailable`
+    // refusal, which also carries `needsPageChoice`.
+    const harness = await boot()
+    harness.call({ id: 'c1', name: 'browser_get_text', args: {}, sessionId: 's1' })
+
+    const frame = await harness.settle('c1')
+
+    expect(frame.ok).toBe(false)
+    expect((frame.error as { code?: string }).code).toBe('content-unavailable')
+    expect((frame.error as { needsPageChoice?: unknown }).needsPageChoice).toBe(true)
+    const state = await harness.uiRequest({ type: 'ui.state' }) as Frame
+    expect(state.controlled).toBeNull()
+    expect(harness.storedAffinity()?.['sessionTabs']).toBeUndefined()
+  })
+
+  it('still names the session holding the browser to a session with no page', async () => {
+    // One session owns the browser at a time. This answer used to come out of
+    // the implicit binding path; it is the one thing that path provided that
+    // must not be lost with it, or a page-less session would be told "no page"
+    // and would ask the user to choose a page another session is driving.
+    const harness = await boot()
+    await harness.bind(42, 'owner')
+
+    harness.call({ id: 'c1', name: 'browser_get_text', args: {}, sessionId: 'other' })
+    const frame = await harness.settle('c1')
+
+    expect(frame.ok).toBe(false)
+    const message = String((frame.error as { message?: string } | undefined)?.message)
+    expect(message).toContain('owner')
+    expect(message).toContain('https://app.example/orders')
+    // Not a page problem the host may repair by asking which page to use.
+    expect((frame.error as { needsPageChoice?: unknown }).needsPageChoice).toBeUndefined()
+    // The holder keeps the browser.
+    const state = await harness.uiRequest({ type: 'ui.state' }) as Frame
+    expect(state.controlled).toMatchObject({ sessionId: 'owner', tabId: 42 })
+  })
+
+  it('releases the dead binding on the refusal instead of failing silently', async () => {
+    // The release is the panel's Unbind path (`session.unbind`), so the refusal
+    // has to show its effect: the affinity the panel reads is pushed again. The
+    // close handler pruned the entry already, which is exactly why the push —
+    // and not a surviving record — is the observable half of it.
+    const harness = await boot()
+    await harness.bind(42, 's1')
+    harness.closeTab(42)
+    await vi.waitFor(async () => {
+      expect((await affinity(harness)).status).toBe('lost')
+    })
+    const pushesBefore = affinityPushes(harness)
+
+    harness.call({ id: 'c1', name: 'browser_get_text', args: {}, sessionId: 's1' })
+    const frame = await harness.settle('c1')
+
+    expect(frame.ok).toBe(false)
+    expect((frame.error as { needsPageChoice?: unknown }).needsPageChoice).toBe(true)
+    expect(affinityPushes(harness)).toBeGreaterThan(pushesBefore)
+    expect(harness.storedAffinity()?.['sessionTabs']).toBeUndefined()
+  })
+})
+
 
 /**
  * Where the interface language comes from, end to end.
@@ -481,12 +725,14 @@ describe('background entry UI language', () => {
     // Notifications are the one surface with no page to render copy in, so the
     // worker's own locale state has to be the setting.
     const zh = await boot(APP_TAB, { bridgeUrl: BRIDGE_URL, uiLanguage: 'zh' })
+    await zh.bind(APP_TAB.id, 's1')
     zh.call({ id: 'c1', name: 'browser_back', args: {}, sessionId: 's1' })
     await card(zh, 1)
     const zhNotification = zh.approvalNotificationOptions()
     expect(zhNotification[0]?.title).toBe('浏览器操作等待确认')
 
     const en = await boot()
+    await en.bind(APP_TAB.id, 's1')
     en.call({ id: 'c2', name: 'browser_back', args: {}, sessionId: 's1' })
     await card(en, 1)
     expect(en.approvalNotificationOptions()[0]?.title).toBe('Browser action awaiting approval')

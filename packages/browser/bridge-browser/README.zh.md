@@ -2,7 +2,7 @@
 
 [English](README.md) | 中文
 
-dsh 的**纯浏览器工具桥**：在宿主 webserver 上挂载一个 **token 认证的 WebSocket 通道**（`/ext/bridge`），供 Chrome 扩展连接，并注册 `browser_*` 工具集——经扩展在真实浏览器中读取页面、点击元素、填写表单、滚动与导航，登录态保留。桥**只承载工具帧**：聊天、设置、凭据、事件流都不再经过它，dsh 网关再怎么演进都不影响这份契约。聊天与会话属于标准 dsh 客户端（web GUI/CLI）；扩展侧只有状态视图与 options/审批弹窗。
+dsh 的**纯浏览器工具桥接**：在宿主 webserver 上挂载一个 **token 认证的 WebSocket 通道**（`/ext/bridge`），供 Chrome 扩展连接，并注册 `browser_*` 工具集——经扩展在真实浏览器中读取页面、点击元素、填写表单、滚动与导航，登录态保留。桥接**只承载工具帧**：聊天、设置、凭据、事件流都不再经过它，dsh 网关再怎么演进都不影响这份契约。聊天与会话属于标准 dsh 客户端（web GUI/CLI）；扩展侧只有状态视图与 options/审批弹窗。
 
 **文本为主、按需视觉**：页面快照仍是结构化文本（标题、正文、带编号的交互清单、敏感值打码的表单字段），所有浏览器动作按稳定编号寻址。`browser_snapshot` 会额外返回同一时刻的截图，`browser_capture` 按需只返回截图——仅当调用方的模型路由声明支持图片输入时才附上，且只作为内存中的图片附件：扩展从不把截图写入磁盘。
 
@@ -43,10 +43,10 @@ npx @deepseek-ai/dsh@0.1.7-rc.1 web
 
 ## 安全模型
 
-- 桥路径在 `/api` 信任栅栏**之外**（栅栏只罩 client-connection 注册的路由），因此自带 bearer token 认证：首帧必须是 `hello`（5 秒内），常量时间比对，失败即断开。
+- 桥接路径在 `/api` 信任栅栏**之外**（栅栏只罩 client-connection 注册的路由），因此自带 bearer token 认证：首帧必须是 `hello`（5 秒内），常量时间比对，失败即断开。
 - `/api` 载体钉在回环上的方法（`settings.*`、`credentials.*`、`host.pickDirectory`、`host.openPath`）对非回环来源**即使 token 正确也拒绝**——对 `--host 0.0.0.0` 部署的纵深防御。
 - 同一时刻仅一个活动连接，新认证连接顶替旧连接。
-- 桥是 confused-deputy 边界而非通用认证层：不要把 `dsh web --host 0.0.0.0` 暴露在不信任的网络上。
+- 桥接是 confused-deputy 边界而非通用认证层：不要把 `dsh web --host 0.0.0.0` 暴露在不信任的网络上。
 - 抽取的页面文字会标记为模型的不可信输入。页面读取遵循扩展的询问/自动/关闭策略；状态变更工具必须经过按 origin 的审批，未获批准时失败关闭。同源后续操作可信任该 origin（写入扩展设置、持久生效）；代码里另有一条「仅本会话」的信任（`trust-session`）作为它的降级方案，当前没有入口提供。
 
 ## 线协议
@@ -56,7 +56,7 @@ npx @deepseek-ai/dsh@0.1.7-rc.1 web
 - 客户端 → 服务端：`hello`（认证 + caps）、`rpc`（两个 GDrive 方法之一，或界面语言上报）、`tool.result`、`pong`。
 - 服务端 → 客户端：`hello.ok`（回显协商后的 caps）、`rpc.result`、`tool.call`、`tool.cancel`、`ping`、`error`。
 
-`tool.call` 携带稳定 id，扩展在其 `tool.result` 中回显；`expiresAt` 让过期调用以 `timeout` 结算。桥只是请求/响应通道——认证完成后不再有事件帧。
+`tool.call` 携带稳定 id，扩展在其 `tool.result` 中回显；`expiresAt` 让过期调用以 `timeout` 结算。桥接只是请求/响应通道——认证完成后不再有事件帧。
 
 两个半边的版本在 `hello`/`hello.ok` 里协商：`proto` 是握手版本（不发该字段的旧构建读作 1），`toolset` 是扩展的能力级别（缺失为 0）。宿主若无法服务更新的扩展，用关闭码 `4003` + 原因拒绝，扩展把原因原样显示；扩展声明的级别较低时，宿主**收窄工具面**（不注册 `browser_dom_query`/`browser_block`/`browser_headers`，且 `browser_click`/`browser_type` 的 schema 去掉 `selector`；低于 level 6 还会去掉 `browser_click` 的 `option` 与 `browser_dom_query` 的 `options`，模型拿着新 schema 传这两个参数时宿主直接拒绝并给出下一步，而不是让旧扩展静默丢掉参数、回报一次没生效的点击），而不是等到调用时才报参数错误。扩展在选项页与侧栏显示这处错配，并点名下一步（重启 dsh，或重载扩展）。
 
@@ -93,7 +93,7 @@ npx @deepseek-ai/dsh@0.1.7-rc.1 web
 
 ## 扩展点
 
-- 工具集是消费面；seam 是桥接线（`protocol.ts`）。在 `ctx.tools` 注册新工具并经由桥分发即可，扩展的 content script 按动作名分发。
+- 工具集是消费面；seam 是桥接的接线（`protocol.ts`）。在 `ctx.tools` 注册新工具并经由桥接分发即可，扩展的 content script 按动作名分发。
 - 协商 caps（`hello.ok`）让插件无需共享配置文件即可向扩展下达快照预算。
 
 ## 已知限制与后续工作
