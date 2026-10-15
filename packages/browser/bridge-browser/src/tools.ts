@@ -384,12 +384,17 @@ function spreadAgent(exec: Pick<ToolRunContext, 'agent'>): { agent?: unknown } {
 }
 
 /**
- * How long one bridge call may stay silent before the human is asked about it.
+ * How long a call that is waiting for the user may stay unanswered before the human is asked
+ * about it.
  *
- * A call waiting on a confirmation card in Chrome and a page that has stopped answering look
- * identical from here: the bridge holds only its own timer, and no protocol frame reports a
- * wait. Twenty seconds is past any ordinary page action but well inside the extension's
- * 60-second approval window, so the ask lands while it can still help.
+ * A call waiting on a confirmation card in Chrome and a page that has stopped answering used to
+ * look identical from here: the bridge holds only its own timer, and no protocol frame reported
+ * a wait. That timer is still the fallback for a build that cannot report, but a reporting
+ * extension says when the wait begins and ends, so the question is timed from the card rather
+ * than from the dispatch and an action that is merely slow never asks.
+ *
+ * Twenty seconds is past any ordinary page action but well inside the extension's 60-second
+ * approval window, so the ask lands while it can still help.
  */
 export const SILENT_CALL_NUDGE_MS = 20_000
 /** Tools that talk to the user themselves, or that run as part of such a tool's own asking. */
@@ -1415,54 +1420,102 @@ export function registerBrowserTools(
 ): BrowserToolRegistration {
   const disposers = new Map<string, () => void>()
   /**
-   * Ask the human about a call that has gone quiet, then keep waiting either way.
+   * Ask the human about a call that is waiting for them, then keep waiting either way.
    *
-   * The answer never changes the call — it only decides who knows that something is waiting.
    * Asking is the whole point: the card the extension raises lives in Chrome, out of sight of
-   * whoever started the call, and a silent ninety seconds reads as "the tool broke". A live
-   * child cannot open a human interaction (`CALLER_NOT_LIVE` / `DELEGATED_CALLER`), so a
-   * refused ask is dropped and the wait simply continues.
+   * whoever started the call, and a silent wait reads as "the tool broke". A live child cannot
+   * open a human interaction (`CALLER_NOT_LIVE` / `DELEGATED_CALLER`), so a refused ask is
+   * dropped and the wait simply continues.
    */
-  const nudgeWhenSilent = async <T>(
+  const askAboutSilence = (
     exec: Pick<ToolRunContext, 'agent' | 'signal'>,
     name: string,
-    call: Promise<T>,
-  ): Promise<T> => {
-    const userQuestions = NUDGE_EXEMPT_TOOLS.has(name)
-      ? undefined
-      : ctx.get('userQuestions') as UserQuestionsLike | undefined
-    if (userQuestions === undefined) return call
-    const timer = setTimeout(() => {
-      // Read at ask time: the language can arrive after this call started, and
-      // it is a cached field, not a round trip.
-      const copy = userPromptCopy(bridge.clientUiLanguage())
-      void userQuestions.ask({
-        questions: [{
-          id: 'silent-browser-call',
-          question: copy.silentQuestion(name, Math.round(SILENT_CALL_NUDGE_MS / 1000)),
-          options: [
-            { label: copy.silentAnswerNone },
-            { label: copy.silentAnswerWorking },
-          ],
-        }],
-        ...spreadAgent(exec),
-        signal: exec.signal,
-      }).catch(() => undefined)
-    }, SILENT_CALL_NUDGE_MS)
-    try {
-      return await call
-    } finally {
-      clearTimeout(timer)
-    }
+    userQuestions: UserQuestionsLike,
+  ): void => {
+    // Read at ask time: the language can arrive after this call started, and
+    // it is a cached field, not a round trip.
+    const copy = userPromptCopy(bridge.clientUiLanguage())
+    void userQuestions.ask({
+      questions: [{
+        id: 'silent-browser-call',
+        question: copy.silentQuestion(name, Math.round(SILENT_CALL_NUDGE_MS / 1000)),
+        options: [
+          { label: copy.silentAnswerNone },
+          { label: copy.silentAnswerWorking },
+        ],
+      }],
+      ...spreadAgent(exec),
+      signal: exec.signal,
+    }).catch(() => undefined)
   }
+  /**
+   * Dispatch one bridge call, asking the human when the extension says it is waiting.
+   *
+   * Which of two shapes runs is decided by what the connected extension can report:
+   *
+   * - **It reports waiting** ({@link BridgeServer.clientReportsWaiting}): the question is raised
+   *   {@link SILENT_CALL_NUDGE_MS} after the call enters the wait — that is, after a card was
+   *   raised in Chrome — and is dropped the moment the wait ends. An action that is merely slow
+   *   (a whole-page text search over a large document, a page that takes a minute to load) never
+   *   asks, because in it nothing is waiting for the user. The wait itself is what times the
+   *   question, so a call that reaches its card late still asks relative to the card.
+   * - **It cannot report**: the older question, timed from dispatch, unchanged. Reading absence
+   *   as "never waiting" would have silently retired the nudge on every build that predates the
+   *   report, which is the one case where a person has no other way to learn a card is up.
+   *
+   * The answer never changes the call either way; it only decides who knows that something is
+   * waiting.
+   */
   const dispatch = async (
     exec: Pick<ToolRunContext, 'agent' | 'signal'>,
     name: string,
     args: Record<string, unknown>,
     sessionId: string | undefined,
-  ): Promise<unknown> => await nudgeWhenSilent(exec, name, sessionId === undefined
-    ? bridge.requestTool(name, args, exec.signal, options.toolTimeoutMs)
-    : bridge.requestTool(name, args, exec.signal, options.toolTimeoutMs, sessionId))
+  ): Promise<unknown> => {
+    const call = (onWaiting?: (waiting: boolean) => void): Promise<unknown> => {
+      // The five-argument shapes stay as they are: a callback is only ever
+      // attached by the reporting path below.
+      if (onWaiting === undefined) {
+        return sessionId === undefined
+          ? bridge.requestTool(name, args, exec.signal, options.toolTimeoutMs)
+          : bridge.requestTool(name, args, exec.signal, options.toolTimeoutMs, sessionId)
+      }
+      return bridge.requestTool(name, args, exec.signal, options.toolTimeoutMs, sessionId, onWaiting)
+    }
+    const userQuestions = NUDGE_EXEMPT_TOOLS.has(name)
+      ? undefined
+      : ctx.get('userQuestions') as UserQuestionsLike | undefined
+    if (userQuestions === undefined) return await call()
+    let timer: NodeJS.Timeout | undefined
+    let asked = false
+    const stopTimer = (): void => {
+      if (timer === undefined) return
+      clearTimeout(timer)
+      timer = undefined
+    }
+    const startTimer = (): void => {
+      // One call asks at most once: a second card on the same call is the same
+      // conversation with the user, and the answer changes nothing either way.
+      if (asked || timer !== undefined) return
+      timer = setTimeout(() => {
+        timer = undefined
+        asked = true
+        askAboutSilence(exec, name, userQuestions)
+      }, SILENT_CALL_NUDGE_MS)
+    }
+    try {
+      if (bridge.clientReportsWaiting()) {
+        return await call((waiting: boolean) => {
+          if (!waiting) stopTimer()
+          else startTimer()
+        })
+      }
+      startTimer()
+      return await call()
+    } finally {
+      stopTimer()
+    }
+  }
   /**
    * Dispatch one page call, resolving a missing page inside the same call.
    *

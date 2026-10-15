@@ -336,6 +336,64 @@ describe('BridgeServer', () => {
     second.ws.close()
   })
 
+  it('hands a reported wait to the call it belongs to', async () => {
+    const h = await startBridge()
+    harnesses.push(h)
+    const { ws, frames } = await connect(h.url)
+    // The capability is what tells the host these reports exist at all.
+    expect(h.bridge.clientReportsWaiting()).toBe(false)
+    send(ws, { t: 'hello', token: TOKEN, caps: { ...CAPS, waitingReport: true } })
+    await waitFor(() => frames.some((f) => f.t === 'hello.ok'))
+    expect(h.bridge.clientReportsWaiting()).toBe(true)
+
+    const seen: boolean[] = []
+    const pending = h.bridge.requestTool(
+      'browser_click',
+      { index: 3 },
+      new AbortController().signal,
+      60_000,
+      undefined,
+      (waiting) => { seen.push(waiting) },
+    )
+    // The host mints the call id, so the report has to quote the frame it just
+    // sent — an id the extension could not have known in advance.
+    await waitFor(() => frames.some((f) => f.t === 'tool.call'))
+    const call = frames.find((f) => f.t === 'tool.call') as { id: string }
+
+    send(ws, { t: 'rpc', id: 'wait-1', method: 'bridge.toolWaiting', payload: { id: call.id, waiting: true } })
+    await waitFor(() => seen.length === 1)
+    send(ws, { t: 'rpc', id: 'wait-2', method: 'bridge.toolWaiting', payload: { id: call.id, waiting: false } })
+    await waitFor(() => seen.length === 2)
+
+    expect(seen).toEqual([true, false])
+    expect(frames.filter((f) => f.t === 'rpc.result').map((f) => f.id)).toEqual(['wait-1', 'wait-2'])
+
+    // The report is a notification, not part of the call's answer.
+    send(ws, { t: 'tool.result', id: call.id, ok: true, result: { text: 'clicked' } })
+    await expect(pending).resolves.toEqual({ text: 'clicked' })
+    ws.close()
+  })
+
+  it('drops a wait report no in-flight call can claim, and refuses a malformed one', async () => {
+    const h = await startBridge()
+    harnesses.push(h)
+    const { ws, frames } = await connect(h.url)
+    send(ws, { t: 'hello', token: TOKEN, caps: { ...CAPS, waitingReport: true } })
+    await waitFor(() => frames.some((f) => f.t === 'hello.ok'))
+
+    // Nobody is waiting for c-gone: a report that outlived its call must not
+    // resurrect it, or a cancelled card would raise a question about nothing.
+    send(ws, { t: 'rpc', id: 'wait-3', method: 'bridge.toolWaiting', payload: { id: 'c-gone', waiting: true } })
+    await waitFor(() => frames.some((f) => f.t === 'rpc.result' && f.id === 'wait-3'))
+    expect(frames.find((f) => f.t === 'rpc.result' && f.id === 'wait-3')).toMatchObject({ ok: true })
+
+    send(ws, { t: 'rpc', id: 'wait-4', method: 'bridge.toolWaiting', payload: { id: 'c-1', waiting: 'yes' } })
+    await waitFor(() => frames.some((f) => f.t === 'rpc.result' && f.id === 'wait-4'))
+    expect(frames.find((f) => f.t === 'rpc.result' && f.id === 'wait-4'))
+      .toMatchObject({ ok: false, error: { code: 'bad-request' } })
+    ws.close()
+  })
+
 
   it('classifies loopback addresses for the hello gate', () => {
     expect(isLoopbackAddress('127.0.0.1')).toBe(true)

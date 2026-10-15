@@ -381,6 +381,99 @@ describe('background entry consent gate', () => {
     expect(harness.approvalIds()).toHaveLength(2)
   })
 
+  it('tells the host both edges of the wait for a card', async () => {
+    // The host cannot see the card, so without these two reports it can only
+    // ask about silence — which fires for a slow page too. The edges have to
+    // arrive from the extension's own op state, not from a timer here.
+    const waits = () => harness.sentFrames().filter((frame) => frame.method === 'bridge.toolWaiting')
+    await harness.bind(APP_TAB.id, 's1')
+    harness.call({ id: 'c1', name: 'browser_headers', args: { pattern: '/api/' }, sessionId: 's1' })
+
+    const approvalId = await card(harness, 1)
+    expect(waits()).toEqual([
+      expect.objectContaining({ t: 'rpc', payload: { id: 'c1', waiting: true } }),
+    ])
+
+    harness.answer(approvalId, 'allow-once')
+    await harness.settle('c1')
+
+    // Answered: the card is down, so the host must stop counting on it. The
+    // call's own result is not a wait edge and must not be reported as one.
+    await vi.waitFor(() => {
+      expect(waits()).toEqual([
+        expect.objectContaining({ t: 'rpc', payload: { id: 'c1', waiting: true } }),
+        expect.objectContaining({ t: 'rpc', payload: { id: 'c1', waiting: false } }),
+      ])
+    })
+  })
+
+  it('reports the end of a wait whose feed entry the user cleared', async () => {
+    // The panel's Clear button empties the feed while a card can still be up.
+    // The wait edge belongs to the call, not to the entry that displayed it: a
+    // lost `false` edge leaves the host asking about a wait that is over.
+    const waits = () => harness.sentFrames().filter((frame) => frame.method === 'bridge.toolWaiting')
+    await harness.bind(APP_TAB.id, 's1')
+    harness.call({ id: 'c1', name: 'browser_headers', args: { pattern: '/api/' }, sessionId: 's1' })
+    const approvalId = await card(harness, 1)
+    await vi.waitFor(() => { expect(waits()).toHaveLength(1) })
+
+    await harness.uiRequest({ type: 'ops.clear' })
+    harness.answer(approvalId, 'allow-once')
+    await harness.settle('c1')
+
+    await vi.waitFor(() => {
+      expect(waits().map((frame) => frame.payload)).toEqual([
+        { id: 'c1', waiting: true },
+        { id: 'c1', waiting: false },
+      ])
+    })
+  })
+
+  it('reports the end of a wait whose feed entry aged out', async () => {
+    // Same edge, same reason, for the other way an entry leaves the feed: the
+    // 30-entry cap. The card is up, so answering it still has to be reported.
+    const waits = () => harness.sentFrames().filter((frame) => frame.method === 'bridge.toolWaiting')
+    await harness.bind(APP_TAB.id, 's1')
+    harness.call({ id: 'c1', name: 'browser_headers', args: { pattern: '/api/' }, sessionId: 's1' })
+    const approvalId = await card(harness, 1)
+    await vi.waitFor(() => { expect(waits()).toHaveLength(1) })
+
+    for (let i = 0; i < 30; i += 1) {
+      harness.call({ id: `filler-${i}`, name: 'browser_list_tabs', args: {}, sessionId: 's1' })
+    }
+    harness.answer(approvalId, 'allow-once')
+    await harness.settle('c1')
+
+    await vi.waitFor(() => {
+      expect(waits().map((frame) => frame.payload)).toEqual([
+        { id: 'c1', waiting: true },
+        { id: 'c1', waiting: false },
+      ])
+    })
+  })
+
+  it('reports no wait when a session grant spares the user the card', async () => {
+    // "Allow in this session" means no card goes up, so there is nothing for the
+    // host to ask about: reporting a wait here would raise a question about a
+    // prompt that never existed.
+    const waits = () => harness.sentFrames().filter((frame) => frame.method === 'bridge.toolWaiting')
+    await harness.bind(APP_TAB.id, 's1')
+    harness.call({ id: 'c1', name: 'browser_headers', args: { pattern: '/api/' }, sessionId: 's1' })
+    harness.answer(await card(harness, 1), 'allow-in-session')
+    await harness.settle('c1')
+    // One card, so exactly the two edges of that one wait.
+    await vi.waitFor(() => { expect(waits()).toHaveLength(2) })
+
+    harness.call({ id: 'c2', name: 'browser_headers', args: { pattern: '/api/' }, sessionId: 's1' })
+    await harness.settle('c2')
+
+    expect(harness.approvalIds()).toHaveLength(1)
+    expect(waits().map((frame) => frame.payload)).toEqual([
+      { id: 'c1', waiting: true },
+      { id: 'c1', waiting: false },
+    ])
+  })
+
   it('answers the debug-log readout with no tab, no approval and no session', async () => {
     // This readout is what someone runs *because* the debugging tools fail, so
     // it must not need a bound tab or a consent card to answer.

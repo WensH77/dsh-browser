@@ -81,7 +81,7 @@ docs/                              upgrade notes and investigation records
 - **A text-first page interface**: numbered controls, stable IDs across snapshots, delta updates, and masked sensitive values make pages operable without screenshots.
 - **A narrow privacy boundary**: passwords and payment-card values are always rendered as `••••` and never leave the page.
 - **Debugging is opt-in**: the tools that run over `chrome.debugger` are not registered until the user turns the switch on, so the model never sees them by default.
-- **A guarded bridge**: authenticated handshakes protect remote connections, the bridge services only browser tool frames and three bridge-internal RPCs, and the extension binds tools to one user-controlled tab.
+- **A guarded bridge**: authenticated handshakes protect remote connections, the bridge services only browser tool frames and five bridge-internal RPCs, and the extension binds tools to one user-controlled tab.
 
 ## Detailed installation and usage
 

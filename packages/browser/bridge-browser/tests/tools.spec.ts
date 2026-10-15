@@ -52,7 +52,12 @@ describe('clampWaitMs', () => {
 })
 
 describe('registerBrowserTools', () => {
-  function makeHarness(services: Record<string, unknown> = {}, debuggerAllowed = false, uiLanguage?: 'en' | 'zh') {
+  function makeHarness(
+    services: Record<string, unknown> = {},
+    debuggerAllowed = false,
+    uiLanguage?: 'en' | 'zh',
+    waitingReported = false,
+  ) {
     const registered: { name: string; definition: Record<string, unknown> }[] = []
     const ctx = {
       tools: {
@@ -72,10 +77,14 @@ describe('registerBrowserTools', () => {
     })
     // `clientUiLanguage` is the connected extension's report; undefined models a
     // build too old to send one, which is what keeps the prompts in English.
+    // `clientReportsWaiting` is the other report: false is a build that cannot
+    // say when it is waiting for the user, so the question falls back to timing
+    // the call's silence.
     const bridge = {
       requestTool,
       clientDebugger: () => debuggerAllowed,
       clientUiLanguage: () => uiLanguage,
+      clientReportsWaiting: () => waitingReported,
     } as unknown as BridgeServer
     return { ctx, bridge, requestTool, registered }
   }
@@ -1079,8 +1088,9 @@ describe('registerBrowserTools', () => {
   })
 
   it('asks the human about a call that has gone quiet, and keeps waiting', async () => {
-    // The card the extension raises lives in Chrome, out of sight of whoever started the
-    // call, and a silent wait is indistinguishable from a hung page. So the plugin asks.
+    // Fallback shape: this connection cannot report a wait (an extension older
+    // than `bridge.toolWaiting`), so the question is timed from the dispatch and
+    // a silent call is the only thing the host can go on.
     vi.useFakeTimers()
     try {
       const ask = vi.fn(async () => ({ answers: [] }))
@@ -1100,6 +1110,129 @@ describe('registerBrowserTools', () => {
         .toContain('browser_click')
       // The question does not decide anything: the call runs on to its own answer.
       await vi.advanceTimersByTimeAsync(15_000)
+      expect(await pending).toMatchObject({ text: 'clicked' })
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('never asks about a slow action on a connection that reports waits', async () => {
+    // The complaint this shape exists for: a whole-page text search over a
+    // 700k-character page took 51 seconds on this machine, nothing was waiting
+    // for the user, and the time-based question asked anyway. A reporting
+    // extension says "not waiting", so silence stops being evidence.
+    vi.useFakeTimers()
+    try {
+      const ask = vi.fn(async () => ({ answers: [] }))
+      const { ctx, bridge, requestTool, registered } = makeHarness({ userQuestions: { ask } }, false, undefined, true)
+      requestTool.mockImplementation(async () => await new Promise((resolve) => {
+        setTimeout(() => resolve({ text: 'searched' }), 120_000)
+      }))
+      registerBrowserTools(ctx, bridge, { toolTimeoutMs: 5_000, snapshotMaxChars: 12_000, maxInteractiveItems: 60 })
+      const definition = registered.find((entry) => entry.name === 'browser_get_text')!.definition
+      const exec = { signal: new AbortController().signal, agent: { id: 'session-a' } }
+      const pending = (definition.execute as (a: unknown, e: typeof exec) => Promise<unknown>)({ find: 'Compliance Questionnaire' }, exec)
+
+      // Well past the threshold, and past it again: no report, no question.
+      await vi.advanceTimersByTimeAsync(SILENT_CALL_NUDGE_MS * 3)
+      expect(ask).not.toHaveBeenCalled()
+
+      await vi.advanceTimersByTimeAsync(60_000)
+      expect(await pending).toMatchObject({ text: 'searched' })
+      expect(ask).not.toHaveBeenCalled()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('asks 20 seconds into a reported wait, not 20 seconds into the call', async () => {
+    vi.useFakeTimers()
+    try {
+      const ask = vi.fn(async () => ({ answers: [] }))
+      const { ctx, bridge, requestTool, registered } = makeHarness({ userQuestions: { ask } }, false, undefined, true)
+      const report: { waiting?: (waiting: boolean) => void } = {}
+      requestTool.mockImplementation(async (
+        _name: string,
+        _args: Record<string, unknown>,
+        _signal: AbortSignal,
+        _timeoutMs?: number,
+        _sessionId?: string,
+        onWaiting?: (waiting: boolean) => void,
+      ) => {
+        report.waiting = onWaiting
+        return await new Promise((resolve) => {
+          setTimeout(() => resolve({ text: 'clicked' }), 120_000)
+        })
+      })
+      registerBrowserTools(ctx, bridge, { toolTimeoutMs: 5_000, snapshotMaxChars: 12_000, maxInteractiveItems: 60 })
+      const definition = registered.find((entry) => entry.name === 'browser_click')!.definition
+      const exec = { signal: new AbortController().signal, agent: { id: 'session-a' } }
+      const pending = (definition.execute as (a: unknown, e: typeof exec) => Promise<unknown>)({ index: 3 }, exec)
+
+      // Ten slow seconds with no card up: nothing to ask about.
+      await vi.advanceTimersByTimeAsync(10_000)
+      expect(ask).not.toHaveBeenCalled()
+
+      // The card goes up now; the question is timed from the card.
+      report.waiting?.(true)
+      await vi.advanceTimersByTimeAsync(SILENT_CALL_NUDGE_MS - 1)
+      expect(ask).not.toHaveBeenCalled()
+      await vi.advanceTimersByTimeAsync(1)
+      expect(ask).toHaveBeenCalledTimes(1)
+      expect(String((ask.mock.calls[0]?.[0] as { questions: Array<{ question: string }> }).questions[0]?.question))
+        .toContain('browser_click')
+
+      // The call still runs to its own answer: the question decides nothing.
+      await vi.advanceTimersByTimeAsync(120_000)
+      expect(await pending).toMatchObject({ text: 'clicked' })
+      expect(ask).toHaveBeenCalledTimes(1)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('drops the question when the wait ends first, and asks at most once per call', async () => {
+    vi.useFakeTimers()
+    try {
+      const ask = vi.fn(async () => ({ answers: [] }))
+      const { ctx, bridge, requestTool, registered } = makeHarness({ userQuestions: { ask } }, false, undefined, true)
+      const report: { waiting?: (waiting: boolean) => void } = {}
+      requestTool.mockImplementation(async (
+        _name: string,
+        _args: Record<string, unknown>,
+        _signal: AbortSignal,
+        _timeoutMs?: number,
+        _sessionId?: string,
+        onWaiting?: (waiting: boolean) => void,
+      ) => {
+        report.waiting = onWaiting
+        return await new Promise((resolve) => {
+          setTimeout(() => resolve({ text: 'clicked' }), 120_000)
+        })
+      })
+      registerBrowserTools(ctx, bridge, { toolTimeoutMs: 5_000, snapshotMaxChars: 12_000, maxInteractiveItems: 60 })
+      const definition = registered.find((entry) => entry.name === 'browser_click')!.definition
+      const exec = { signal: new AbortController().signal, agent: { id: 'session-a' } }
+      const pending = (definition.execute as (a: unknown, e: typeof exec) => Promise<unknown>)({ index: 3 }, exec)
+
+      // Answered five seconds in: the user was there, so nothing is asked.
+      report.waiting?.(true)
+      await vi.advanceTimersByTimeAsync(5_000)
+      report.waiting?.(false)
+      await vi.advanceTimersByTimeAsync(SILENT_CALL_NUDGE_MS)
+      expect(ask).not.toHaveBeenCalled()
+
+      // A second card for the same call: the question is asked once, from the
+      // first wait that outlives the threshold, not once per card.
+      report.waiting?.(true)
+      await vi.advanceTimersByTimeAsync(SILENT_CALL_NUDGE_MS)
+      expect(ask).toHaveBeenCalledTimes(1)
+      report.waiting?.(false)
+      report.waiting?.(true)
+      await vi.advanceTimersByTimeAsync(SILENT_CALL_NUDGE_MS)
+      expect(ask).toHaveBeenCalledTimes(1)
+
+      await vi.advanceTimersByTimeAsync(120_000)
       expect(await pending).toMatchObject({ text: 'clicked' })
     } finally {
       vi.useRealTimers()
@@ -1253,6 +1386,7 @@ describe('registerBrowserTools', () => {
       const bridge = {
         requestTool,
         clientDebugger: () => options.debuggerAllowed ?? false,
+        clientReportsWaiting: () => options.waitingReported ?? false,
         hasConnection: () => options.connected ?? false,
         clientExtensionVersion: () => options.version,
       } as unknown as BridgeServer
@@ -1629,6 +1763,7 @@ describe('registerBrowserTools', () => {
         const bridge = {
           requestTool: vi.fn(),
           clientDebugger: () => false,
+          clientReportsWaiting: () => false,
           hasConnection: () => false,
           clientExtensionVersion: () => undefined,
         } as unknown as BridgeServer

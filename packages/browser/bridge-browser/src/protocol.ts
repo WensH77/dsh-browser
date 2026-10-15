@@ -37,6 +37,44 @@ export const BRIDGE_GDRIVE_MOVE_METHOD = 'bridge.gdrive.moveIntoSession'
 export const BRIDGE_UI_LANGUAGE_METHOD = 'bridge.uiLanguage'
 
 /**
+ * Internal RPC the extension uses to report that one of its calls is — or has
+ * stopped — waiting for the user's answer in Chrome.
+ *
+ * The host cannot see the approval card: it lives in the extension's own UI, and
+ * the host holds only a timer. Before this report existed the host asked the
+ * user "is something waiting for you?" after a fixed silence, which fired for
+ * every slow action too — a whole-page text search on a large document, a page
+ * that takes a minute to load — and those questions could not be acted on.
+ * The extension does know (it drives the card), so it says so here: `waiting:
+ * true` when it raises the card, and `waiting: false` as soon as the card is
+ * answered, refused, or expires.
+ *
+ * A host older than this method refuses it with `method-not-allowed`, which is
+ * why the report is fire-and-forget: such a host keeps its own time-based
+ * question, and the extension declares {@link BridgeCaps.waitingReport} so the
+ * host knows which of the two behaviours it is in.
+ */
+export const BRIDGE_TOOL_WAITING_METHOD = 'bridge.toolWaiting'
+
+/**
+ * Read a {@link BRIDGE_TOOL_WAITING_METHOD} payload.
+ *
+ * Anything unusable — a missing id, a non-boolean flag, a non-object payload —
+ * yields `undefined`, so the host ignores the report rather than guessing at a
+ * call's state. Call ids are opaque here, exactly as they are on `tool.call`.
+ *
+ * @param payload - the rpc frame's payload.
+ * @returns the reported call state, or undefined when it is unusable.
+ */
+export function parseToolWaitingPayload(payload: unknown): { id: string; waiting: boolean } | undefined {
+  if (typeof payload !== 'object' || payload === null || Array.isArray(payload)) return undefined
+  const record = payload as { id?: unknown; waiting?: unknown }
+  if (typeof record.id !== 'string' || record.id.trim() === '') return undefined
+  if (typeof record.waiting !== 'boolean') return undefined
+  return { id: record.id, waiting: record.waiting }
+}
+
+/**
  * Internal RPC the panel's Update button uses to fetch this installation's
  * update command.
  *
@@ -359,6 +397,18 @@ export interface BridgeCaps {
    * — a reload may still be the fix, so the two must not be conflated.
    */
   extensionVersion?: string
+  /**
+   * The extension reports when a call starts and stops waiting for the user's
+   * answer in Chrome ({@link BRIDGE_TOOL_WAITING_METHOD}).
+   *
+   * Absent on builds from before that report, and the host must read absence as
+   * "cannot tell": with no report there is no way to separate an approval wait
+   * from an action that is merely slow, so the host keeps its time-based
+   * question instead of losing the nudge entirely. It is a capability rather
+   * than a `toolset` level because it gates no tool and no argument — only how
+   * the host words and times one of its own prompts.
+   */
+  waitingReport?: boolean
   /** Upper bound on one rendered snapshot's characters (plugin config, minimum 500). */
   snapshotMaxChars: number
   /** Upper bound on interactive inventory items per snapshot (plugin config). */
@@ -537,6 +587,7 @@ function isCaps(value: unknown): value is BridgeCaps {
   return (caps.debugger === undefined || typeof caps.debugger === 'boolean')
     && isProto(caps.proto)
     && isToolset(caps.toolset)
+    && (caps.waitingReport === undefined || typeof caps.waitingReport === 'boolean')
     && (caps.extensionId === undefined
       || (typeof caps.extensionId === 'string' && EXTENSION_ID_PATTERN.test(caps.extensionId)))
     // Present-but-empty is malformed rather than "not reported": a build that

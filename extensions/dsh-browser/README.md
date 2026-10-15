@@ -27,7 +27,7 @@ status panel / options / popup ◄─runtime messages─► background SW/event 
                         content script (snapshot/actions/privacy)
 ```
 
-- **background** (`src/background/`): bridge connection (token auth + exponential-backoff reconnect + keepalive), the three bridge-internal RPC calls, and **fail-closed tool dispatch to a user-controlled tab**.
+- **background** (`src/background/`): bridge connection (token auth + exponential-backoff reconnect + keepalive), the five bridge-internal RPC calls, and **fail-closed tool dispatch to a user-controlled tab**.
 - **content script** (`src/content/`): text snapshot (readability main text + numbered interactive inventory + form fields), **stable element numbers** (`data-dsh-el`), delta changes, click/type/press/scroll/navigate actions, and sensitive-field masking.
 - **capture** (`src/background/capture.ts`): Chrome-only screenshots over `chrome.debugger` (`Page.captureScreenshot`). Attach-per-capture, downscale-and-reencode to the host's image limits, detach in `finally`; bytes stay in memory and travel to the host as base64.
 - **panel / options** (`src/panel/`, `src/options/`): minimal React pages — the status panel (also opened as the floating-window popup, per the `statusMode` setting) shows connection state, the controlled tab, recent operations, and pending approvals; the options page manages the bridge URL/token, the UI language (English by default), page sharing, trusted origins, and approval notifications.

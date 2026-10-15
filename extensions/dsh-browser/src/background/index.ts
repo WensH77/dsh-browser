@@ -31,6 +31,7 @@ import {
   BRIDGE_GDRIVE_MOVE_METHOD,
   BRIDGE_OPEN_GDRIVE_FOLDER_METHOD,
   BRIDGE_PATH,
+  BRIDGE_TOOL_WAITING_METHOD,
   BRIDGE_UI_LANGUAGE_METHOD,
   MAX_BINDABLE_TABS,
   formatBindableTab,
@@ -1026,6 +1027,17 @@ async function openBoundTab(sessionId: string, destination: URL): Promise<boolea
 const RECENT_OPS_MAX = 30
 let recentOps: RecentOp[] = []
 
+/**
+ * Tool calls currently waiting for the user's answer, kept apart from the feed.
+ *
+ * The wait edge is a fact about the call, not about the panel: an op can be
+ * cleared or pushed past {@link RECENT_OPS_MAX} while its confirmation card is
+ * still up, and the host times its question from this edge. Tracking the state
+ * here means a dropped feed entry can never swallow the `waiting: false` that
+ * tells the host the wait is over.
+ */
+const waitingToolCalls = new Set<string>()
+
 /** Operations of the currently focused (bound) session only. */
 function activeOps(): RecentOp[] {
   const focused = tabAffinity.focusedSession()
@@ -1060,14 +1072,26 @@ function labelOp(id: string, label: string): void {
  * `noMatch` is only ever consulted for the successful path (see
  * `isEmptyAnswer`), and a settle that does not carry it clears any earlier
  * value, so a state change can never leave a stale mark behind.
+ *
+ * A settle is also the one place the host can learn that a call is waiting for
+ * the user: `waiting` is entered exactly when a confirmation card goes up and
+ * left when that card is answered, refused, or expires, so the transition is
+ * reported from here (see {@link setToolWaiting}).
  */
 function settleOp(id: string, state: RecentOp['state'], noMatch: boolean = false): void {
   const index = recentOps.findIndex((op) => op.id === id)
-  if (index === -1) return
+  if (index === -1) {
+    // The op is not in the feed — the panel cleared it, or it aged out while its
+    // card was up. The wait edge still belongs to the call, and losing the
+    // `false` edge would leave the host asking about a wait that is over.
+    setToolWaiting(id, state === 'waiting')
+    return
+  }
   const op: RecentOp = { ...recentOps[index]!, state, ...(state === 'running' || state === 'waiting' ? {} : { endedAt: Date.now() }) }
   if (noMatch) op.noMatch = true
   else delete op.noMatch
   recentOps = [op, ...recentOps.filter((o) => o.id !== id)].slice(0, RECENT_OPS_MAX)
+  setToolWaiting(id, state === 'waiting')
   refreshBadge()
   if (opVisible(op)) sendUiPush({ type: 'push.op', op })
 }
@@ -1212,6 +1236,53 @@ function reportUiLanguage(): void {
     id: crypto.randomUUID(),
     method: BRIDGE_UI_LANGUAGE_METHOD,
     payload: { language: getUiLocale() },
+  })
+}
+
+/**
+ * Record a call's wait state and tell the host when it changes.
+ *
+ * Kept apart from the op feed on purpose: the feed is a push surface that the
+ * user can clear and that keeps only {@link RECENT_OPS_MAX} entries, while the
+ * host's question is timed from these edges. Both edges must arrive even for a
+ * call whose feed entry is already gone — a lost `false` edge leaves the host
+ * waiting on a card that has been answered.
+ *
+ * @param id - the tool call's own id, the one the host minted in `tool.call`.
+ * @param waiting - true while a confirmation card is up, false otherwise.
+ */
+function setToolWaiting(id: string, waiting: boolean): void {
+  if (waitingToolCalls.has(id) === waiting) return
+  if (waiting) waitingToolCalls.add(id)
+  else waitingToolCalls.delete(id)
+  reportToolWaiting(id, waiting)
+}
+
+/**
+ * Tell the host that a call is (or is no longer) waiting for the user's answer.
+ *
+ * The host cannot see the approval card — it lives in this extension's own UI —
+ * so on its own it can only time how long a call has been silent, which also
+ * fires for an action that is merely slow. This report is what lets it ask about
+ * the confirmation itself, and only while that confirmation is up.
+ *
+ * Fire-and-forget, like the language report: a host older than this method
+ * refuses it, and its own time-based question is what runs then. That is also
+ * why the capability is declared in `hello` (`caps.waitingReport`), so the host
+ * can tell "cannot report" from "not waiting".
+ *
+ * @param id - the tool call's own id, the one the host minted in `tool.call`.
+ * @param waiting - true when the card goes up, false when it is answered,
+ *   refused, or expires.
+ */
+function reportToolWaiting(id: string, waiting: boolean): void {
+  const socket = bridge
+  if (socket === null) return
+  socket.send({
+    t: 'rpc',
+    id: crypto.randomUUID(),
+    method: BRIDGE_TOOL_WAITING_METHOD,
+    payload: { id, waiting },
   })
 }
 
