@@ -27,7 +27,7 @@ dsh 的**纯浏览器操作端**：让模型直接读取并操作你在浏览器
                         content script (snapshot/actions/privacy)
 ```
 
-- **background**（`src/background/`）：桥接连接（token 认证 + 指数退避重连 + 保活）、三个桥接内部 RPC 调用，以及**失败关闭地分发工具到用户受控标签页**。
+- **background**（`src/background/`）：桥接连接（token 认证 + 指数退避重连 + 保活）、五个桥接内部 RPC 调用，以及**失败关闭地分发工具到用户受控标签页**。
 - **content script**（`src/content/`）：文本快照（可读性主文 + 编号交互清单 + 表单字段）、**稳定编号**（`data-dsh-el`）、delta 变化、点击/输入/按键/滚动/导航动作与敏感字段掩码。
 - **截图**（`src/background/capture.ts`）：仅 Chrome，走 `chrome.debugger`（`Page.captureScreenshot`）。每次截取临时 attach、按宿主图片上限缩放重编码、`finally` 里 detach；字节只在内存中，以 base64 经桥接。
 - **panel / options**（`src/panel/`、`src/options/`）：两个精简 React 页面——状态面板（依 `statusMode` 设置，也会以浮窗 popup 打开同一页面）展示连接状态、受控标签页、最近操作与待审批项；options 页管理桥接 URL/token、界面语言（默认英文）、页面共享、信任源与审批通知。

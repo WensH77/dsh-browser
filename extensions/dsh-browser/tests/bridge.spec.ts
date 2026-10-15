@@ -213,6 +213,9 @@ describe('BridgeClient handshake version', () => {
     expect(hello.caps.toolset).toBe(BRIDGE_TOOLSET)
     // The host pins this ID and checks the socket Origin against it.
     expect(hello.caps.extensionId).toBe(EXTENSION_ID)
+    // The host asks about a confirmation instead of about silence only when the
+    // extension says it reports waits; without this flag it never will.
+    expect(hello.caps.waitingReport).toBe(true)
     expect(Object.keys(hello.caps)).not.toContain('textOnly')
     client.stop()
   })

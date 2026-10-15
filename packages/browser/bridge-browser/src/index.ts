@@ -5,8 +5,9 @@
  * The bridge mounts its own upgrade route (`/ext/bridge`) on the host
  * webserver, OUTSIDE the /api trust fence — so it brings its own bearer-token
  * authentication (first frame `hello` within HELLO_TIMEOUT_MS). It is a pure
- * tool channel: it carries browser tool frames plus the two bridge-internal
- * RPCs (gdrive move/folder reveal) and no chat or gateway passthrough. Tools execute by dispatching `tool.call` frames to the
+ * tool channel: it carries browser tool frames plus the five bridge-internal
+ * RPCs (gdrive move/folder reveal, the UI-language and tool-waiting reports,
+ * and the update command) and no chat or gateway passthrough. Tools execute by dispatching `tool.call` frames to the
  * connected extension, which performs the action in the tab explicitly
  * controlled by the user.
  *

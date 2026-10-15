@@ -6,6 +6,7 @@ import {
   BRIDGE_EXTENSION_IDS,
   BRIDGE_PROTO,
   BRIDGE_TOOLSET,
+  BRIDGE_TOOL_WAITING_METHOD,
   BRIDGE_UI_LANGUAGE_METHOD,
   EXTENSION_ID_PATTERN,
   LEGACY_TOOLSET,
@@ -16,6 +17,7 @@ import {
   isServerFrame,
   parseBindableTabs,
   parseBridgeFrame,
+  parseToolWaitingPayload,
   parseUiLanguagePayload,
 } from '../src/protocol.ts'
 
@@ -281,5 +283,56 @@ describe('UI language report', () => {
     expect(parseUiLanguagePayload(null)).toBeUndefined()
     expect(parseUiLanguagePayload(['zh'])).toBeUndefined()
     expect(parseUiLanguagePayload(undefined)).toBeUndefined()
+  })
+})
+
+describe('tool waiting report', () => {
+  // The extension reports the wait for a confirmation card over this method,
+  // and the host words and times its own question from it. The name is a
+  // constant on both sides so a rename cannot quietly turn the report into
+  // `method-not-allowed` — which the host would read as "this build cannot
+  // report", silently restoring the time-based question it exists to replace.
+  it('names the method the extension calls', () => {
+    expect(BRIDGE_TOOL_WAITING_METHOD).toBe('bridge.toolWaiting')
+  })
+
+  it('reads both edges of a wait', () => {
+    expect(parseToolWaitingPayload({ id: 'call-1', waiting: true })).toEqual({ id: 'call-1', waiting: true })
+    expect(parseToolWaitingPayload({ id: 'call-1', waiting: false })).toEqual({ id: 'call-1', waiting: false })
+    // Extra fields are the extension's business, not the host's.
+    expect(parseToolWaitingPayload({ id: 'call-2', waiting: true, name: 'browser_click' }))
+      .toEqual({ id: 'call-2', waiting: true })
+  })
+
+  it('refuses a report it cannot attribute to a call', () => {
+    // An unusable report must not be read as either edge: "true" would raise a
+    // question about a call nobody is waiting on, and "false" would cancel a
+    // question that is still true.
+    expect(parseToolWaitingPayload({ waiting: true })).toBeUndefined()
+    expect(parseToolWaitingPayload({ id: '', waiting: true })).toBeUndefined()
+    expect(parseToolWaitingPayload({ id: '   ', waiting: true })).toBeUndefined()
+    expect(parseToolWaitingPayload({ id: 7, waiting: true })).toBeUndefined()
+    expect(parseToolWaitingPayload({ id: 'call-1' })).toBeUndefined()
+    expect(parseToolWaitingPayload({ id: 'call-1', waiting: 'true' })).toBeUndefined()
+    expect(parseToolWaitingPayload('call-1')).toBeUndefined()
+    expect(parseToolWaitingPayload(['call-1'])).toBeUndefined()
+    expect(parseToolWaitingPayload(null)).toBeUndefined()
+    expect(parseToolWaitingPayload(undefined)).toBeUndefined()
+  })
+
+  it('accepts the capability a reporting build declares, and only as a boolean', () => {
+    // Present-but-unusable is malformed rather than "not reported": a host that
+    // read `'yes'` as absent would keep the time-based question and never learn
+    // why, since the extension believes it declared the report.
+    const hello = (waitingReport: unknown): unknown => parseBridgeFrame(JSON.stringify({
+      t: 'hello',
+      token: 't',
+      caps: { snapshotMaxChars: 32_000, maxInteractiveItems: 60, waitingReport },
+    }))
+    expect(hello(true)).toBeDefined()
+    expect(hello(false)).toBeDefined()
+    expect(hello(undefined)).toBeDefined()
+    expect(hello('yes')).toBeUndefined()
+    expect(hello(1)).toBeUndefined()
   })
 })

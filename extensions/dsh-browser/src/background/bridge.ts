@@ -219,6 +219,10 @@ export class BridgeClient {
           proto: BRIDGE_PROTO,
           toolset: BRIDGE_TOOLSET,
           debugger: this.debugEnabled() && visionAvailable(),
+          // This build tells the host when a call starts and stops waiting for
+          // the user's answer in Chrome (`bridge.toolWaiting`), so a host that
+          // reads this flag asks about a confirmation rather than about silence.
+          waitingReport: true,
           ...extensionId === '' ? {} : { extensionId },
           ...extensionVersion === '' ? {} : { extensionVersion },
           snapshotMaxChars: DEFAULT_SNAPSHOT_MAX_CHARS,

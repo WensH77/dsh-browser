@@ -6,11 +6,11 @@
  * fence (which only guards the client-connection routes), so the bridge brings
  * its own authentication: a bearer token presented in the `hello` frame within
  * HELLO_TIMEOUT_MS. The bridge is a pure tool channel: it carries no chat,
- * settings, credentials, or gateway passthrough. Four bridge-internal RPCs
+ * settings, credentials, or gateway passthrough. Five bridge-internal RPCs
  * remain (`bridge.gdrive.moveIntoSession`, `bridge.openGDriveFolder`,
- * `bridge.uiLanguage`, `bridge.updateCommand`), serviced directly by plugin
- * dependencies or recorded for this connection; every other RPC method is
- * refused.
+ * `bridge.uiLanguage`, `bridge.toolWaiting`, `bridge.updateCommand`), serviced
+ * directly by plugin dependencies or recorded for this connection; every other
+ * RPC method is refused.
  *
  * One active connection at a time: a new authenticated socket replaces the
  * previous one (the old socket is closed and its in-flight tool calls settle
@@ -28,6 +28,7 @@ import {
   EXTENSION_UNVERIFIED_CLOSE_CODE,
   BRIDGE_GDRIVE_MOVE_METHOD,
   BRIDGE_OPEN_GDRIVE_FOLDER_METHOD,
+  BRIDGE_TOOL_WAITING_METHOD,
   BRIDGE_UI_LANGUAGE_METHOD,
   BRIDGE_UPDATE_COMMAND_METHOD,
   HANDSHAKE_MISMATCH_CLOSE_CODE,
@@ -35,6 +36,7 @@ import {
   PING_INTERVAL_MS,
   handshakeRefusal,
   parseBridgeFrame,
+  parseToolWaitingPayload,
   parseUiLanguagePayload,
   type BridgeFrame,
   type BridgeCaps,
@@ -125,6 +127,13 @@ interface PendingTool {
   resolve: (result: unknown) => void
   reject: (error: BridgeToolError) => void
   timer: NodeJS.Timeout
+  /**
+   * Called when the extension reports this call entering or leaving a wait for
+   * the user's answer in Chrome; absent when the caller passed none, or when
+   * the connected extension cannot report (see
+   * {@link BridgeServer.clientReportsWaiting}).
+   */
+  onWaiting?: (waiting: boolean) => void
 }
 
 /** A socket that passed authentication and owns the single active slot. */
@@ -214,6 +223,10 @@ export class BridgeServer {
    * @param signal - caller cancellation (abort settles the call as cancelled).
    * @param timeoutMs - per-call budget; defaults to the plugin config value.
    * @param sessionId - optional owning Agent session for approval continuity.
+   * @param onWaiting - called when the extension reports this call entering
+   *   (`true`) or leaving (`false`) a wait for the user's answer in Chrome. It
+   *   only ever fires on a build that declares
+   *   {@link BridgeServer.clientReportsWaiting}; the call itself is unaffected.
    * @returns the extension's action result.
    * @throws BridgeToolError when no extension is connected, the call times
    *   out, is cancelled, or the extension reports a failure.
@@ -224,6 +237,7 @@ export class BridgeServer {
     signal: AbortSignal,
     timeoutMs: number = this.deps.toolTimeoutMs,
     sessionId?: string,
+    onWaiting?: (waiting: boolean) => void,
   ): Promise<unknown> {
     const conn = this.current
     if (conn === null) {
@@ -266,7 +280,7 @@ export class BridgeServer {
           + 'Check Chrome (the extension marks a waiting prompt on its toolbar badge), then retry or raise toolTimeoutMs.'))
       }, timeoutMs)
       signal.addEventListener('abort', onAbort, { once: true })
-      this.pendingTools.set(id, { resolve, reject, timer })
+      this.pendingTools.set(id, { resolve, reject, timer, ...onWaiting === undefined ? {} : { onWaiting } })
       conn.ws.send(JSON.stringify({
         t: 'tool.call',
         id,
@@ -416,6 +430,21 @@ export class BridgeServer {
   }
 
   /**
+   * Whether the connected extension reports when a call is waiting for the
+   * user's answer in Chrome ({@link BRIDGE_TOOL_WAITING_METHOD}).
+   *
+   * False for a build that predates the report, and false with nothing
+   * connected: in both cases the host cannot tell an approval wait from an
+   * action that is merely slow, so the caller keeps its time-based question
+   * rather than staying silent forever.
+   *
+   * @returns true when this connection's reports can be relied on.
+   */
+  clientReportsWaiting(): boolean {
+    return this.clientCaps?.waitingReport === true
+  }
+
+  /**
    * The build version the connected extension reported in its last `hello`, or
    * undefined when nothing is connected or the build is too old to report one.
    *
@@ -464,7 +493,7 @@ export class BridgeServer {
   }
 
   /**
-   * Service the four bridge-internal RPC methods only; every other method is
+   * Service the bridge-internal RPC methods only; every other method is
    * refused. The bridge carries no gateway passthrough: chat, settings, and
    * credentials all belong to standard dsh clients now.
    */
@@ -473,6 +502,20 @@ export class BridgeServer {
     /* v8 ignore next -- replacement race: a frame can land between a socket
     replacement and the next promotion; the re-check keeps the handler total */
     if (conn === null) return
+    if (frame.method === BRIDGE_TOOL_WAITING_METHOD) {
+      const report = parseToolWaitingPayload(frame.payload)
+      if (report === undefined) {
+        sendFrame(conn.ws, { t: 'rpc.result', id: frame.id, ok: false, error: { code: 'bad-request', message: 'id must be a non-empty string and waiting a boolean' } })
+        return
+      }
+      // A report for a call that is no longer in flight (already settled, or
+      // cancelled while the card was up) is dropped: the state it describes is
+      // over, and inventing a call from it would let a stale report start a
+      // prompt for nothing.
+      this.pendingTools.get(report.id)?.onWaiting?.(report.waiting)
+      sendFrame(conn.ws, { t: 'rpc.result', id: frame.id, ok: true, result: { id: report.id, waiting: report.waiting } })
+      return
+    }
     if (frame.method === BRIDGE_UI_LANGUAGE_METHOD) {
       const language = parseUiLanguagePayload(frame.payload)
       if (language === undefined) {
