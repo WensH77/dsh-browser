@@ -53,10 +53,12 @@ The installer copies the unpacked extension to `~/.dsh/browser-extension` and op
 
 Frames are JSON objects discriminated by `t`, defined in [`protocol.ts`](src/protocol.ts) — the single source of truth shared with the extension through the workspace package's `./src/*` export. The built package also publishes `dsh-bridge-browser/protocol` for external consumers.
 
-- Client → server: `hello` (auth + caps), `rpc` (one of the two GDrive methods, or the UI-language report), `tool.result`, `pong`.
+- Client → server: `hello` (auth + caps), `rpc` (the GDrive pair, the UI-language report, the tool-waiting report, the bindings report, or the update-command request), `tool.result`, `pong`.
 - Server → client: `hello.ok` (echoes negotiated caps), `rpc.result`, `tool.call`, `tool.cancel`, `ping`, `error`.
 
 `tool.call` carries a stable id the extension echoes back on its `tool.result`; `expiresAt` lets a stale call settle as `timeout`. The bridge is a request/response channel only — once auth completes, no event frames flow.
+
+Two plain HTTP routes sit beside the socket: `GET /ext/bridge-config` (the zero-config WebSocket URL) and `GET /bridge-browser/bindings` (the last session-to-tab report, for the dsh Web GUI's session indicator). The second is outside the `/api` trust fence, so it applies the connection service's Host/Origin and browser-authentication check itself and falls back to a loopback peer plus loopback `Host` when no connection service is mounted. It serves session ids and tab ids only — not titles and not URLs: the GUI marks rows by session id, and a tab title can carry page content that only the extension panel needs to show.
 
 Both halves negotiate versions in `hello`/`hello.ok`: `proto` is the handshake version (a build that sends none reads as 1) and `toolset` is the extension's feature level (none = 0). A host that cannot serve a newer extension closes with code `4003` and a reason the extension shows verbatim; an extension that declares an older level gets a narrowed tool surface (no `browser_dom_query`/`browser_block`/`browser_headers`, and `browser_click`/`browser_type` without `selector` — below level 6 also without `browser_click`'s `option` and `browser_dom_query`'s `options`, which the host refuses with a next step rather than letting the older build drop the argument and report a click that did nothing) instead of argument errors at call time. The extension shows the same skew in its options page and side panel, naming the fix (restart dsh, or reload the extension).
 
@@ -99,6 +101,7 @@ Loopback sockets may skip the bearer token, but only for one extension: the `Ori
 ## Known Limitations and Deferred Work
 
 - One active extension connection (a second window replaces the first).
+- The GUI's session indicator covers sidebar session rows only: the search-results list draws its own row element without a session key, and a subagent that drives the browser has no row of its own (its parent session is not marked either).
 - Accessible cross-origin iframes are snapshotted and operated with stable `(frame, index)` addresses. Restricted or short-lived frames are reported as unavailable without failing the whole page snapshot.
 - Token rotation is manual (edit `~/.dsh/ext-bridge-token` or set `token` in config); no expiry.
 - Approval is enforced in the extension service worker rather than delegated to model behavior. A future dsh tool-pipeline integration may surface the same policy in other clients.

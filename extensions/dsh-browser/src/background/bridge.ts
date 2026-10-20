@@ -223,6 +223,11 @@ export class BridgeClient {
           // the user's answer in Chrome (`bridge.toolWaiting`), so a host that
           // reads this flag asks about a confirmation rather than about silence.
           waitingReport: true,
+          // This build reports session-to-tab bindings (`bridge.bindings`), so
+          // the dsh Web GUI can mark the session holding the browser. A host
+          // that does not know the method refuses it, and this flag is how the
+          // host tells a silent build from an unbound one.
+          bindingsReport: true,
           ...extensionId === '' ? {} : { extensionId },
           ...extensionVersion === '' ? {} : { extensionVersion },
           snapshotMaxChars: DEFAULT_SNAPSHOT_MAX_CHARS,

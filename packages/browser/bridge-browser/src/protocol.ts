@@ -57,6 +57,101 @@ export const BRIDGE_UI_LANGUAGE_METHOD = 'bridge.uiLanguage'
 export const BRIDGE_TOOL_WAITING_METHOD = 'bridge.toolWaiting'
 
 /**
+ * Internal RPC the extension uses to report which sessions currently own a
+ * controlled tab.
+ *
+ * The host serves that report to the dsh Web GUI, whose session list marks the
+ * session holding the browser. It is a report over the existing `rpc` frame
+ * rather than a new frame type on purpose: an older host answers an unknown
+ * method with `method-not-allowed` and keeps the socket, while an unknown frame
+ * would make it close the connection as unparseable. Fire-and-forget like the
+ * other internal reports — a host too old to know the method simply has no
+ * bindings to show, and the extension declares {@link BridgeCaps.bindingsReport}
+ * so the host can tell "cannot report" from "nothing bound".
+ *
+ * The report carries session ids and tab metadata only. Page contents, URLs,
+ * and the controlled-tab state machine stay in the extension and its panel.
+ */
+export const BRIDGE_BINDINGS_METHOD = 'bridge.bindings'
+
+/**
+ * Exact web route serving the last {@link BRIDGE_BINDINGS_METHOD} report.
+ *
+ * Registered outside the `/api` trust fence, so its handler applies the
+ * connection's Host/Origin and browser-authentication check itself.
+ */
+export const BRIDGE_BINDINGS_PATH = '/bridge-browser/bindings'
+
+/** One session-to-tab binding as reported to the host. */
+export interface BindingEntry {
+  /** The dsh session that owns the tab (the `tool.call.sessionId` the host minted). */
+  sessionId: string
+  /** Chrome tab id the session is bound to. */
+  tabId: number
+  /** Chrome window id owning that tab. */
+  windowId: number
+  /** The tab's title, for a hover cue; never its URL. */
+  title: string
+}
+
+/** One full bindings snapshot reported by the extension. */
+export interface BindingsReport {
+  /**
+   * The affinity controller's revision at report time. Lets a polling reader
+   * skip work when nothing changed, and lets a stale report be recognised.
+   */
+  revision: number
+  /** The session the extension's panel is showing, or null when none is. */
+  focusedSessionId: string | null
+  /**
+   * Every session holding a tab. The controller currently allows one binding
+   * at a time, so this holds at most one entry; the array shape is what keeps
+   * that an implementation detail rather than a wire decision.
+   */
+  bindings: BindingEntry[]
+}
+
+/**
+ * Read a {@link BRIDGE_BINDINGS_METHOD} payload.
+ *
+ * Anything unusable — a missing revision, a malformed entry, a negative id —
+ * yields `undefined`, so the host keeps its previous snapshot rather than
+ * publishing a half-parsed one. Extra fields are ignored: the extension may
+ * say more in a later build.
+ *
+ * @param payload - the rpc frame's payload.
+ * @returns the validated report, or undefined when it is unusable.
+ */
+export function parseBindingsReport(payload: unknown): BindingsReport | undefined {
+  if (typeof payload !== 'object' || payload === null || Array.isArray(payload)) return undefined
+  const record = payload as { revision?: unknown; focusedSessionId?: unknown; bindings?: unknown }
+  if (typeof record.revision !== 'number' || !Number.isInteger(record.revision) || record.revision < 0) return undefined
+  if (record.focusedSessionId !== null
+    && (typeof record.focusedSessionId !== 'string' || record.focusedSessionId.trim() === '')) return undefined
+  if (!Array.isArray(record.bindings)) return undefined
+  const bindings: BindingEntry[] = []
+  for (const raw of record.bindings) {
+    if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return undefined
+    const entry = raw as { sessionId?: unknown; tabId?: unknown; windowId?: unknown; title?: unknown }
+    if (typeof entry.sessionId !== 'string' || entry.sessionId.trim() === '') return undefined
+    if (typeof entry.tabId !== 'number' || !Number.isInteger(entry.tabId) || entry.tabId < 0) return undefined
+    if (typeof entry.windowId !== 'number' || !Number.isInteger(entry.windowId) || entry.windowId < 0) return undefined
+    if (typeof entry.title !== 'string') return undefined
+    bindings.push({
+      sessionId: entry.sessionId,
+      tabId: entry.tabId,
+      windowId: entry.windowId,
+      title: entry.title,
+    })
+  }
+  return {
+    revision: record.revision,
+    focusedSessionId: record.focusedSessionId as string | null,
+    bindings,
+  }
+}
+
+/**
  * Read a {@link BRIDGE_TOOL_WAITING_METHOD} payload.
  *
  * Anything unusable — a missing id, a non-boolean flag, a non-object payload —
@@ -409,6 +504,18 @@ export interface BridgeCaps {
    * the host words and times one of its own prompts.
    */
   waitingReport?: boolean
+  /**
+   * The extension reports which sessions hold a controlled tab
+   * ({@link BRIDGE_BINDINGS_METHOD}).
+   *
+   * Absent on builds from before that report, and absence must read as "cannot
+   * report", not as "nothing is bound": the dsh Web GUI's session indicator
+   * would otherwise claim the browser is free while a session is driving it.
+   * Like {@link waitingReport}, this gates no tool and no argument — only a
+   * surface the host composes itself — so it is a capability rather than a
+   * `toolset` level.
+   */
+  bindingsReport?: boolean
   /** Upper bound on one rendered snapshot's characters (plugin config, minimum 500). */
   snapshotMaxChars: number
   /** Upper bound on interactive inventory items per snapshot (plugin config). */
@@ -588,6 +695,7 @@ function isCaps(value: unknown): value is BridgeCaps {
     && isProto(caps.proto)
     && isToolset(caps.toolset)
     && (caps.waitingReport === undefined || typeof caps.waitingReport === 'boolean')
+    && (caps.bindingsReport === undefined || typeof caps.bindingsReport === 'boolean')
     && (caps.extensionId === undefined
       || (typeof caps.extensionId === 'string' && EXTENSION_ID_PATTERN.test(caps.extensionId)))
     // Present-but-empty is malformed rather than "not reported": a build that

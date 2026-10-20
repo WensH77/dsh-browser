@@ -199,6 +199,9 @@ importers:
       '@types/ws':
         specifier: ^8.18.1
         version: 8.18.1
+      jsdom:
+        specifier: 26.1.0
+        version: 26.1.0
       tsdown:
         specifier: 0.22.2
         version: 0.22.2(typescript@6.0.3)

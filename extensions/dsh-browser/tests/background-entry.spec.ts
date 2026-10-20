@@ -35,8 +35,15 @@ class FakeSocket {
   static readonly CLOSED = 3
   static readonly instances: FakeSocket[] = []
 
+  /**
+   * Whether a `hello` is acknowledged automatically. Tests that need to observe
+   * the open-but-unauthenticated window turn this off and answer by hand.
+   */
+  static autoAck = true
+
   static reset(): void {
     FakeSocket.instances.length = 0
+    FakeSocket.autoAck = true
   }
 
   readyState = FakeSocket.CONNECTING
@@ -63,7 +70,7 @@ class FakeSocket {
   send(data: string): void {
     this.sent.push(data)
     const frame = JSON.parse(data) as Frame
-    if (frame.t !== 'hello') return
+    if (frame.t !== 'hello' || !FakeSocket.autoAck) return
     queueMicrotask(() => {
       this.receive({
         t: 'hello.ok',
@@ -125,6 +132,16 @@ interface Harness {
   bind: (tabId: number, sessionId: string) => Promise<void>
   /** Close a tab: the real `chrome.tabs.onRemoved` handler runs, as in Chrome. */
   closeTab: (tabId: number) => void
+  /** Answer the pending `hello` when automatic acknowledgement is off. */
+  acceptHandshake: () => void
+  /** Fire the real `chrome.tabs.onActivated` handler. */
+  activateTab: (tabId: number, windowId: number) => void
+  /** Deliver a message the way this extension's content script would. */
+  contentMessage: (message: unknown, sender?: Frame) => void
+  /** Tab navigations the background performed, in order. */
+  navigations: () => Frame[]
+  /** Tabs the background asked Chrome to create, with the properties it passed. */
+  tabCreations: () => Frame[]
 }
 
 /**
@@ -143,15 +160,29 @@ async function boot(
    * before this parameter existed.
    */
   contentScript?: (message: Frame) => unknown,
+  /**
+   * Wait for the handshake to complete before returning. Off for tests that
+   * must observe the open-but-unauthenticated window (`FakeSocket.autoAck` is
+   * then false and the caller answers with `acceptHandshake`).
+   */
+  awaitConnected = true,
+  /** Acknowledge the hello automatically; off to observe the handshake window. */
+  autoAck = true,
+  /** What chrome.storage.session holds at startup (the restored affinity table). */
+  storedSession: Frame = {},
 ): Promise<Harness> {
   FakeSocket.reset()
+  FakeSocket.autoAck = autoAck
   const messageListeners: Listener[] = []
   const notifications = vi.fn(async (_id: string, _options?: unknown) => 'notification-1')
   const runtimeMessages: Frame[] = []
   const storageWrites: Frame[] = []
   const sessionStorageWrites: Frame[] = []
   const tabRemovedListeners: Listener[] = []
+  const tabActivatedListeners: Listener[] = []
   const closedTabs = new Set<number>()
+  const navigations: Frame[] = []
+  const tabCreations: Frame[] = []
 
   const chromeApi = {
     runtime: {
@@ -168,7 +199,7 @@ async function boot(
         set: async (value: Frame) => { storageWrites.push(value) },
       },
       session: {
-        get: async () => ({}),
+        get: async () => storedSession,
         set: async (value: Frame) => { sessionStorageWrites.push(value) },
         remove: async () => undefined,
       },
@@ -179,8 +210,17 @@ async function boot(
         if (tabId !== undefined && closedTabs.has(tabId)) throw new Error(`No tab with id: ${tabId}`)
         return activeTab
       },
-      update: async () => activeTab,
-      create: async () => activeTab,
+      update: async (tabId: number, props?: { url?: string }) => {
+        navigations.push({ kind: 'update', tabId, ...(props?.url === undefined ? {} : { url: props.url }) })
+        return activeTab
+      },
+      goBack: async (tabId: number) => { navigations.push({ kind: 'goBack', tabId }) },
+      goForward: async (tabId: number) => { navigations.push({ kind: 'goForward', tabId }) },
+      reload: async (tabId: number) => { navigations.push({ kind: 'reload', tabId }) },
+      create: async (props?: { url?: string; active?: boolean }) => {
+        tabCreations.push({ ...props })
+        return activeTab
+      },
       // No content script in this fake. An approved call therefore fails at its
       // action step — which is fine: this spec is about whether a card was
       // raised, not about what the page did. A test that does care hands in one.
@@ -188,7 +228,7 @@ async function boot(
         if (contentScript === undefined) throw new Error('Could not establish connection. Receiving end does not exist.')
         return contentScript(message)
       },
-      onActivated: { addListener: () => undefined },
+      onActivated: { addListener: (listener: Listener) => { tabActivatedListeners.push(listener) } },
       onUpdated: { addListener: () => undefined },
       onReplaced: { addListener: () => undefined },
       // Real listener on purpose: closing a tab is what prunes the binding, and
@@ -243,11 +283,19 @@ async function boot(
     expect(first).toBeDefined()
     return first!
   })
+  // The hello frame is the readiness signal both modes share: with automatic
+  // acknowledgement it is followed by hello.ok, and without it the caller
+  // answers by hand. Waiting for `open` alone would race that microtask.
+  await vi.waitFor(() => {
+    expect(socket.sent.some((raw) => (JSON.parse(raw) as Frame).t === 'hello')).toBe(true)
+  })
   // The worker reports every state change to the UI: 'connected' means the real
   // handshake completed, so a `tool.call` frame will now be routed.
-  await vi.waitFor(() => {
-    expect(runtimeMessages.some((message) => message.type === 'push.status' && message.state === 'connected')).toBe(true)
-  })
+  if (awaitConnected) {
+    await vi.waitFor(() => {
+      expect(runtimeMessages.some((message) => message.type === 'push.status' && message.state === 'connected')).toBe(true)
+    })
+  }
 
   const results = (id: string): Frame[] => socket.sent
     .map((raw) => JSON.parse(raw) as Frame)
@@ -311,6 +359,28 @@ async function boot(
       closedTabs.add(tabId)
       for (const listener of tabRemovedListeners) (listener as (tabId: number) => void)(tabId)
     },
+    acceptHandshake: () => socket.receive({
+      t: 'hello.ok',
+      caps: { proto: 3, toolset: 5, debugger: false, snapshotMaxChars: 32_000, maxInteractiveItems: 60 },
+    }),
+    activateTab: (tabId, windowId) => {
+      for (const listener of tabActivatedListeners) (listener as (event: { tabId: number; windowId: number }) => void)({ tabId, windowId })
+    },
+    contentMessage: (message, sender) => {
+      for (const listener of messageListeners) {
+        (listener as (
+          message: unknown,
+          sender: unknown,
+          sendResponse: (value: unknown) => void,
+        ) => void)(
+          message,
+          { id: EXTENSION_ID, tab: { id: activeTab.id }, frameId: 0, url: activeTab.url, ...sender },
+          () => undefined,
+        )
+      }
+    },
+    navigations: () => [...navigations],
+    tabCreations: () => [...tabCreations],
     answer: (id, decision) => {
       for (const listener of messageListeners) {
         (listener as (
@@ -841,6 +911,92 @@ describe('background entry UI language', () => {
  * sending the rpc, or one that sends a method name the host does not have — so
  * this drives the real entry with the fakes and reads the frames it sent.
  */
+describe('background entry content navigation', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    vi.restoreAllMocks()
+  })
+
+  it('performs a top-frame navigation the content script hands over', async () => {
+    const harness = await boot()
+    await harness.bind(APP_TAB.id, 's1')
+
+    harness.contentMessage({ type: 'DSH_CONTENT_NAVIGATE', url: 'https://app.example/next' })
+    await vi.waitFor(() => {
+      expect(harness.navigations()).toContainEqual({
+        kind: 'update',
+        tabId: APP_TAB.id,
+        url: 'https://app.example/next',
+      })
+    })
+  })
+
+  it('moves history and reload onto the browser process too', async () => {
+    const harness = await boot()
+    await harness.bind(APP_TAB.id, 's1')
+
+    harness.contentMessage({ type: 'DSH_CONTENT_HISTORY', delta: -1 })
+    harness.contentMessage({ type: 'DSH_CONTENT_HISTORY', delta: 1 })
+    harness.contentMessage({ type: 'DSH_CONTENT_RELOAD' })
+    await vi.waitFor(() => {
+      expect(harness.navigations()).toEqual(expect.arrayContaining([
+        { kind: 'goBack', tabId: APP_TAB.id },
+        { kind: 'goForward', tabId: APP_TAB.id },
+        { kind: 'reload', tabId: APP_TAB.id },
+      ]))
+    })
+  })
+
+  it('refuses a navigation request that did not come from this extension\'s top frame of a controlled tab', async () => {
+    const harness = await boot()
+    const message = { type: 'DSH_CONTENT_NAVIGATE', url: 'https://app.example/next' }
+
+    // Nothing bound yet.
+    harness.contentMessage(message)
+    // A subframe, another extension, and a malformed URL.
+    await harness.bind(APP_TAB.id, 's1')
+    harness.contentMessage(message, { frameId: 3 })
+    harness.contentMessage(message, { id: 'some-other-extension' })
+    harness.contentMessage({ type: 'DSH_CONTENT_NAVIGATE', url: 'javascript:alert(1)' })
+    await new Promise((resolve) => setTimeout(resolve, 20))
+
+    expect(harness.navigations().filter((entry) => entry.url !== undefined)).toHaveLength(0)
+  })
+})
+
+/**
+ * The only navigate that creates a tab must not take the user's focus.
+ *
+ * Every later navigate reuses the bound tab through `tabs.update`, so this is
+ * the one place the question exists. The reported symptom was being pulled out
+ * of the dsh chat on a session's first navigate — the hard-coded `active: true`.
+ */
+describe('background entry initial navigation', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    vi.restoreAllMocks()
+  })
+
+  it('opens the new tab behind the current one and says so in the result', async () => {
+    const harness = await boot()
+    harness.call({
+      id: 'c1',
+      name: 'browser_navigate',
+      args: { url: 'https://app.example/next' },
+      sessionId: 's1',
+    })
+    harness.answer(await card(harness, 1), 'allow-once')
+    const frame = await harness.settle('c1')
+
+    expect(frame.ok).toBe(true)
+    expect(harness.tabCreations()).toEqual([{ url: 'https://app.example/next', active: false }])
+    // The model has to know the user is not looking at the new tab: the known
+    // background-tab behaviour (focus events, screenshot freshness) follows
+    // from it, and the panel only shows the operation.
+    expect(String((frame.result as Frame).text)).toContain('new background tab')
+  })
+})
+
 describe('background entry update command', () => {
   afterEach(() => {
     vi.unstubAllGlobals()
@@ -898,5 +1054,158 @@ describe('background entry update command', () => {
     const response = await answered as { command?: unknown, error?: unknown }
     expect(response.command).toBeUndefined()
     expect(String(response.error)).toContain('bridge refuses RPC method bridge.updateCommand')
+  })
+})
+
+/**
+ * The bindings table the worker reports to the host.
+ *
+ * The dsh Web GUI marks the session holding the browser from this table, and
+ * only the extension knows it: a bind and the panel's Unbind both change it,
+ * and the host has no other way to learn about the release. The report is
+ * fire-and-forget over the rpc channel, so these tests read the frames the
+ * worker actually sent rather than an internal call.
+ */
+describe('background entry bindings report', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    vi.restoreAllMocks()
+  })
+
+  /** The `bridge.bindings` frames the worker sent, in order. */
+  function bindingsReports(harness: Harness): Frame[] {
+    return harness.sentFrames().filter((frame) => frame.t === 'rpc' && frame.method === 'bridge.bindings')
+  }
+
+  /** The bindings array of one report, as the host reads it. */
+  function reportedBindings(frame: Frame): unknown[] {
+    const payload = frame.payload as { bindings?: unknown[] }
+    return Array.isArray(payload.bindings) ? payload.bindings : []
+  }
+
+  it('reports an empty table on a fresh connection', async () => {
+    const harness = await boot()
+
+    // The first report waits for the restored affinity table, so it lands a
+    // microtask after hello.ok — not synchronously with `boot()`.
+    const reports = await vi.waitFor(() => {
+      const seen = bindingsReports(harness)
+      expect(seen.length).toBeGreaterThan(0)
+      return seen
+    })
+
+    expect(reports[0]).toMatchObject({
+      t: 'rpc',
+      method: 'bridge.bindings',
+      payload: {
+        focusedSessionId: null,
+        bindings: [],
+      },
+    })
+    expect(typeof (reports[0]!.payload as { revision?: unknown }).revision).toBe('number')
+  })
+
+  it('reports the session and tab a bind created', async () => {
+    const harness = await boot()
+    await harness.bind(APP_TAB.id, 's1')
+
+    const report = await vi.waitFor(() => {
+      const bound = bindingsReports(harness).filter((frame) => reportedBindings(frame).length === 1)
+      expect(bound.length).toBeGreaterThan(0)
+      return bound.at(-1)!
+    })
+
+    expect(report.payload).toMatchObject({
+      focusedSessionId: 's1',
+      bindings: [{
+        sessionId: 's1',
+        tabId: APP_TAB.id,
+        windowId: APP_TAB.windowId,
+        title: APP_TAB.title,
+      }],
+    })
+  })
+
+  it('reports an empty table after the panel unbinds the session', async () => {
+    const harness = await boot()
+    await harness.bind(APP_TAB.id, 's1')
+    // Wait for the bind report first, so the empty boot report cannot be
+    // mistaken for the release this test is about.
+    await vi.waitFor(() => {
+      expect(bindingsReports(harness).some((frame) => reportedBindings(frame).length === 1)).toBe(true)
+    })
+
+    const answered = await harness.uiRequest({ type: 'session.unbind' }) as { accepted?: unknown }
+    expect(answered.accepted).toBe(true)
+
+    const report = await vi.waitFor(() => {
+      const last = bindingsReports(harness).at(-1)
+      expect(last).toBeDefined()
+      expect(reportedBindings(last!)).toHaveLength(0)
+      return last!
+    })
+
+    expect(report.payload).toMatchObject({ focusedSessionId: null, bindings: [] })
+  })
+
+  it('sends no binding report before the host accepts the handshake', async () => {
+    // A restored binding plus a tab close, all while hello.ok is still pending:
+    // this is the window in which affinity broadcasts really do fire (the
+    // worker restores its table as it starts). The host accepts only `hello`
+    // until it authenticates the socket, and closes anything else as
+    // `1008 hello first` — so the report has to wait.
+    const affinity = {
+      controlledTabId: APP_TAB.id,
+      sessionTabs: { s1: { ...APP_TAB } },
+      focusedSessionId: 's1',
+    }
+    const harness = await boot(APP_TAB, { bridgeUrl: BRIDGE_URL }, undefined, false, false, {
+      dshTabAffinity: affinity,
+    })
+    const affinityPushes = (): Frame[] => harness.uiPushes().filter((push) => push.type === 'push.affinity')
+    await vi.waitFor(() => {
+      expect(affinityPushes().length).toBeGreaterThan(0)
+    })
+
+    const pushesBefore = affinityPushes().length
+    harness.closeTab(APP_TAB.id)
+    await vi.waitFor(() => {
+      expect(affinityPushes().length).toBeGreaterThan(pushesBefore)
+    })
+    // The panel heard about the close; the host did not, because the socket is
+    // authenticating.
+    expect(bindingsReports(harness)).toHaveLength(0)
+
+    harness.acceptHandshake()
+    const report = await vi.waitFor(() => {
+      const seen = bindingsReports(harness)
+      expect(seen.length).toBeGreaterThan(0)
+      return seen.at(-1)!
+    })
+
+    // The first authenticated report is sent even though nothing changed since
+    // the suppression above: a fresh connection starts from nothing on the host.
+    expect(reportedBindings(report)).toHaveLength(0)
+    expect(report.payload).toMatchObject({ focusedSessionId: null })
+  })
+
+  it('skips a report when an affinity broadcast left the table unchanged', async () => {
+    const harness = await boot()
+    await harness.bind(APP_TAB.id, 's1')
+    await vi.waitFor(() => {
+      expect(bindingsReports(harness).some((frame) => reportedBindings(frame).length === 1)).toBe(true)
+    })
+    const reportsBefore = bindingsReports(harness).length
+    const affinityPushes = (): Frame[] => harness.uiPushes().filter((push) => push.type === 'push.affinity')
+    const pushesBefore = affinityPushes().length
+
+    // Switching to another tab bumps the affinity controller's revision for the
+    // panel, but the session-to-tab table is untouched.
+    harness.activateTab(APP_TAB.id + 1, APP_TAB.windowId)
+    await vi.waitFor(() => {
+      expect(affinityPushes().length).toBeGreaterThan(pushesBefore)
+    })
+
+    expect(bindingsReports(harness)).toHaveLength(reportsBefore)
   })
 })

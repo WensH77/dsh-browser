@@ -4,7 +4,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import WebSocket from 'ws'
 import { BridgeServer, BridgeToolError, isLoopbackAddress, messageToText, payloadCode, payloadMessage, payloadNeedsPageChoice } from '../src/server.ts'
 import type { BridgeFrame } from '../src/protocol.ts'
-import { BRIDGE_EXTENSION_IDS, BRIDGE_PROTO, BRIDGE_TOOLSET, EXTENSION_UNVERIFIED_CLOSE_CODE, HANDSHAKE_MISMATCH_CLOSE_CODE } from '../src/protocol.ts'
+import { BRIDGE_BINDINGS_METHOD, BRIDGE_EXTENSION_IDS, BRIDGE_PROTO, BRIDGE_TOOLSET, EXTENSION_UNVERIFIED_CLOSE_CODE, HANDSHAKE_MISMATCH_CLOSE_CODE } from '../src/protocol.ts'
 import { UPDATE_RAW_BASE, currentInstallMode, currentPlatform, updateCommand } from '../src/update-source.ts'
 
 const TOKEN = 'deadbeefdeadbeefdeadbeefdeadbeef'
@@ -334,6 +334,110 @@ describe('BridgeServer', () => {
 
     expect(h.bridge.clientUiLanguage()).toBeUndefined()
     second.ws.close()
+  })
+
+  it('records the bindings table the extension reports over the rpc channel', async () => {
+    const h = await startBridge()
+    harnesses.push(h)
+    const { ws, frames } = await connect(h.url)
+    // The capability is what tells the host these reports exist at all; the
+    // route serves `supported: true` from it.
+    expect(h.bridge.clientSupportsBindings()).toBe(false)
+    send(ws, { t: 'hello', token: TOKEN, caps: { ...CAPS, bindingsReport: true } })
+    await waitFor(() => frames.some((f) => f.t === 'hello.ok'))
+    // "Supported, nothing reported yet" is not "nothing is bound": the route
+    // answers undefined here and an empty table only from an actual report.
+    expect(h.bridge.clientSupportsBindings()).toBe(true)
+    expect(h.bridge.clientBindings()).toBeUndefined()
+
+    const report = {
+      revision: 4,
+      focusedSessionId: 's1',
+      bindings: [{ sessionId: 's1', tabId: 42, windowId: 1, title: 'Orders' }],
+    }
+    send(ws, { t: 'rpc', id: 'bind-1', method: BRIDGE_BINDINGS_METHOD, payload: report })
+    await waitFor(() => frames.some((f) => f.t === 'rpc.result' && f.id === 'bind-1'))
+
+    expect(frames.find((f) => f.t === 'rpc.result' && f.id === 'bind-1'))
+      .toMatchObject({ t: 'rpc.result', id: 'bind-1', ok: true, result: { revision: 4 } })
+    expect(h.bridge.clientBindings()).toEqual(report)
+    ws.close()
+  })
+
+  it('reads an extension that cannot report bindings as unsupported, not unbound', async () => {
+    const h = await startBridge()
+    harnesses.push(h)
+    const { ws, frames } = await connect(h.url)
+    // A build from before the report: absent capability and no table. The GUI
+    // must not be told the browser is free.
+    send(ws, { t: 'hello', token: TOKEN, caps: { ...CAPS } })
+    await waitFor(() => frames.some((f) => f.t === 'hello.ok'))
+
+    expect(h.bridge.clientSupportsBindings()).toBe(false)
+    expect(h.bridge.clientBindings()).toBeUndefined()
+    ws.close()
+  })
+
+  it('refuses a malformed bindings report and keeps the previous snapshot', async () => {
+    const h = await startBridge()
+    harnesses.push(h)
+    const { ws, frames } = await connect(h.url)
+    send(ws, { t: 'hello', token: TOKEN, caps: { ...CAPS, bindingsReport: true } })
+    await waitFor(() => frames.some((f) => f.t === 'hello.ok'))
+
+    const report = {
+      revision: 1,
+      focusedSessionId: null,
+      bindings: [{ sessionId: 's1', tabId: 42, windowId: 1, title: 'Orders' }],
+    }
+    send(ws, { t: 'rpc', id: 'bind-2', method: BRIDGE_BINDINGS_METHOD, payload: report })
+    await waitFor(() => frames.some((f) => f.t === 'rpc.result' && f.id === 'bind-2'))
+    expect(h.bridge.clientBindings()).toEqual(report)
+
+    // A half-parsed table would show a binding that may already be gone, which
+    // is worse than one poll cycle of lag.
+    send(ws, { t: 'rpc', id: 'bind-3', method: BRIDGE_BINDINGS_METHOD, payload: { ...report, revision: -1 } })
+    await waitFor(() => frames.some((f) => f.t === 'rpc.result' && f.id === 'bind-3'))
+
+    expect(frames.find((f) => f.t === 'rpc.result' && f.id === 'bind-3'))
+      .toMatchObject({ t: 'rpc.result', id: 'bind-3', ok: false, error: { code: 'bad-request' } })
+    expect(h.bridge.clientBindings()).toEqual(report)
+    ws.close()
+  })
+
+  it('clears the bindings table when the connection is replaced or closes', async () => {
+    const h = await startBridge()
+    harnesses.push(h)
+    const first = await connect(h.url)
+    send(first.ws, { t: 'hello', token: TOKEN, caps: { ...CAPS, bindingsReport: true } })
+    await waitFor(() => first.frames.some((f) => f.t === 'hello.ok'))
+    send(first.ws, {
+      t: 'rpc',
+      id: 'bind-4',
+      method: BRIDGE_BINDINGS_METHOD,
+      payload: { revision: 1, focusedSessionId: 's1', bindings: [] },
+    })
+    await waitFor(() => h.bridge.clientBindings()?.revision === 1)
+
+    // Serving the last socket's table would mark a session that may no longer
+    // own the browser, so the replacement starts from nothing.
+    const second = await connect(h.url)
+    send(second.ws, { t: 'hello', token: TOKEN, caps: { ...CAPS, bindingsReport: true } })
+    await waitFor(() => second.frames.some((f) => f.t === 'hello.ok'))
+
+    expect(h.bridge.clientBindings()).toBeUndefined()
+    expect(h.bridge.clientSupportsBindings()).toBe(true)
+
+    send(second.ws, {
+      t: 'rpc',
+      id: 'bind-5',
+      method: BRIDGE_BINDINGS_METHOD,
+      payload: { revision: 2, focusedSessionId: null, bindings: [] },
+    })
+    await waitFor(() => h.bridge.clientBindings()?.revision === 2)
+    second.ws.close()
+    // The close is processed asynchronously; the table must not outlive it.
+    await expect.poll(() => h.bridge.clientBindings()).toBeUndefined()
   })
 
   it('hands a reported wait to the call it belongs to', async () => {

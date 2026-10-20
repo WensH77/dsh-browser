@@ -6,11 +6,11 @@
  * fence (which only guards the client-connection routes), so the bridge brings
  * its own authentication: a bearer token presented in the `hello` frame within
  * HELLO_TIMEOUT_MS. The bridge is a pure tool channel: it carries no chat,
- * settings, credentials, or gateway passthrough. Five bridge-internal RPCs
+ * settings, credentials, or gateway passthrough. Six bridge-internal RPCs
  * remain (`bridge.gdrive.moveIntoSession`, `bridge.openGDriveFolder`,
- * `bridge.uiLanguage`, `bridge.toolWaiting`, `bridge.updateCommand`), serviced
- * directly by plugin dependencies or recorded for this connection; every other
- * RPC method is refused.
+ * `bridge.uiLanguage`, `bridge.toolWaiting`, `bridge.bindings`,
+ * `bridge.updateCommand`), serviced directly by plugin dependencies or recorded
+ * for this connection; every other RPC method is refused.
  *
  * One active connection at a time: a new authenticated socket replaces the
  * previous one (the old socket is closed and its in-flight tool calls settle
@@ -26,6 +26,7 @@ import { WebSocket, WebSocketServer } from 'ws'
 import {
   BRIDGE_EXTENSION_IDS,
   EXTENSION_UNVERIFIED_CLOSE_CODE,
+  BRIDGE_BINDINGS_METHOD,
   BRIDGE_GDRIVE_MOVE_METHOD,
   BRIDGE_OPEN_GDRIVE_FOLDER_METHOD,
   BRIDGE_TOOL_WAITING_METHOD,
@@ -35,9 +36,11 @@ import {
   HELLO_TIMEOUT_MS,
   PING_INTERVAL_MS,
   handshakeRefusal,
+  parseBindingsReport,
   parseBridgeFrame,
   parseToolWaitingPayload,
   parseUiLanguagePayload,
+  type BindingsReport,
   type BridgeFrame,
   type BridgeCaps,
   type ClientFrame,
@@ -199,6 +202,16 @@ export class BridgeServer {
    * previous socket's answer.
    */
   private uiLanguage: UiLanguage | undefined
+  /**
+   * Last session-to-tab snapshot the connected extension reported over
+   * `bridge.bindings`.
+   *
+   * Per connection, like {@link clientCaps} and {@link uiLanguage}: the
+   * extension reports the full table after every handshake and after every
+   * binding change, so a replacement socket starts from "nothing reported"
+   * rather than serving the previous socket's bindings as current.
+   */
+  private bindings: BindingsReport | undefined
   private readonly pendingTools = new Map<string, PendingTool>()
   private closed = false
 
@@ -476,6 +489,31 @@ export class BridgeServer {
     return this.uiLanguage
   }
 
+  /**
+   * Whether the connected extension reports session-to-tab bindings.
+   *
+   * False with nothing connected, and false for a build from before the report
+   * — the two cases the consumer must not conflate with "nothing is bound". A
+   * connection that supports the report but has not sent one yet reads as
+   * "supported, nothing known", which is what {@link clientBindings} answers
+   * undefined for.
+   *
+   * @returns true when the report can be expected on this connection.
+   */
+  clientSupportsBindings(): boolean {
+    return this.clientCaps?.bindingsReport === true
+  }
+
+  /**
+   * The last bindings snapshot reported on the current connection.
+   *
+   * @returns the report, or undefined when nothing was reported (no extension,
+   *   an extension too old to report, or a report not yet received).
+   */
+  clientBindings(): BindingsReport | undefined {
+    return this.bindings
+  }
+
   private handleReadyFrame(frame: BridgeFrame): void {
     switch (frame.t) {
       case 'rpc':
@@ -526,6 +564,21 @@ export class BridgeServer {
       // prompt. Nobody waits on the report, but every rpc frame is answered.
       this.uiLanguage = language
       sendFrame(conn.ws, { t: 'rpc.result', id: frame.id, ok: true, result: { language } })
+      return
+    }
+    if (frame.method === BRIDGE_BINDINGS_METHOD) {
+      const report = parseBindingsReport(frame.payload)
+      if (report === undefined) {
+        // Keep the previous snapshot: a half-parsed table would show a binding
+        // that may already be gone, which is worse than one poll cycle of lag.
+        sendFrame(conn.ws, { t: 'rpc.result', id: frame.id, ok: false, error: { code: 'bad-request', message: 'bindings report must carry a revision, a focused session, and well-formed bindings' } })
+        return
+      }
+      // Recorded for this connection; the dsh Web GUI reads it through the
+      // plugin's own route. Nobody waits on the report, but every rpc frame is
+      // answered.
+      this.bindings = report
+      sendFrame(conn.ws, { t: 'rpc.result', id: frame.id, ok: true, result: { revision: report.revision } })
       return
     }
     if (frame.method === BRIDGE_GDRIVE_MOVE_METHOD) {
@@ -594,6 +647,9 @@ export class BridgeServer {
     // The language belonged to that socket too: the next extension reports its
     // own, and until it does the prompts stay English.
     this.uiLanguage = undefined
+    // Same for the bindings table: serving the last socket's bindings would
+    // mark a session that may no longer own the browser.
+    this.bindings = undefined
     if (hadCaps) this.deps.onCapabilities?.(undefined)
     const conn = this.current
     if (conn === null) return

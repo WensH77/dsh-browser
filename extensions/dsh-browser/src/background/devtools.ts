@@ -86,6 +86,48 @@ interface TabSession {
 
 const sessions = new Map<number, TabSession>()
 
+/** Told the moment a dialog opens on a tab; see {@link onDialogOpening}. */
+type DialogOpeningListener = (dialog: { message: string; type: string }) => void
+
+/**
+ * Listeners by tab, not one flat set: a detached tab must drop its listeners
+ * with its buffers, or a call that was abandoned mid-flight keeps a closure
+ * for the life of the worker.
+ */
+const dialogOpeningListeners = new Map<number, Set<DialogOpeningListener>>()
+
+/**
+ * Subscribe to JavaScript dialogs as they open on one tab.
+ *
+ * A content-script call already out on a page is waiting on the renderer, and
+ * the renderer is waiting on the dialog: nothing — neither that call nor any
+ * later one — can get through until it is answered. The model cannot issue a
+ * second call while the first is pending, so the call that caused the dialog
+ * would otherwise hold the whole turn until Chrome's own budget gives up.
+ * This is how the dispatcher hears about it while it still owns a promise.
+ *
+ * Listeners run synchronously inside the CDP handler, before anything awaits,
+ * so a subscriber settles its call on the event that froze the page.
+ *
+ * @param tabId - tab whose dialogs the listener wants.
+ * @param listener - called with the dialog Chrome reported.
+ * @returns unsubscribe; every caller unsubscribes when its call ends.
+ */
+export function onDialogOpening(tabId: number, listener: DialogOpeningListener): () => void {
+  let listeners = dialogOpeningListeners.get(tabId)
+  if (listeners === undefined) {
+    listeners = new Set()
+    dialogOpeningListeners.set(tabId, listeners)
+  }
+  listeners.add(listener)
+  return () => {
+    listeners.delete(listener)
+    if (listeners.size === 0 && dialogOpeningListeners.get(tabId) === listeners) {
+      dialogOpeningListeners.delete(tabId)
+    }
+  }
+}
+
 function sessionFor(tabId: number): TabSession {
   let session = sessions.get(tabId)
   if (session === undefined) {
@@ -105,6 +147,9 @@ function sessionFor(tabId: number): TabSession {
 /** Drop every buffer; the attach state is forgotten by the session module. */
 function resetSession(tabId: number): void {
   const session = sessions.get(tabId)
+  // A detached tab cannot raise another dialog for these calls; dropping the
+  // listeners here is what keeps an abandoned call from pinning a closure.
+  dialogOpeningListeners.delete(tabId)
   if (session === undefined) return
   session.console = []
   session.network = []
@@ -251,6 +296,16 @@ function onCdpEvent(source: chrome.debugger.Debuggee, method: string, params?: o
       session.dialog = { message, type }
       // A dialog freezes the page's JS: nothing else can run until it is handled.
       pushConsole(tabId, 'warning', `[dialog:${type}] ${message}`)
+      // A call already out on this page is inside the renderer this dialog just
+      // froze, so it would wait for the whole dialog. Tell whoever is waiting
+      // now, while the answer can still be shaped as "this is on screen", and
+      // not after Chrome's budget gives up. `beforeunload` is not announced:
+      // the branch below answers it in the same breath, so cutting the call for
+      // it would name a dialog the bridge itself is closing.
+      if (type !== 'beforeunload') {
+        const listeners = dialogOpeningListeners.get(tabId)
+        if (listeners !== undefined) for (const listener of listeners) listener({ message, type })
+      }
       // A `beforeunload` dialog is the page asking whether a navigation may
       // discard its state. Chrome's own dialog is browser UI, not page DOM, so
       // no extension can click it; `chrome.debugger` is the only way to answer
