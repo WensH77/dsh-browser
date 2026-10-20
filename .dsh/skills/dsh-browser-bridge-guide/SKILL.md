@@ -1,6 +1,6 @@
 ---
 name: dsh-browser-bridge-guide
-description: 在任何工作区（any workspace），只要你用 dsh-browser 桥接的 browser_* 工具驱动页面、排查页面异常或组合这些工具，就该加载我。含：点了报成功但页面没变/新填的值没提交的判据阶梯；读文本、取内嵌图片、截图各用哪个工具；bug 排查与 JS 弹窗处置；绑定、安装与更新。
+description: 在任何工作区（any workspace），只要你用 dsh-browser 桥接的 browser_* 工具驱动页面、排查页面异常或组合这些工具，就该加载我。含：点了报成功但页面没变/新填的值没提交的判据阶梯；选择器失效的六种报错；受保护页与标签页失效的恢复顺序；读文本、取内嵌图片、截图各用哪个工具；bug 排查与 JS 弹窗处置；绑定、安装与更新。
 ---
 
 # dsh-browser 桥接的工具选择与故障排查
@@ -8,6 +8,9 @@ description: 在任何工作区（any workspace），只要你用 dsh-browser �
 这份指南是 `browser_*` 工具的技术配方。用它们驱动浏览器、排查「动了但没反应」、
 组合多个工具时读它；行为红线（不得凭空断言页面内容、拒绝是边界不是谜题等）在
 system prompt 里，这里不重复。
+
+遇到新的、能复现的 `browser_*` 报错，把**触发条件 + 判据 + 出口**补进对应小节。
+这份文档按报错类型增补，不写事故清单。
 
 ## 一、点了报成功但页面没变 / 新填的值没提交
 
@@ -48,7 +51,26 @@ pointer 对这个场景零副作用，对症的是 blur。不要写「表单提�
 无效再换 `browser_click_pointer`**，不要一上来就用它。
 
 **⑤ 以上都不成立，再回头核对目标。** 重取一次快照；用 `browser_dom_query` 拿
-它验证过的唯一选择器，不要手写 `:nth-of-type(N)` 猜。
+它验证过的唯一选择器，不要手写 `:nth-of-type(N)` 猜。下面这些报错都出在这一步，
+按文案对号，不要换着猜：
+
+- `Unknown field(s)`：`fields` 只认白名单（href / src / alt / value / id / class /
+  title / aria-label / role / name / type / checked / disabled / visible / text /
+  placeholder / options）。要读 `onclick` 这类 JS 属性，用 `browser_eval` 取一次，
+  别当字段传。
+- `No element … matches selector`：先确认页面没换。一次点击让 URL 变了（结果里会写
+  `Page change v2 (https://…)`），旧选择器就作废，原地再点同一个 selector 必然找不到 ——
+  重读快照，或换新页面上的 selector。
+- 属性选择器按 DOM 里的**字面值**匹配。`href="client_users.php?client_user_ID=1"`
+  这种相对链接，写成 `a[href="/client_users.php?…"]` 不匹配；拿不准就退成
+  `a[href*="client_user_ID=1"]`。
+- 框架生成的类名（`MuiButton-contained`、`MuiFormControlLabel-root`）随版本变，
+  优先用 `browser_dom_query` 验证过的 selector，或按可见文本定位。
+- `… is not visible`：先 `browser_scroll`，或点包住它的可见元素（复选框常见是
+  `span.MuiCheckbox-root`），别反复点同一个不可见节点。
+- 在会自动轮询的页面（邮箱、实时面板）上发起导航，可能报
+  `The page changed while approval was pending`。这不是失败信号，重试一次；两次都不行
+  就直接打开目标 URL，别从轮询页点走。
 
 ## 二、读什么用什么
 
@@ -99,6 +121,15 @@ alert / confirm / prompt 是**浏览器 UI，不是页面内容**：弹窗一开
 - 工具报「没有绑定页面」或「受控标签页已消失」时，也不要重试同一调用：用
   `browser_navigate` 打开目标 URL（会新开标签页并绑定本会话），或用
   `browser_bind_interactive` 让用户在已打开的页面里挑一个。
+- **`The content script could not be loaded on this page` 说明受控标签页停在受保护页**
+  （`chrome://…`、`chrome-error://chromewebdata`、扩展页、下载页、PDF 查看器）。这个
+  状态下 `browser_navigate` 也注入不了脚本，连试几次结果一样，**不要重试**，也别指望
+  `browser_status` —— 它只报桥接连通性，不报绑定。顺序是：用
+  `browser_bind_interactive` 请用户挑一个正常页面（它返回 `No page was chosen` 表示用户
+  没选，这是等你操作、不是失败，把选择交回用户）；用户不在或不想选，就直接说「受控
+  标签页卡在受保护页，请关掉它或新开一个」，关掉后再 `browser_navigate`，它会新开标签页。
+- 落到受保护页的原因多数是手拼了跳转型端点（SSO、cross-auth、短链）。这类 URL 的
+  `href` 从页面上取，不要自己拼 —— 少一个参数就可能落到错误页或非 http 页。
 - 工具连不上、或某个工具像是缺了：第一站是 `browser_status`，它会给出唯一的下一个
   动作。首次安装，或它的文案说扩展文件刚刷新过，用 `browser_setup` 准备文件并打开
   扩展页。
