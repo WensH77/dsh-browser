@@ -14,9 +14,12 @@
 # client driving the browser, not by the extension.
 #
 # Security: the bridge path carries its own token auth and serves no gateway
-# methods — only tool frames and the two bridge-internal RPCs
-# (bridge.gdrive.moveIntoSession, bridge.openGDriveFolder). Do not run
-# `dsh web --host 0.0.0.0` on untrusted networks with this layer.
+# methods — only tool frames and the bridge-internal RPCs (the GDrive pair, the
+# UI-language and tool-waiting reports, the session-to-tab bindings report, and
+# the update-command request). The bindings report reaches the dsh Web GUI
+# through GET /bridge-browser/bindings, which sits behind the Host/Origin and
+# browser-authentication check. Do not run `dsh web --host 0.0.0.0` on
+# untrusted networks with this layer.
 
 - insert:
     - id: bridge-browser

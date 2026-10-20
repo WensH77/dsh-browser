@@ -27,7 +27,7 @@ import LlmService from '@deepseek-ai/dsh-llm'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import UserQuestionService from '@deepseek-ai/dsh-user-questions'
 import * as BridgeBrowser from '../src/index.ts'
-import { BRIDGE_EXTENSION_IDS, BRIDGE_PATH, BRIDGE_PROTO, BRIDGE_TOOLSET, type BridgeFrame } from '../src/protocol.ts'
+import { BRIDGE_BINDINGS_METHOD, BRIDGE_BINDINGS_PATH, BRIDGE_EXTENSION_IDS, BRIDGE_PATH, BRIDGE_PROTO, BRIDGE_TOOLSET, type BridgeFrame } from '../src/protocol.ts'
 
 const BRIDGE = 'dsh-bridge-browser'
 const TOKEN = 'abcdabcdabcdabcdabcdabcdabcdabcd'
@@ -270,6 +270,70 @@ describe('real Loader composition', () => {
     const refused = client.frames.find((f): f is Extract<BridgeFrame, { t: 'rpc.result' }> => f.t === 'rpc.result' && f.id === 'c-1')!
     expect(refused.ok).toBe(false)
     expect(refused.error).toMatchObject({ code: 'method-not-allowed' })
+
+    client.ws.close()
+  })
+
+  it('serves the bindings table to the dsh Web GUI over real HTTP', { timeout: 60_000 }, async () => {
+    // This composition mounts no connection service, so the route takes its
+    // own loopback branch. The GUI is a browser page on 127.0.0.1: the Host
+    // header is part of the check, and `fetch` sends it for us.
+    const { port } = await loadComposition()
+    const url = `http://127.0.0.1:${port}${BRIDGE_BINDINGS_PATH}`
+
+    // Nothing connected yet: the route still answers, because the GUI has to
+    // be able to render "no browser is bound" without an extension around.
+    const idle = await fetch(url)
+    expect(idle.status).toBe(200)
+    expect(await idle.json()).toEqual({
+      ok: true,
+      connected: false,
+      supported: false,
+      revision: null,
+      bindings: [],
+    })
+
+    const client = await connect(port)
+    send(client.ws, {
+      t: 'hello',
+      token: '',
+      caps: {
+        debugger: true,
+        extensionId: BRIDGE_EXTENSION_IDS[0],
+        // What separates "this build cannot report" from "nothing is bound".
+        bindingsReport: true,
+        snapshotMaxChars: 32_000,
+        maxInteractiveItems: 60,
+      },
+    })
+    await waitFor(() => client.frames.some((f) => f.t === 'hello.ok'))
+
+    const report = {
+      revision: 9,
+      focusedSessionId: 'session-1',
+      bindings: [{ sessionId: 'session-1', tabId: 42, windowId: 1, title: 'Orders' }],
+    }
+    send(client.ws, { t: 'rpc', id: 'bindings-1', method: BRIDGE_BINDINGS_METHOD, payload: report })
+    await waitFor(() => client.frames.some((f) => f.t === 'rpc.result' && f.id === 'bindings-1'))
+
+    const live = await fetch(url)
+    expect(live.status).toBe(200)
+    expect(await live.json()).toEqual({
+      ok: true,
+      connected: true,
+      supported: true,
+      revision: report.revision,
+      // Titles never reach this surface: the GUI marks rows by session id, and
+      // a tab title can carry page content the extension's panel already owns.
+      bindings: [{ sessionId: 'session-1', tabId: 42 }],
+    })
+
+    // Reading is the whole surface: a page that could write here would be able
+    // to mark a session as holding the browser.
+    const refused = await fetch(url, { method: 'POST' })
+    expect(refused.status).toBe(405)
+    expect(refused.headers.get('allow')).toBe('GET')
+    expect(await refused.json()).toMatchObject({ ok: false, code: 'method-not-allowed' })
 
     client.ws.close()
   })

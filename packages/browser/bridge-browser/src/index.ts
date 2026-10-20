@@ -5,7 +5,7 @@
  * The bridge mounts its own upgrade route (`/ext/bridge`) on the host
  * webserver, OUTSIDE the /api trust fence — so it brings its own bearer-token
  * authentication (first frame `hello` within HELLO_TIMEOUT_MS). It is a pure
- * tool channel: it carries browser tool frames plus the five bridge-internal
+ * tool channel: it carries browser tool frames plus the six bridge-internal
  * RPCs (gdrive move/folder reveal, the UI-language and tool-waiting reports,
  * and the update command) and no chat or gateway passthrough. Tools execute by dispatching `tool.call` frames to the
  * connected extension, which performs the action in the tab explicitly
@@ -21,6 +21,7 @@ import { describeRetention, nodeRetentionIo, pruneExports } from './gdrive-reten
 import { spawn } from 'node:child_process'
 import { readFileSync } from 'node:fs'
 import { copyFile, mkdir, readFile, rename, unlink } from 'node:fs/promises'
+import type { ServerResponse } from 'node:http'
 import { basename, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import type { Context } from '@deepseek-ai/cordis'
@@ -30,11 +31,12 @@ import z from '@deepseek-ai/schemastery'
 import type {} from '@deepseek-ai/dsh-tools'
 import type { WebRoute, WebUpgradeRoute } from '@deepseek-ai/dsh-host-webserver'
 import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
-import { BridgeServer } from './server.ts'
+import { BridgeServer, isLoopbackAddress } from './server.ts'
 import { registerBrowserTools } from './tools.ts'
 import { syncBundledExtension } from './extension-assets.ts'
 import { BRIDGE_PROTO, BRIDGE_TOOLSET, declaredToolset, type BridgeCaps } from './protocol.ts'
 import {
+  BRIDGE_BINDINGS_PATH,
   BRIDGE_CONFIG_PATH,
   BRIDGE_PATH,
   DEFAULT_SNAPSHOT_MAX_CHARS,
@@ -332,6 +334,77 @@ function lookupSkillsService(ctx: Context): SkillsRegistryLike | undefined {
 }
 
 /**
+ * The slice of `ctx.connection` the bindings route borrows its trust fence from.
+ *
+ * Declared structurally rather than imported: the bridge plugin runs in
+ * compositions that mount no connection service at all (the bridge's own
+ * composition tests are one), so the service is looked up optionally and its
+ * absence falls back to the route's own loopback check.
+ */
+interface ConnectionTrustFenceLike {
+  requestRejection(request: {
+    headers: Readonly<Record<string, string | readonly string[] | undefined>>
+  }): 401 | 403 | undefined
+}
+
+/**
+ * Find the mounted connection service, tolerating its absence.
+ *
+ * @param ctx - plugin context.
+ * @returns the trust fence, or undefined when nothing answers to `connection`.
+ */
+function lookupTrustFence(ctx: Context): ConnectionTrustFenceLike | undefined {
+  try {
+    const service = ctx.get('connection') as Partial<ConnectionTrustFenceLike> | undefined
+    return typeof service?.requestRejection === 'function' ? service as ConnectionTrustFenceLike : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * Whether a `Host` header names this machine's loopback authority.
+ *
+ * Used only on the no-connection fallback path: the `/api` fence is what keeps
+ * a rebound browser read out, and this is the cheap equivalent for a server
+ * that mounted no connection service. A port suffix is ignored; the bracketed
+ * IPv6 form is unwrapped.
+ *
+ * @param host - the request's `Host` header.
+ * @returns true for `localhost`, `127.0.0.1`, and `[::1]` authorities.
+ */
+function isLoopbackHostHeader(host: string | undefined): boolean {
+  if (host === undefined) return false
+  const authority = host.trim().toLowerCase()
+  const withoutPort = authority.startsWith('[')
+    ? authority.slice(1, authority.indexOf(']') === -1 ? undefined : authority.indexOf(']'))
+    : authority.replace(/:\d+$/, '')
+  return withoutPort === '127.0.0.1' || withoutPort === 'localhost' || withoutPort === '::1'
+}
+
+/**
+ * Write one JSON response and end it.
+ *
+ * @param res - the response to own.
+ * @param status - HTTP status code.
+ * @param body - JSON-serializable body.
+ * @param extra - additional response headers.
+ */
+function sendJson(
+  res: ServerResponse,
+  status: number,
+  body: unknown,
+  extra: Readonly<Record<string, string>> = {},
+): void {
+  res.writeHead(status, {
+    'content-type': 'application/json; charset=utf-8',
+    'cache-control': 'no-store',
+    ...extra,
+  })
+  res.end(JSON.stringify(body))
+}
+
+/**
  * Mount the bridge: resolve the token, register the upgrade route, the tool
  * set, and an optional system-prompt section, all effect-scoped for HMR.
  *
@@ -429,6 +502,56 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   }
   ctx.effect(() => ctx.webServer.register(configRoute), 'bridge-browser: /ext/bridge-config route')
 
+  // Bindings snapshot for the dsh Web GUI: the session list marks the session
+  // holding the browser. The route is outside the /api trust fence, so it
+  // borrows that fence from the connection service when one is mounted, and
+  // otherwise requires a loopback peer and a loopback `Host` (the rebinding
+  // check the fence itself would apply). The fence is looked up per request:
+  // the connection service may mount after this plugin, and its instance can be
+  // replaced by HMR — a captured one would either miss authentication forever
+  // or keep rejecting against a disposed peer.
+  //
+  // The response is the smallest thing the GUI needs: session ids and tab ids.
+  // Tab titles stay in the extension's own panel, and page URLs never leave it.
+  const bindingsRoute: WebRoute = {
+    kind: 'exact',
+    path: BRIDGE_BINDINGS_PATH,
+    handler: (req, res) => {
+      try {
+        if (req.method !== 'GET') {
+          sendJson(res, 405, { ok: false, code: 'method-not-allowed', message: 'GET only' }, { allow: 'GET' })
+          return
+        }
+        const trustFence = lookupTrustFence(ctx)
+        if (trustFence !== undefined) {
+          const rejection = trustFence.requestRejection({ headers: req.headers })
+          if (rejection !== undefined) {
+            sendJson(res, rejection, { ok: false, code: 'forbidden', message: 'request refused by the host trust fence' })
+            return
+          }
+        } else if (!isLoopbackAddress(req.socket.remoteAddress) || !isLoopbackHostHeader(req.headers.host)) {
+          sendJson(res, 403, { ok: false, code: 'forbidden', message: 'loopback only' })
+          return
+        }
+        const report = server.clientBindings()
+        sendJson(res, 200, {
+          ok: true,
+          connected: server.hasConnection(),
+          supported: server.clientSupportsBindings(),
+          revision: report?.revision ?? null,
+          bindings: (report?.bindings ?? []).map(({ sessionId, tabId }) => ({ sessionId, tabId })),
+        })
+      } catch (error: unknown) {
+        sendJson(res, 500, {
+          ok: false,
+          code: 'internal',
+          message: error instanceof Error ? error.message : String(error),
+        })
+      }
+    },
+  }
+  ctx.effect(() => ctx.webServer.register(bindingsRoute), 'bridge-browser: /bridge-browser/bindings route')
+
   ctx.effect(() => {
     const tools = registerBrowserTools(ctx, server, {
       toolTimeoutMs: resolved.toolTimeoutMs,
@@ -489,7 +612,8 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
         + 'script several browser_eval rounds to hunt through the DOM. When the question is about a picture the page embeds, address it with '
         + 'browser_dom_query and then browser_image, which returns the picture itself rather than a screenshot. '
         + 'A JavaScript dialog (alert / confirm / prompt) freezes the page it belongs to: page-facing tools are refused while one is open and the '
-        + 'refusal quotes the dialog, so read it and answer with browser_dialog. '
+        + 'refusal quotes the dialog, so read it and answer with browser_dialog. A call already running when the dialog opens is cut off the same way, '
+        + 'with the dialog quoted — answer it, then re-read the page instead of repeating that call. '
         + 'To drive the page, troubleshoot it, or combine these tools, load the dsh-browser-bridge-guide skill; it carries the recipes — which tool '
         + 'reads text, how an embedded picture is fetched, when a capture is the right question, what a "clicked, but nothing changed" result means, '
         + 'how the tab\'s visible/focused state is reported, which link types browser_navigate opens as ordinary pages, how a Chrome confirmation '

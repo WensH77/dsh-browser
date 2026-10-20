@@ -20,7 +20,7 @@ import {
 import { CaptureError, captureTab } from './capture.ts'
 import { FOREIGN_FRAME_REFUSAL_MARK } from './debugger-session.ts'
 import { PageImageError, fetchPageImage, pageImageEnvelope, parsePageImageSource } from './page-image.ts'
-import { clearMocks, evaluateInPage, handleDialog, installMock, parseMockRule, pendingDialog, readConsole, readNetwork } from './devtools.ts'
+import { clearMocks, evaluateInPage, handleDialog, installMock, onDialogOpening, parseMockRule, pendingDialog, readConsole, readNetwork } from './devtools.ts'
 import { jsDebugAnswer, pausedAtBreakpoint } from './js-debug.ts'
 import { addBlockRule, addHeaderRule, clearTabRules, listTabRules, parseHeaderChanges } from './net-rules.ts'
 import { wrapUntrustedContent, wrapUntrustedResult } from '../security/untrusted.ts'
@@ -181,6 +181,87 @@ async function injectContentScript(tabId: number): Promise<void> {
   }
 }
 
+/**
+ * A JavaScript dialog that froze the page while a call was being dispatched.
+ *
+ * Not an expected condition the caller retries: it means the renderer cannot
+ * finish the call until someone answers the dialog, so the answer tells the
+ * model what is on screen instead of leaving the call to time out.
+ *
+ * `dispatched` is what separates the two honest answers, and the only thing
+ * that may: `true` means the page action or evaluation had already gone out
+ * and can still complete after the dialog is answered, so the answer must not
+ * claim nothing happened; `false` means the dialog was already open when the
+ * send would have started, so nothing ran at all.
+ */
+class PageDialogInterrupt extends Error {
+  constructor(
+    readonly dialog: { message: string; type: string },
+    readonly dispatched: boolean,
+  ) {
+    super(`A JavaScript ${dialog.type} opened while the call was running.`)
+    this.name = 'PageDialogInterrupt'
+  }
+}
+
+/**
+ * Wait for one content-script message or one evaluation, but stop waiting the
+ * moment the page raises a dialog the model has to answer.
+ *
+ * The work keeps running — when the dialog is answered the renderer resumes
+ * and it finishes what it was doing — and its late answer is dropped on
+ * purpose: reporting it would arrive after the model was already told the call
+ * was cut off, and two answers for one call is worse than none. The rejection
+ * of work that never finishes is suppressed by the same handlers, so an
+ * abandoned call cannot surface as an unhandled rejection.
+ *
+ * A dialog already open when this is called refuses straight away, and says so
+ * with `dispatched: false`: that is the window between the dispatcher's hold
+ * check and this call, during which the approval prompt can be on screen for
+ * seconds while the page raises a dialog. `beforeunload` is not treated as an
+ * open dialog here for the same reason it is not announced at all (see
+ * `onDialogOpening`): the extension answers it by itself in the same tick, so
+ * cutting a call for it would name a dialog that is already gone.
+ *
+ * @param tabId - tab the call targets.
+ * @param work - the send or evaluation itself; its result resolves the race
+ *   when no dialog opens first.
+ * @returns the work's answer, or a rejection with {@link PageDialogInterrupt}.
+ */
+function withPageDialogInterrupt<T>(tabId: number, work: () => Promise<T>): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const open = pendingDialog(tabId)
+    if (open !== undefined && open.type !== 'beforeunload') {
+      reject(new PageDialogInterrupt(open, false))
+      return
+    }
+    const unsubscribe = onDialogOpening(tabId, (dialog) => {
+      unsubscribe()
+      reject(new PageDialogInterrupt(dialog, true))
+    })
+    let started: Promise<T>
+    try {
+      started = work()
+    } catch (error: unknown) {
+      // A send that throws before returning a promise still ends this call;
+      // without this the subscription outlives the call it was made for.
+      unsubscribe()
+      reject(error)
+      return
+    }
+    started.then(
+      (value) => {
+        unsubscribe()
+        resolve(value)
+      },
+      (error: unknown) => {
+        unsubscribe()
+        reject(error)
+      },
+    )
+  })
+}
+
 async function sendAction(
   tabId: number,
   call: ToolCall,
@@ -188,13 +269,13 @@ async function sendAction(
   budget?: ContentBudget,
   includePageDelta: boolean = false,
 ): Promise<unknown> {
-  return chrome.tabs.sendMessage(tabId, {
+  return withPageDialogInterrupt(tabId, () => chrome.tabs.sendMessage(tabId, {
     type: 'DSH_ACTION',
     action: call.name,
     args: withoutFrame(call.args),
     ...budget === undefined ? {} : { budget },
     ...includePageDelta ? { includePageDelta: true } : {},
-  }, frame.documentId === undefined ? { frameId: frame.frameId } : { documentId: frame.documentId })
+  }, frame.documentId === undefined ? { frameId: frame.frameId } : { documentId: frame.documentId }))
 }
 
 function unavailable(message: string): ToolAnswer {
@@ -225,6 +306,26 @@ function dialogHoldFailure(dialog: { message: string; type: string }): ToolAnswe
     `A JavaScript ${dialog.type} is open on this page, which freezes it until it is answered, so this call did not run.`
     + `${quoteDialogMessage(dialog.message)} `
     + 'Answer it with browser_dialog (action "accept" or "dismiss"; a prompt also takes "text") — that goes over CDP and works while the page is frozen.',
+  )
+}
+
+/**
+ * Answer the call a dialog interrupted, rather than the one that finds it open.
+ *
+ * Unlike {@link dialogHoldFailure} this may not say "nothing ran": the action
+ * had already gone out and completes whenever the dialog is answered. So it
+ * names the dialog, points at `browser_dialog`, and tells the model to re-read
+ * the page instead of repeating the call — a click that is answered with "OK"
+ * can still take effect afterwards.
+ */
+function dialogInterruptFailure(dialog: { message: string; type: string }): ToolAnswer {
+  return unavailable(
+    `A JavaScript ${dialog.type} opened on this page while this call was running, and it freezes the page until it is answered, `
+    + 'so the bridge stopped waiting for the call instead of holding your next step behind it.'
+    + `${quoteDialogMessage(dialog.message)} `
+    + 'Answer it with browser_dialog (action "accept" or "dismiss"; a prompt also takes "text") — that goes over CDP and works while the page is frozen. '
+    + 'Then read the page again with browser_snapshot before doing anything else: what this call started may finish once the dialog is answered, '
+    + 'so repeating it blindly could run it twice.',
   )
 }
 
@@ -378,7 +479,11 @@ async function snapshotAllFrames(
     const outcome = settled[index]!
     const frame = frames[index]!
     if (outcome.status === 'rejected') {
-      if (frame.frameId === 0) throw outcome.reason
+      // A dialog is a fact about the whole tab, not about this one frame: an
+      // out-of-process iframe can raise it while the main frame has already
+      // answered, and calling that "this iframe was inaccessible" would hide
+      // the one thing the model has to act on.
+      if (outcome.reason instanceof PageDialogInterrupt || frame.frameId === 0) throw outcome.reason
       sections.push(frameHeader(frame), '(This iframe was inaccessible or destroyed while loading.)')
       continue
     }
@@ -798,7 +903,16 @@ async function dispatchOnce(
     }
     return wrapPageAnswer(await withForeignFrameRetry(tabId, () => readNetwork(tabId, call.args, budget.maxChars)), budget.maxChars)
   }
-  if (call.name === 'browser_eval') return wrapPageAnswer(await withForeignFrameRetry(tabId, () => evaluateInPage(tabId, call.args, budget.maxChars)), budget.maxChars)
+  // Wrapped outside the foreign-frame retry, not inside it: the retry's cleanup
+  // puts the frames it took out back through the same frozen renderer, so a
+  // dialog interrupt raised inside would still wait on the dialog before it
+  // could be reported. Left to finish on its own once the dialog is answered.
+  if (call.name === 'browser_eval') {
+    return wrapPageAnswer(
+      await withPageDialogInterrupt(tabId, () => withForeignFrameRetry(tabId, () => evaluateInPage(tabId, call.args, budget.maxChars))),
+      budget.maxChars,
+    )
+  }
   if (call.name === 'browser_dialog') return wrapPageAnswer(await withForeignFrameRetry(tabId, () => handleDialog(tabId, call.args)), budget.maxChars)
   if (call.name === 'browser_debug') return wrapPageAnswer(await withForeignFrameRetry(tabId, () => jsDebugAnswer(tabId, call.args, budget.maxChars)), budget.maxChars)
   if (call.name === 'browser_block') return netRuleAnswer(tabId, call, 'block')
@@ -994,7 +1108,13 @@ export async function dispatchToolCall(
       targetStillAllowed,
       sharePageContent === 'auto',
     )
-  } catch {
+  } catch (error: unknown) {
+    // The page raised a dialog while the action was out on it: the answer is
+    // what is on screen, not the injection recovery below (which would try to
+    // load a content script into a renderer that cannot run one).
+    if (error instanceof PageDialogInterrupt) {
+      return error.dispatched ? dialogInterruptFailure(error.dialog) : dialogHoldFailure(error.dialog)
+    }
     if (isCancelled(call, signal)) return cancelled()
     // Manifest content scripts do not run retroactively in tabs that were
     // already open when an unpacked extension was installed or reloaded.
@@ -1035,7 +1155,12 @@ export async function dispatchToolCall(
         targetStillAllowed,
         sharePageContent === 'auto',
       )
-    } catch {
+    } catch (error: unknown) {
+      // Same interruption, from the retry after injection: the page is frozen
+      // on a dialog, which is a fact about the page, not a failed load.
+      if (error instanceof PageDialogInterrupt) {
+        return error.dispatched ? dialogInterruptFailure(error.dialog) : dialogHoldFailure(error.dialog)
+      }
       return unavailable('The content script could not be loaded on this page. Chrome internal and protected pages do not support browser operations.')
     }
   }

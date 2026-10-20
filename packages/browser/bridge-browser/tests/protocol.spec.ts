@@ -3,6 +3,8 @@ import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import {
+  BRIDGE_BINDINGS_METHOD,
+  BRIDGE_BINDINGS_PATH,
   BRIDGE_EXTENSION_IDS,
   BRIDGE_PROTO,
   BRIDGE_TOOLSET,
@@ -16,6 +18,7 @@ import {
   handshakeRefusal,
   isServerFrame,
   parseBindableTabs,
+  parseBindingsReport,
   parseBridgeFrame,
   parseToolWaitingPayload,
   parseUiLanguagePayload,
@@ -328,6 +331,89 @@ describe('tool waiting report', () => {
       t: 'hello',
       token: 't',
       caps: { snapshotMaxChars: 32_000, maxInteractiveItems: 60, waitingReport },
+    }))
+    expect(hello(true)).toBeDefined()
+    expect(hello(false)).toBeDefined()
+    expect(hello(undefined)).toBeDefined()
+    expect(hello('yes')).toBeUndefined()
+    expect(hello(1)).toBeUndefined()
+  })
+})
+
+describe('bindings report', () => {
+  // The extension reports which sessions hold a controlled tab, and the host
+  // serves that table to the dsh Web GUI. The name and the route are constants
+  // on both sides: a rename on one side would leave the GUI polling a 404 with
+  // nothing naming the cause.
+  it('names the method and the route the two sides agree on', () => {
+    expect(BRIDGE_BINDINGS_METHOD).toBe('bridge.bindings')
+    expect(BRIDGE_BINDINGS_PATH).toBe('/bridge-browser/bindings')
+  })
+
+  it('reads a full snapshot and keeps only the fields the host serves', () => {
+    const payload = {
+      revision: 7,
+      focusedSessionId: 's1',
+      bindings: [{ sessionId: 's1', tabId: 42, windowId: 1, title: 'Orders' }],
+    }
+    expect(parseBindingsReport(payload)).toEqual(payload)
+
+    // Bindings can exist while no session is focused: the panel may have been
+    // closed on another session, and that must not invalidate the table.
+    expect(parseBindingsReport({ ...payload, focusedSessionId: null }))
+      .toEqual({ ...payload, focusedSessionId: null })
+
+    // Extra fields are the extension's business, not the host's. They are
+    // dropped rather than carried into the route's response.
+    expect(parseBindingsReport({
+      ...payload,
+      future: { level: 3 },
+      bindings: [{ ...payload.bindings[0], url: 'https://app.example/orders' }],
+    })).toEqual(payload)
+  })
+
+  it('refuses a report it cannot read as a whole', () => {
+    const valid = { revision: 1, focusedSessionId: 's1', bindings: [] }
+    for (const payload of [null, [], 'x', undefined]) {
+      expect(parseBindingsReport(payload), JSON.stringify(payload)).toBeUndefined()
+    }
+    // Negative, fractional, or non-numeric revisions cannot order snapshots.
+    for (const revision of [-1, 1.5, '1', null, undefined]) {
+      expect(parseBindingsReport({ ...valid, revision }), JSON.stringify(revision)).toBeUndefined()
+    }
+    expect(parseBindingsReport({ ...valid, focusedSessionId: '' })).toBeUndefined()
+    expect(parseBindingsReport({ ...valid, focusedSessionId: '   ' })).toBeUndefined()
+    expect(parseBindingsReport({ ...valid, focusedSessionId: 7 })).toBeUndefined()
+    expect(parseBindingsReport({ ...valid, bindings: {} })).toBeUndefined()
+
+    // One malformed entry invalidates the whole report: a half-parsed table
+    // would show a binding that may already be gone.
+    const malformedEntries = [
+      { tabId: 42, windowId: 1, title: 'Orders' },
+      { sessionId: 's1', windowId: 1, title: 'Orders' },
+      { sessionId: 's1', tabId: 42, title: 'Orders' },
+      { sessionId: 's1', tabId: 42, windowId: 1 },
+      { sessionId: 's1', tabId: -1, windowId: 1, title: 'Orders' },
+      { sessionId: 's1', tabId: 42.5, windowId: 1, title: 'Orders' },
+      { sessionId: '', tabId: 42, windowId: 1, title: 'Orders' },
+      { sessionId: 's1', tabId: 42, windowId: 1, title: 7 },
+      null,
+      [],
+    ]
+    for (const entry of malformedEntries) {
+      expect(parseBindingsReport({ revision: 1, focusedSessionId: 's1', bindings: [entry] }), JSON.stringify(entry))
+        .toBeUndefined()
+    }
+  })
+
+  it('accepts the capability a reporting build declares, and only as a boolean', () => {
+    // Present-but-unusable is malformed rather than "not reported": the host
+    // uses this flag to tell "this build cannot report" from "nothing bound",
+    // so a value it cannot read must not silently mean the former.
+    const hello = (bindingsReport: unknown): unknown => parseBridgeFrame(JSON.stringify({
+      t: 'hello',
+      token: 't',
+      caps: { snapshotMaxChars: 32_000, maxInteractiveItems: 60, bindingsReport },
     }))
     expect(hello(true)).toBeDefined()
     expect(hello(false)).toBeDefined()

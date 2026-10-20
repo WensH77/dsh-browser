@@ -53,10 +53,12 @@ npx @deepseek-ai/dsh@0.1.7-rc.1 web
 
 帧为按 `t` 判别的 JSON 对象，定义在 [`protocol.ts`](src/protocol.ts)，是通过 workspace 包的 `./src/*` export 与扩展共享的真源。构建后的包还会发布 `dsh-bridge-browser/protocol`，供外部消费方使用。
 
-- 客户端 → 服务端：`hello`（认证 + caps）、`rpc`（两个 GDrive 方法之一，或界面语言上报）、`tool.result`、`pong`。
+- 客户端 → 服务端：`hello`（认证 + caps）、`rpc`（两个 GDrive 方法、界面语言上报、工具等待上报、绑定上报，或更新命令请求）、`tool.result`、`pong`。
 - 服务端 → 客户端：`hello.ok`（回显协商后的 caps）、`rpc.result`、`tool.call`、`tool.cancel`、`ping`、`error`。
 
 `tool.call` 携带稳定 id，扩展在其 `tool.result` 中回显；`expiresAt` 让过期调用以 `timeout` 结算。桥接只是请求/响应通道——认证完成后不再有事件帧。
+
+socket 旁边还有两条普通 HTTP 路由：`GET /ext/bridge-config`（零配置 WebSocket 地址）与 `GET /bridge-browser/bindings`（最近一次 session→tab 上报，供 dsh Web GUI 的会话指示灯读取）。后者在 `/api` 信任围栏之外，因此自行套用 connection 服务的 Host/Origin 与浏览器认证检查；没有 connection 服务时退回「回环对端 + 回环 Host」。它只返回会话 id 与标签 id——不含标题、也不含 URL：界面按会话 id 标行，而标签页标题可能带页面内容，只有扩展面板需要显示它。
 
 两个半边的版本在 `hello`/`hello.ok` 里协商：`proto` 是握手版本（不发该字段的旧构建读作 1），`toolset` 是扩展的能力级别（缺失为 0）。宿主若无法服务更新的扩展，用关闭码 `4003` + 原因拒绝，扩展把原因原样显示；扩展声明的级别较低时，宿主**收窄工具面**（不注册 `browser_dom_query`/`browser_block`/`browser_headers`，且 `browser_click`/`browser_type` 的 schema 去掉 `selector`；低于 level 6 还会去掉 `browser_click` 的 `option` 与 `browser_dom_query` 的 `options`，模型拿着新 schema 传这两个参数时宿主直接拒绝并给出下一步，而不是让旧扩展静默丢掉参数、回报一次没生效的点击），而不是等到调用时才报参数错误。扩展在选项页与侧栏显示这处错配，并点名下一步（重启 dsh，或重载扩展）。
 
@@ -98,6 +100,7 @@ npx @deepseek-ai/dsh@0.1.7-rc.1 web
 
 ## 已知限制与后续工作
 
+- GUI 的会话指示灯只覆盖侧边栏的会话行：搜索态结果行是另一套元素、没有会话键，不显示；子代理驱动浏览器时它不是独立行，父会话也不会被标记。
 - 仅一个活动扩展连接（第二个窗口顶替第一个）。
 - 可访问的跨源 iframe 会进入快照，并通过稳定的 `(frame, index)` 地址执行操作；受保护或已销毁的 frame 会标记为不可访问，不影响整页快照。
 - token 手动轮换（改 `~/.dsh/ext-bridge-token` 或配置 `token`），无过期。

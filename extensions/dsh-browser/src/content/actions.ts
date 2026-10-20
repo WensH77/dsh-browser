@@ -636,7 +636,9 @@ async function clickAction(
       }
       // A cross-document navigation can unload this content script before an
       // awaited response. Answer first and navigate in the next task.
-      setTimeout(() => { location.href = href.href }, 0)
+      if (!navigateFromBackground({ type: 'DSH_CONTENT_NAVIGATE', url: href.href })) {
+        setTimeout(() => { location.href = href.href }, 0)
+      }
       return {
         text: `Clicked link ${resolved.label}. Call browser_snapshot again after navigation settles.`,
         label,
@@ -1075,6 +1077,39 @@ function backgroundImageUrl(el: Element): string | undefined {
   return absoluteUrl(match[1].trim())
 }
 
+/**
+ * Ask the background to navigate the controlled tab.
+ *
+ * A `location` assignment runs in this content script's context, and Chrome
+ * attributes the resulting blocked-`beforeunload` intervention to the extension
+ * ("Blocked attempt to show a 'beforeunload' confirmation panel…"), which lands
+ * in the extension's error page even though the navigation itself proceeds. A
+ * browser-process navigation (`chrome.tabs.update` / `goBack` / `reload`) takes
+ * the same decision outside this script's context, so the page sees the
+ * intervention message instead of the extension's error list.
+ *
+ * Answers first, then navigates in the next task: the tool response must leave
+ * this document before it unloads, and the background owns the navigation.
+ *
+ * @param message - the navigation request to hand to the background.
+ * @returns true when this frame is the tab's top frame and the request was sent.
+ */
+function navigateFromBackground(message: Record<string, unknown>): boolean {
+  if (window.top !== window) return false
+  // Absent in a plain DOM harness (and after the extension is reloaded): fall
+  // back to this frame's own navigation, which still works in a real page.
+  const runtime = typeof chrome === 'undefined' ? undefined : chrome.runtime
+  if (runtime === undefined || typeof runtime.sendMessage !== 'function') return false
+  setTimeout(() => {
+    try {
+      void runtime.sendMessage(message).catch(() => {})
+    } catch {
+      // An invalidated extension context cannot navigate from the background.
+    }
+  }, 0)
+  return true
+}
+
 async function navigateAction(args: Record<string, unknown>): Promise<ActionResult> {
   const url = typeof args.url === 'string' && args.url !== '' ? args.url : ''
   if (url === '') throw new ActionError('bad-args', 'url must not be empty.')
@@ -1091,7 +1126,9 @@ async function navigateAction(args: Record<string, unknown>): Promise<ActionResu
   // Cross-document navigation unloads this content script and destroys the
   // tabs.sendMessage response port before any await settles — so answer
   // FIRST, then navigate in a fresh task. The model re-snapshots after load.
-  setTimeout(() => { location.href = parsed.href }, 0)
+  if (!navigateFromBackground({ type: 'DSH_CONTENT_NAVIGATE', url: parsed.href })) {
+    setTimeout(() => { location.href = parsed.href }, 0)
+  }
   return {
     text: `Navigating to ${parsed.href}. Call browser_snapshot again after the page loads.`,
     navigationPending: true,
@@ -1109,7 +1146,9 @@ async function historyAction(delta: 1 | -1): Promise<ActionResult> {
     }
   }
   // 同 navigate：先响应再导航（文档卸载会销毁响应端口）。
-  setTimeout(() => { if (delta === -1) history.back(); else history.forward() }, 0)
+  if (!navigateFromBackground({ type: 'DSH_CONTENT_HISTORY', delta })) {
+    setTimeout(() => { if (delta === -1) history.back(); else history.forward() }, 0)
+  }
   return {
     text: 'Navigating through browser history. Call browser_snapshot again after the page loads.',
     navigationPending: true,
@@ -1118,7 +1157,9 @@ async function historyAction(delta: 1 | -1): Promise<ActionResult> {
 
 function reloadAction(): ActionResult {
   resetDeltaState()
-  setTimeout(() => { location.reload() }, 0)
+  if (!navigateFromBackground({ type: 'DSH_CONTENT_RELOAD' })) {
+    setTimeout(() => { location.reload() }, 0)
+  }
   return {
     text: 'The page is reloading. Call browser_snapshot again after it loads.',
     navigationPending: true,

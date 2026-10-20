@@ -216,6 +216,9 @@ describe('BridgeClient handshake version', () => {
     // The host asks about a confirmation instead of about silence only when the
     // extension says it reports waits; without this flag it never will.
     expect(hello.caps.waitingReport).toBe(true)
+    // Same shape for the bindings table: the host uses this flag to tell "this
+    // build cannot report" from "nothing is bound".
+    expect(hello.caps.bindingsReport).toBe(true)
     expect(Object.keys(hello.caps)).not.toContain('textOnly')
     client.stop()
   })

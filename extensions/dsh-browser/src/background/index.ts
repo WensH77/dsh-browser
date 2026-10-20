@@ -27,6 +27,7 @@
  */
 
 import {
+  BRIDGE_BINDINGS_METHOD,
   BRIDGE_CONFIG_PATH,
   BRIDGE_GDRIVE_MOVE_METHOD,
   BRIDGE_OPEN_GDRIVE_FOLDER_METHOD,
@@ -371,6 +372,9 @@ function broadcastTabAffinity(): void {
   sendUiPush({ type: 'push.affinity', state: tabAffinity.snapshot() })
   // Focus/bind changes switch which session's operations are shown.
   sendUiPush({ type: 'push.ops', ops: activeOps() })
+  // The host's session list marks whoever holds the browser, and it has no
+  // other way to learn about a release (a closed tab, the panel's Unbind).
+  reportBindings()
   queueDevtoolsPriming()
 }
 
@@ -951,8 +955,9 @@ async function authorizeUnboundNavigate(
   return {
     ok: true,
     result: {
-      text: `Navigating to ${destination.href} in a new tab. The new tab has started loading; `
-        + 'call browser_snapshot (or browser_wait) to read it once it has rendered.',
+      text: `Navigating to ${destination.href} in a new background tab. The new tab has started loading; `
+        + 'call browser_snapshot (or browser_wait) to read it once it has rendered. '
+        + 'It opened behind the current tab, so the page the user was on keeps focus.',
     },
   }
 }
@@ -984,6 +989,15 @@ async function pushBudgetToControlledTab(negotiated: BridgeCaps): Promise<void> 
  * The session is bound to the fresh tab, so later calls operate it even in
  * the background.
  *
+ * The tab opens in the background (`active: false`). This is the only call
+ * that creates a tab at all — every later navigate reuses the bound one — and
+ * creating it active moved the user out of the page they were reading, which
+ * is usually the dsh chat driving this session. Nothing about the page needs
+ * visibility to be driven: the content script runs in a hidden tab too, and
+ * its existing "tab not visible / window not focused" note tells the model
+ * when the known background-tab behaviour applies (focus events, screenshot
+ * freshness).
+ *
  * Consent ordering: the destination is approved BEFORE the tab exists. The
  * earlier shape created the tab first, which meant a denied or unanswered
  * navigate still loaded the URL — a real request the user never authorized.
@@ -1004,9 +1018,9 @@ function unboundNavigateDestination(call: ToolCall): URL | undefined {
   )
 }
 
-/** Open the destination in a fresh tab and bind the session to it. */
+/** Open the destination in a fresh, background tab and bind the session to it. */
 async function openBoundTab(sessionId: string, destination: URL): Promise<boolean> {
-  const created = await chrome.tabs.create({ url: destination.href, active: true })
+  const created = await chrome.tabs.create({ url: destination.href, active: false })
   // `create` resolves before the destination commits: binding that snapshot
   // leaves the session pointing at an empty URL, and the next tool call fails
   // with "this page does not support browser operations". Wait for the commit,
@@ -1237,6 +1251,64 @@ function reportUiLanguage(): void {
     method: BRIDGE_UI_LANGUAGE_METHOD,
     payload: { language: getUiLocale() },
   })
+}
+
+/** What the last successfully sent bindings report described; see `reportBindings`. */
+let reportedBindingsKey: string | null = null
+
+/**
+ * Tell the host which sessions hold a controlled tab.
+ *
+ * The dsh Web GUI marks the session that owns the browser, and only the
+ * extension knows the table: a binding is created and released here (a bind
+ * call, the panel's Unbind, a closed or replaced tab), and the host learns
+ * about it through tool calls alone, which cannot report the releases.
+ *
+ * Sent once per connection and again whenever the table changes. Two guards
+ * make that safe:
+ *
+ * - Only an authenticated connection may carry the report. A frame sent while
+ *   the socket is open but `hello.ok` has not arrived is refused by the host
+ *   (`1008 hello first`), and affinity broadcasts do fire in that window — a
+ *   worker start restores bindings while the handshake is still in flight.
+ * - An unchanged table is skipped, so an ordinary tab switch (which bumps the
+ *   controller's revision for the panel's own benefit) sends nothing. The key
+ *   is the reported table itself, not the revision, for exactly that reason.
+ *
+ * Fire-and-forget: a host older than this method refuses it with
+ * `method-not-allowed`, and the report is not worth a reconnect — such a host
+ * simply shows no indicator. The payload carries ids and tab titles only; page
+ * URLs and contents stay here.
+ *
+ * @param force - report even when the table is unchanged (fresh handshake).
+ */
+function reportBindings(force = false): void {
+  const socket = bridge
+  // `connected` is emitted only after hello.ok, so this is the authenticated
+  // boundary; `send` alone would also accept a socket still in its handshake.
+  if (socket === null || socket.state !== 'connected') return
+  const focusedSessionId = tabAffinity.focusedSession()
+  const bindings = Object.entries(tabAffinity.sessionMap()).map(([sessionId, tab]) => ({
+    sessionId,
+    tabId: tab.tabId,
+    windowId: tab.windowId,
+    title: tab.title,
+  }))
+  const key = JSON.stringify({ focusedSessionId, bindings })
+  if (!force && key === reportedBindingsKey) return
+  const sent = socket.send({
+    t: 'rpc',
+    id: crypto.randomUUID(),
+    method: BRIDGE_BINDINGS_METHOD,
+    payload: {
+      revision: tabAffinity.snapshot().revision,
+      focusedSessionId,
+      bindings,
+    },
+  })
+  // Only a frame that actually left the worker counts as reported; a send that
+  // failed on a closing socket must not suppress the next attempt.
+  if (sent) reportedBindingsKey = key
 }
 
 /**
@@ -1788,6 +1860,11 @@ async function startBridge(): Promise<void> {
         // reported once per handshake rather than once per worker.
         reportUiLanguage()
         broadcastStatus()
+        // One full bindings table per connection. The table is restored from
+        // session storage asynchronously, so the first report waits for it;
+        // otherwise the host would be told "nothing bound" and only corrected
+        // on the next change.
+        void affinityReady.then(() => reportBindings(true))
         void pushBudgetToControlledTab(negotiated)
       },
       onNotice: (notice) => {
@@ -1995,6 +2072,64 @@ chrome.tabs.onRemoved.addListener((tabId) => {
     broadcastTabAffinity()
   })
 })
+
+/** A navigation the content script handed to the browser process. */
+type ContentNavigation =
+  | { type: 'DSH_CONTENT_NAVIGATE'; url?: unknown }
+  | { type: 'DSH_CONTENT_HISTORY'; delta?: unknown }
+  | { type: 'DSH_CONTENT_RELOAD' }
+
+/**
+ * Drive a navigation the content script asked for.
+ *
+ * The content script answers its tool first and then hands the navigation here
+ * (see `navigateFromBackground` in `content/actions.ts`). Doing it from the
+ * browser process keeps Chrome's blocked-beforeunload intervention out of this
+ * extension's error list: the renderer blames the (extension) script that
+ * assigned `location` even though the navigation proceeds.
+ *
+ * Only the top frame of a tab this extension currently controls may ask. A
+ * content script runs in a page's origin, so the page must not be able to steer
+ * tabs it does not own.
+ */
+chrome.runtime.onMessage.addListener((message: unknown, sender) => {
+  if (typeof message !== 'object' || message === null) return
+  const type = (message as { type?: unknown }).type
+  if (type !== 'DSH_CONTENT_NAVIGATE' && type !== 'DSH_CONTENT_HISTORY' && type !== 'DSH_CONTENT_RELOAD') return
+  if (sender.id !== chrome.runtime.id) return
+  const tabId = sender.tab?.id
+  if (tabId === undefined || (sender.frameId ?? 0) !== 0) return
+  // At least one session must hold this tab: `tracks` also covers the merely
+  // observed active tab, which is not ours to steer.
+  if (tabAffinity.sessionIdsForTab(tabId).length === 0) return
+  void navigateControlledTab(tabId, message as ContentNavigation).catch((error: unknown) => {
+    console.warn('[dsh-browser] content navigation failed', error)
+  })
+})
+
+/**
+ * Apply one validated {@link ContentNavigation}.
+ *
+ * @param tabId - the controlled tab the navigation belongs to.
+ * @param request - the navigation request.
+ */
+async function navigateControlledTab(tabId: number, request: ContentNavigation): Promise<void> {
+  if (request.type === 'DSH_CONTENT_NAVIGATE') {
+    const url = typeof request.url === 'string' ? request.url : ''
+    // The content script checked this too; this is the trust boundary, so it
+    // checks again rather than trusting a page-influenced message.
+    if (!/^https?:\/\//i.test(url)) throw new Error(`refusing to navigate to ${url}`)
+    await chrome.tabs.update(tabId, { url })
+    return
+  }
+  if (request.type === 'DSH_CONTENT_HISTORY') {
+    if (request.delta === -1) await chrome.tabs.goBack(tabId)
+    else if (request.delta === 1) await chrome.tabs.goForward(tabId)
+    else throw new Error('history delta must be 1 or -1')
+    return
+  }
+  await chrome.tabs.reload(tabId)
+}
 
 chrome.windows.onFocusChanged.addListener((windowId) => {
   if (windowId === chrome.windows.WINDOW_ID_NONE) return
