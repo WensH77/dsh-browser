@@ -50,6 +50,16 @@ pointer 对这个场景零副作用，对症的是 blur。不要写「表单提�
 `browser_click` 只发一次 `click`，不生效却报成功。顺序是**先 `browser_click`，
 无效再换 `browser_click_pointer`**，不要一上来就用它。
 
+**④ 的另一面：按压即翻转状态的控件，完整序列等于连按两次。** chosen 这类下拉
+（intranet 的 Referrer 字段即此）在 `mousedown` 上展开、在紧随的 `click` 上收起，
+`browser_click_pointer` 的完整序列会让它开一次又关掉，两次都报成功、界面停在原状。
+要坐实这条机制，在展开状态下只发 `click` 看它是否收起：收起即此因，仍开着就换别的解释。
+判据是这次按压对控件属于**触发**（激活、提交）还是**翻转**（开/收、选中/取消）：
+翻转类只发一次 `mousedown` 再读状态，不要补 `click`。同类的还有一条：先确认控件把
+结果写进哪个容器（chosen 是 `select` 的 `option` 与 `ul.chosen-results`，不是 jQuery UI
+的 `ul.ui-autocomplete`），在错的容器里读到空不能判定没渲染 —— 这个控件在 `delay`
+与请求窗口内也会把结果列表清空，同一处读到空还有时序这一种解释。
+
 **⑤ 以上都不成立，再回头核对目标。** 重取一次快照；用 `browser_dom_query` 拿
 它验证过的唯一选择器，不要手写 `:nth-of-type(N)` 猜。下面这些报错都出在这一步，
 按文案对号，不要换着猜：
