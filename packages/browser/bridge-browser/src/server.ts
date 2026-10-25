@@ -290,7 +290,7 @@ export class BridgeServer {
         cancel(new BridgeToolError('timeout',
           `browser action "${name}" got no answer within ${timeoutMs}ms — the bridge's own budget (toolTimeoutMs), not a verdict on the action. `
           + 'The page may be stuck, or the action may still be running after a confirmation was answered. '
-          + 'Check Chrome (the extension marks a waiting prompt on its toolbar badge), then retry or raise toolTimeoutMs.'))
+          + 'Check Chrome for a confirmation prompt, then retry or raise toolTimeoutMs.'))
       }, timeoutMs)
       signal.addEventListener('abort', onAbort, { once: true })
       this.pendingTools.set(id, { resolve, reject, timer, ...onWaiting === undefined ? {} : { onWaiting } })

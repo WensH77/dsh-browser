@@ -328,42 +328,6 @@ function uiState(): UiState {
   }
 }
 
-/** Toolbar status light: a badge dot reflecting the latest operation.
- * idle -> grey, running -> green, waiting (approval pending) -> yellow,
- * failed/error -> red. */
-const BADGE_DOT = '\u25CF'
-const ACTIVITY_COLORS: Record<RecentOp['state'] | 'idle', string> = {
-  running: '#22a06b',
-  waiting: '#d97706',
-  done: '#9aa1ab',
-  error: '#c9372c',
-  cancelled: '#9aa1ab',
-  idle: '#9aa1ab',
-}
-
-function setStatusBadge(color: string, visible: boolean, text = BADGE_DOT): void {
-  void Promise.resolve(chrome.action.setBadgeBackgroundColor({ color })).catch(() => {})
-  void Promise.resolve(chrome.action.setBadgeText({ text: visible ? text : '' })).catch(() => {})
-}
-
-/** Recompute the toolbar light from the front of the operation feed. Only
- * running/waiting/error light up; idle/done/cancelled keep the icon clean. */
-function applyActivityBadge(): void {
-  const top = activeOps()[0]
-  const state = top === undefined ? 'idle' : top.state
-  const visible = state === 'running' || state === 'waiting' || state === 'error'
-  setStatusBadge(ACTIVITY_COLORS[state], visible)
-}
-
-/** Pending approvals take priority: a red '?' means someone must decide. */
-function refreshBadge(): void {
-  if (pendingApprovals.size > 0) {
-    setStatusBadge('#c9372c', true, '?')
-    return
-  }
-  applyActivityBadge()
-}
-
 function broadcastStatus(): void {
   sendUiPush({ type: 'push.status', state: bridge?.state ?? 'stopped', caps, notice: currentBridgeNotice() })
 }
@@ -451,7 +415,6 @@ function approvalNotificationId(id: string): string {
 
 function deliverApproval(request: ApprovalRequest): boolean {
   pendingApprovals.set(request.id, request)
-  refreshBadge()
   if (assistantPages > 0) {
     // A live assistant page will render the card from push.approval.
     sendUiPush({ type: 'push.approval', request })
@@ -491,7 +454,6 @@ function clearApprovalNotification(id: string): void {
 
 function approvalResolved(id: string): void {
   pendingApprovals.delete(id)
-  refreshBadge()
   clearApprovalNotification(id)
   sendUiPush({ type: 'push.approval-resolved', id })
 }
@@ -1067,7 +1029,6 @@ function opVisible(op: RecentOp): boolean {
 function recordOpStart(call: ToolCall): void {
   const op: RecentOp = { id: call.id, name: call.name, args: call.args ?? {}, sessionId: call.sessionId, state: 'running', startedAt: Date.now() }
   recentOps = [op, ...recentOps.filter((o) => o.id !== op.id)].slice(0, RECENT_OPS_MAX)
-  refreshBadge()
   if (opVisible(op)) sendUiPush({ type: 'push.op', op })
 }
 
@@ -1106,7 +1067,6 @@ function settleOp(id: string, state: RecentOp['state'], noMatch: boolean = false
   else delete op.noMatch
   recentOps = [op, ...recentOps.filter((o) => o.id !== id)].slice(0, RECENT_OPS_MAX)
   setToolWaiting(id, state === 'waiting')
-  refreshBadge()
   if (opVisible(op)) sendUiPush({ type: 'push.op', op })
 }
 
@@ -1127,7 +1087,6 @@ function forgetOp(id: string): void {
   if (op === undefined) return
   const visible = opVisible(op)
   recentOps = recentOps.filter((candidate) => candidate.id !== id)
-  refreshBadge()
   if (visible) sendUiPush({ type: 'push.ops', ops: activeOps() })
 }
 
@@ -1934,7 +1893,6 @@ chrome.runtime.onMessage.addListener((message: unknown, sender, sendResponse) =>
     }
     case 'ops.clear':
       recentOps = []
-      refreshBadge()
       sendUiPush({ type: 'push.ops', ops: [] })
       sendUiPush({ type: 'push.ops-cleared' })
       sendResponse({ accepted: true })
@@ -2215,7 +2173,6 @@ chrome.action.onClicked.addListener((tab) => {
 void chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: false }).catch(() => {})
 
 armBridgeKeepalive()
-refreshBadge()
 
 // Eager connection: the pure-tool bridge claims its slot on load so a
 // dsh session can drive this Chrome without any panel interaction.

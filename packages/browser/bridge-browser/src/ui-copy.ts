@@ -34,7 +34,7 @@ export interface UserPromptCopy {
 const EN: UserPromptCopy = {
   bindQuestion: 'Which open page should this session operate?',
   silentQuestion: (name, seconds) =>
-    `${name} has run ${seconds} seconds with no answer. Chrome may be showing a confirmation for it — the extension marks that on its toolbar badge — or the page may be stuck. Is a prompt waiting for you?`,
+    `${name} has run ${seconds} seconds with no answer. Chrome may be showing a confirmation for it, or the page may be stuck. Is a prompt waiting for you?`,
   silentAnswerNone: 'No — nothing is waiting',
   silentAnswerWorking: 'Yes — I am answering it',
 }
@@ -42,7 +42,7 @@ const EN: UserPromptCopy = {
 const ZH: UserPromptCopy = {
   bindQuestion: '这个会话要操作哪个已打开的页面？',
   silentQuestion: (name, seconds) =>
-    `${name} 已经 ${seconds} 秒没有回应。可能是 Chrome 里有个确认在等你（扩展会在工具栏徽标上标出来），也可能是页面卡住了。现在有弹窗在等你处理吗？`,
+    `${name} 已经 ${seconds} 秒没有回应。可能是 Chrome 里有个确认在等你，也可能是页面卡住了。现在有弹窗在等你处理吗？`,
   silentAnswerNone: '没有——没有东西在等',
   silentAnswerWorking: '有——我正在处理',
 }

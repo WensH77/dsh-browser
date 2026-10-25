@@ -365,7 +365,7 @@ describe('dispatchToolCall', () => {
     expect(answer.ok).toBe(false)
     const message = answer.error?.message ?? ''
     expect(message).toContain('expired before it was answered')
-    expect(message).toContain('toolbar badge')
+    expect(message).toContain('confirmation card was up in the browser assistant')
     expect(message).toContain('go-ahead')
     // One window only: the prompt is not raised a second time.
     expect(authorize).toHaveBeenCalledTimes(1)
