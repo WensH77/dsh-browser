@@ -258,8 +258,6 @@ async function boot(
     },
     action: {
       onClicked: { addListener: () => undefined },
-      setBadgeBackgroundColor: async () => undefined,
-      setBadgeText: async () => undefined,
     },
     sidePanel: { open: async () => undefined, setPanelBehavior: async () => undefined },
     downloads: { download: async () => 1, search: async () => [], onChanged: { addListener: () => undefined } },

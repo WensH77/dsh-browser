@@ -1211,7 +1211,7 @@ async function settleApproval(options: SettleApprovalOptions): Promise<SettleApp
   if (authorization === 'renew') {
     return {
       answer: unavailable(`The approval prompt for "${approval.action}" expired before it was answered, so nothing ran. `
-        + 'A confirmation was waiting in Chrome — the extension marks a waiting prompt on its toolbar badge. '
+        + 'A confirmation card was up in the browser assistant for that action the whole time. '
         + 'Tell the user a card is waiting for them to answer, wait for their go-ahead, then raise it again by calling the tool once more.'),
     }
   }
