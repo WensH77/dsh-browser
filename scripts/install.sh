@@ -29,6 +29,27 @@ fail_pair() {
   exit 1
 }
 
+# Run a build/registration step quietly without letting `set -e` turn a failure into a bare
+# exit: the output is kept and printed together with the step that failed. Without this a
+# failing `pnpm install` stopped the installer right under the step heading with nothing to
+# read, because the redirects discarded both streams and `set -e` exits silently.
+run_quiet() {
+  local dir="$1"
+  local zh="$2"
+  local en="$3"
+  local log
+
+  shift 3
+  log="$(mktemp "${TMPDIR:-/tmp}/dsh-browser-install.XXXXXX")"
+  if (cd "$dir" && "$@") >"$log" 2>&1; then
+    rm -f "$log"
+    return 0
+  fi
+  cat "$log" >&2
+  rm -f "$log"
+  fail_pair "$zh" "$en"
+}
+
 has_workspace() {
   local candidate="$1"
   [ -f "$candidate/package.json" ] &&
@@ -324,21 +345,21 @@ require_command node "未找到 Node.js；请先安装受支持的 Node.js 版�
 require_command rsync "未找到 rsync；请先安装 rsync。" "rsync was not found; install rsync first."
 
 print_step 1 "构建 Chrome 扩展与浏览器桥接" "Build the Chrome extension and the browser bridge"
-(cd "$ROOT" && pnpm install --frozen-lockfile >/dev/null 2>&1)
+run_quiet "$ROOT" "依赖安装失败。" "Dependency installation failed." pnpm install --frozen-lockfile
 # The extension is built first so the bridge package can copy the fresh dist into
 # itself (`scripts/copy-extension.mjs`, part of its build): the other order leaves
 # the packaged `extension/` one build behind, or missing on a clean checkout.
-(cd "$ROOT" && pnpm --filter dsh-browser-extension run build >/dev/null 2>&1)
-(cd "$ROOT" && pnpm --filter dsh-bridge-browser run build >/dev/null 2>&1)
+run_quiet "$ROOT" "扩展构建失败。" "The extension build failed." pnpm --filter dsh-browser-extension run build
+run_quiet "$ROOT" "桥接插件构建失败。" "The bridge plugin build failed." pnpm --filter dsh-bridge-browser run build
 
 print_step 2 "注册到本机 web profile" "Register with the local web profile"
 if profile_has_dependency "$WEB_PROFILE_MANIFEST" "$LEGACY_PLUGIN"; then
-  (cd "$ROOT" && pnpm exec dsh plugin --profile web remove "$LEGACY_PLUGIN" >/dev/null)
+  run_quiet "$ROOT" "移除旧插件失败。" "Removing the legacy plugin failed." pnpm exec dsh plugin --profile web remove "$LEGACY_PLUGIN"
 fi
 if profile_has_dependency "$WEB_PROFILE_MANIFEST" "$RENAMED_PLUGIN"; then
-  (cd "$ROOT" && pnpm exec dsh plugin --profile web remove "$RENAMED_PLUGIN" >/dev/null)
+  run_quiet "$ROOT" "移除旧插件失败。" "Removing the legacy plugin failed." pnpm exec dsh plugin --profile web remove "$RENAMED_PLUGIN"
 fi
-(cd "$ROOT" && pnpm exec dsh plugin --profile web add -w "dsh-bridge-browser@link:$PLUGIN" >/dev/null)
+run_quiet "$ROOT" "注册桥接插件失败。" "Registering the bridge plugin failed." pnpm exec dsh plugin --profile web add -w "dsh-bridge-browser@link:$PLUGIN"
 
 print_step 3 "安装技能（所有工作区可用）" "Install skills (available to every workspace)"
 # The skills ship in this repository but are read from the user skill root, so a session in
@@ -397,7 +418,7 @@ if [ "$CLIPBOARD_READY" -eq 1 ]; then
 fi
 
 printf '\n'
-print_pair "重启 dsh：cd $ROOT && pnpm start" "Restart dsh: cd $ROOT && pnpm start"
+print_pair "dsh 正在运行时插件通常会在几秒内热加载；没有加载时重启：cd $ROOT && pnpm start" "A running dsh usually picks the plugin up within seconds; restart if it does not: cd $ROOT && pnpm start"
 printf '\n'
 if [ "$INSTALL_MODE" = "managed" ]; then
   UPDATE_COMMAND="curl -fsSL https://raw.githubusercontent.com/$REPOSITORY/refs/heads/$REMOTE_REF/scripts/install.sh | bash"

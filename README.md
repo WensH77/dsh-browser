@@ -29,7 +29,7 @@ Windows, in PowerShell:
 $s="$env:TEMP\dsh-install.ps1"; irm https://raw.githubusercontent.com/WensH77/dsh-browser/refs/heads/main/scripts/install.ps1 -OutFile $s; powershell -NoProfile -ExecutionPolicy Bypass -File $s
 ```
 
-The installer puts the extension files in `~/.dsh/browser-extension` and opens `chrome://extensions`: load or reload **AI Browser Assistant** there — that is the only browser-side click — then restart dsh once. The plugin keeps those files current at startup, so nothing has to be copied by hand. Each later update: rerun the same install command, then one more “Reload” in Chrome. See [Detailed installation and usage](#detailed-installation-and-usage) for prerequisites, startup commands, updates, and development commands.
+The installer puts the extension files in `~/.dsh/browser-extension` and opens `chrome://extensions`: load or reload **AI Browser Assistant** there — that is the only browser-side click. A running dsh usually picks the plugin up within seconds; if it does not, restart dsh once. The plugin keeps those files current at startup, so nothing has to be copied by hand. Each later update: rerun the same install command, then one more “Reload” in Chrome. See [Detailed installation and usage](#detailed-installation-and-usage) for prerequisites, startup commands, updates, and development commands.
 
 > [!IMPORTANT]
 > The unscoped [`dsh-browser`](https://www.npmjs.com/package/dsh-browser) package on npm belongs to a different project and is not affiliated with this repository. This project is not currently published as an npm package; use the installer above.
@@ -91,7 +91,7 @@ docs/                              upgrade notes and investigation records
 
 ## Detailed installation and usage
 
-Requirements: Node.js 22 or newer (the installer only checks that `node` and `pnpm` exist), Corepack/pnpm, and Chrome 116+ (the extension's `minimum_chrome_version`). Windows additionally needs Windows PowerShell 5.1, which ships with Windows, or PowerShell 7+.
+Requirements: Node.js 22 or newer (the installer only checks that `node` and `pnpm` exist), Corepack/pnpm, and Chrome 116+ (the extension's `minimum_chrome_version`). Windows additionally needs Windows PowerShell 5.1, which ships with Windows, or PowerShell 7+. pnpm's Windows shims include a `pnpm.ps1` that a bare `pnpm` can resolve to instead of `pnpm.cmd`, which is why the installer prefers the `.exe`/`.cmd` and why manual commands should spell `pnpm.cmd` — see [Manual fallback on Windows](#manual-fallback-on-windows). Both installers read `DSH_HOME` when it is set and otherwise use `~/.dsh`.
 
 ### Install or update
 
@@ -114,6 +114,23 @@ The installer downloads `main`, builds and registers the bridge plugin, builds t
 The Windows command downloads `install.ps1` and runs it rather than piping it into `Invoke-Expression`: the script is UTF-8 with a byte order mark so Windows PowerShell renders its Chinese output, and `Invoke-Expression` rejects a leading mark.
 
 Updates rerun the command above to pull the newer version, then one more **Reload** on the extensions page. Not sure which command that is? Ask the assistant: `browser_update` prints the one for this machine, and does not run it for you.
+
+#### Manual fallback on Windows
+
+Windows PowerShell resolves a bare `pnpm` through every extension it knows, and pnpm's Windows install puts a `pnpm.ps1` shim on that list. When the `.ps1` wins, the exit code comes from the shim rather than from pnpm: in a reported Windows 11 + PowerShell 5.1 case the shim printed nothing and left the exit code at 0, so a step reported success while doing nothing and the install only failed later, at step 4 with `Resolve-Path … dist does not exist`. Current `install.ps1` prefers the `.exe`/`.cmd` and checks each step's output, so it stops at the step that did nothing.
+
+If an older copy hit that, run the build and registration by hand with `pnpm.cmd` (the explicit extension is what keeps PowerShell off the `.ps1`), then rerun the installer: it redoes the build quickly and finishes steps 3 and 4.
+
+```powershell
+cd <repo>
+pnpm.cmd install --frozen-lockfile
+pnpm.cmd --filter dsh-browser-extension run build
+pnpm.cmd --filter dsh-bridge-browser run build
+pnpm.cmd exec dsh plugin --profile web add -w "dsh-bridge-browser@link:<repo>/packages/browser/bridge-browser"
+.\scripts\install.ps1
+```
+
+`<repo>` is the checkout root, written with forward slashes in the `link:` target because pnpm reads a backslash there as an escape. Two paths tell you which step was a no-op: a missing `node_modules` means `pnpm install` never ran, and `<DSH_HOME>\profiles\web\package.json` without a `dsh-bridge-browser` dependency means the registration never ran. Set `DSH_HOME` in the same shell if yours is not `%USERPROFILE%\.dsh`.
 
 ### Skills shipped with this repository
 

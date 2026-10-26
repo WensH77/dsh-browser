@@ -29,7 +29,7 @@ Windows（PowerShell）：
 $s="$env:TEMP\dsh-install.ps1"; irm https://raw.githubusercontent.com/WensH77/dsh-browser/refs/heads/main/scripts/install.ps1 -OutFile $s; powershell -NoProfile -ExecutionPolicy Bypass -File $s
 ```
 
-安装器把扩展文件放进 `~/.dsh/browser-extension` 并打开 `chrome://extensions`：在那里加载或重新加载一次 **AI 浏览器助手**——这是浏览器侧唯一要手点的动作；然后重启一次 dsh。扩展文件的同步由插件在启动时自动完成，不用手工复制目录。扩展设置里的「允许浏览器调试」默认关闭，截图、控制台、网络、执行页面 JS、`browser_dialog` 和 `browser_debug` 这几个工具需要它，见[核心能力](#核心能力)的表注。以后每次更新：重跑同一条安装命令，再在 Chrome 点一次「重新加载」。前置要求、启动命令、更新方式和开发命令详见[详细安装与使用](#详细安装与使用)。
+安装器把扩展文件放进 `~/.dsh/browser-extension` 并打开 `chrome://extensions`：在那里加载或重新加载一次 **AI 浏览器助手**——这是浏览器侧唯一要手点的动作。dsh 正在运行时通常会在几秒内自动加载插件；没加载的话重启一次 dsh。扩展文件的同步由插件在启动时自动完成，不用手工复制目录。扩展设置里的「允许浏览器调试」默认关闭，截图、控制台、网络、执行页面 JS、`browser_dialog` 和 `browser_debug` 这几个工具需要它，见[核心能力](#核心能力)的表注。以后每次更新：重跑同一条安装命令，再在 Chrome 点一次「重新加载」。前置要求、启动命令、更新方式和开发命令详见[详细安装与使用](#详细安装与使用)。
 
 > [!IMPORTANT]
 > npm 上未加 scope 的 [`dsh-browser`](https://www.npmjs.com/package/dsh-browser) 包属于另一个项目，与本仓库无关。本项目目前没有发布 npm 包，请使用上方安装器。
@@ -91,7 +91,7 @@ docs/                              升级记录与调研笔记
 
 ## 详细安装与使用
 
-前置要求：Node.js 22 或更新（安装器只检查 `node` 与 `pnpm` 是否存在）、Corepack/pnpm，以及 Chrome 116+（扩展的 `minimum_chrome_version`）。Windows 还需要系统自带的 Windows PowerShell 5.1，或 PowerShell 7+。
+前置要求：Node.js 22 或更新（安装器只检查 `node` 与 `pnpm` 是否存在）、Corepack/pnpm，以及 Chrome 116+（扩展的 `minimum_chrome_version`）。Windows 还需要系统自带的 Windows PowerShell 5.1，或 PowerShell 7+。Windows 上 pnpm 的 shim 里包含一个 `pnpm.ps1`，裸名 `pnpm` 可能命中它而不是 `pnpm.cmd`；安装器因此优先跑 `.exe`/`.cmd`，手动命令也请写 `pnpm.cmd`，原因见 [Windows 手动兜底](#windows-手动兜底)。两个平台的安装器都会读取 `DSH_HOME`（默认 `~/.dsh`）。
 
 ### 安装或更新
 
@@ -114,6 +114,23 @@ $s="$env:TEMP\dsh-install.ps1"; irm https://raw.githubusercontent.com/WensH77/ds
 Windows 命令先下载 `install.ps1` 再执行，而不是管道给 `Invoke-Expression`：脚本是带 BOM 的 UTF-8，Windows PowerShell 依赖 BOM 才能正确显示中文，而 `Invoke-Expression` 无法处理开头的 BOM。
 
 更新：重跑上面那条命令拉取新版本，再在扩展页点一次「重新加载」。不知道确切命令时问助手：它会用 `browser_update` 打印你这台机器该跑的那一条（并且不会替你执行）。
+
+#### Windows 手动兜底
+
+Windows PowerShell 会按它认识的所有扩展名解析裸名 `pnpm`，而 pnpm 的 Windows shim 里包含一个 `pnpm.ps1`；一旦命中它，退出码来自 shim 而不是 pnpm：在一份 Windows 11 + PowerShell 5.1 的复现报告里，这个 shim 不输出任何内容、退出码保持 0，于是某一步「报成功但什么都没做」，直到第 4 步才以 `Resolve-Path … dist does not exist` 失败。当前的 `install.ps1` 优先跑 `.exe`/`.cmd`，并在每一步之后检查产物，所以会在真正没做事的步骤上就停下。
+
+如果你手上是旧版脚本且已经踩到，先用 `pnpm.cmd` 手动跑构建与注册（显式写扩展名就是为了避开 `.ps1`），再重跑安装器：它会快速重做构建，并完成第 3、4 步。
+
+```powershell
+cd <repo>
+pnpm.cmd install --frozen-lockfile
+pnpm.cmd --filter dsh-browser-extension run build
+pnpm.cmd --filter dsh-bridge-browser run build
+pnpm.cmd exec dsh plugin --profile web add -w "dsh-bridge-browser@link:<repo>/packages/browser/bridge-browser"
+.\scripts\install.ps1
+```
+
+`<repo>` 是 checkout 根目录，`link:` 目标里请用正斜杠（pnpm 会把反斜杠当转义）。两个路径能看出是哪一步空转：没有 `node_modules` 说明 `pnpm install` 没跑，`<DSH_HOME>\profiles\web\package.json` 里没有 `dsh-bridge-browser` 依赖说明注册没跑。`DSH_HOME` 不是 `%USERPROFILE%\.dsh` 时，先在该 shell 里设置它。
 
 ### 随仓库分发的技能
 
