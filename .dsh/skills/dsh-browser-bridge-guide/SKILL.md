@@ -1,6 +1,6 @@
 ---
 name: dsh-browser-bridge-guide
-description: 在任何工作区（any workspace），只要你用 dsh-browser 桥接的 browser_* 工具驱动页面、排查页面异常或组合这些工具，就该加载我。含：点了报成功但页面没变/新填的值没提交的判据阶梯；选择器失效的六种报错；受保护页与标签页失效的恢复顺序；读文本、取内嵌图片、截图各用哪个工具；bug 排查与 JS 弹窗处置；绑定、安装与更新。
+description: 在任何工作区（any workspace），只要你用 dsh-browser 桥接的 browser_* 工具驱动页面、排查页面异常或组合这些工具，就该加载我。含：点了报成功但页面没变/新填的值没提交的判据阶梯；选择器失效的六种报错；审批卡为什么超时、提醒为什么没弹；受保护页、错误页与标签页失效的恢复顺序；页面打不开时该不该换通道；读文本、取内嵌图片、截图各用哪个工具；bug 排查与 JS 弹窗处置；绑定、安装与更新。
 ---
 
 # dsh-browser 桥接的工具选择与故障排查
@@ -27,7 +27,8 @@ system prompt 里，这里不重复。
 `The controlled tab is hidden … No focus events reach it in this state and clipboard
 writes are refused, so a step that depends on either can do nothing silently.`
 隐藏或失焦的标签页收不到焦点事件、剪贴板写入被拒；依赖这两样的步骤会静默失败，
-而工具本身照样报成功。
+而工具本身照样报成功。**这句是警告不是失败**：只读调用（快照、读文本、查 DOM、截图、
+取图片）照常返回内容，看到它不用停下来。
 
 **③ 字段按失焦提交的话，桥接已经替你补齐了。** 扩展在点击和输入之前会主动让当前
 字段失焦（`settleFocusForActivation`），窗口没系统焦点时改为补发 `blur` / `focusout`，
@@ -120,26 +121,80 @@ alert / confirm / prompt 是**浏览器 UI，不是页面内容**：弹窗一开
 弹窗时，桥接不再让它干等到超时，当场以「弹窗开着、原文是…」返回。看到这句话就说明原
 动作可能在你答完弹窗后才落地——先 `browser_snapshot` 重读页面，不要直接重发同一次点击。
 
-## 五、绑定、安装与更新
+## 五、审批、绑定与恢复
 
-- 用户说「绑定到这个页面」时用 `browser_bind_interactive`：它列出页面、问用户、
-  一次完成绑定。
-- **一次只有一个会话能操作浏览器。** 如果受控标签页已被另一个会话持有，绑定会失败
-  并在文案里点出那个会话（`browser_navigate` 的首次调用也一样）。这种情况什么都
-  不会执行：请用户点 dsh 浏览器面板里的 Unbind，或继续在另一个会话里工作并把答案
-  带回来 —— 不要重试原调用。
-- 工具报「没有绑定页面」或「受控标签页已消失」时，也不要重试同一调用：用
-  `browser_navigate` 打开目标 URL（会新开标签页并绑定本会话），或用
-  `browser_bind_interactive` 让用户在已打开的页面里挑一个。
-- **`The content script could not be loaded on this page` 说明受控标签页停在受保护页**
-  （`chrome://…`、`chrome-error://chromewebdata`、扩展页、下载页、PDF 查看器）。这个
-  状态下 `browser_navigate` 也注入不了脚本，连试几次结果一样，**不要重试**，也别指望
-  `browser_status` —— 它只报桥接连通性，不报绑定。顺序是：用
-  `browser_bind_interactive` 请用户挑一个正常页面（它返回 `No page was chosen` 表示用户
-  没选，这是等你操作、不是失败，把选择交回用户）；用户不在或不想选，就直接说「受控
-  标签页卡在受保护页，请关掉它或新开一个」，关掉后再 `browser_navigate`，它会新开标签页。
+### 审批卡：60 秒窗口，以及「为什么没看到提醒」
+
+- **要审批的是动作，不是读取。** 读类（`browser_snapshot`、`browser_get_text`、
+  `browser_dom_query`、`browser_console`、`browser_network` 的查看、`browser_capture`、
+  `browser_image`）在 `sharePageContent = auto` 时直接跑，只有 `ask` 模式才逐次问。
+  写类（`browser_navigate` / `back` / `forward` / `reload` / `click` /
+  `click_pointer` / `type` / `press` / `browser_eval` / `browser_headers` /
+  `browser_dialog` / `browser_debug` / `browser_block` / `browser_network` 的 mock）
+  都要过审批卡。
+- **卡片在扩展自己的界面里，窗口固定 60 秒。** 超时有两种文案，含义相同，都是「卡
+  弹过、没人应答、动作没执行」：导航类报
+  `The browser approval request for "<工具名>" timed out before the user responded.`
+  其余动作报 `The approval prompt for "<工具名>" expired before it was answered, so
+  nothing ran.`（后者会直接告诉你下一步：让用户先看卡、再决定要不要重发）。这两句
+  都是扩展产生的，**不等于宿主把审批关掉了**。
+- **别把宿主那句 `Approval prompts are disabled in this session` 读成「本会话没有
+  浏览器能力」。** 那句管的是沙箱提权（写文件、跳出沙箱的命令），和浏览器审批卡是两
+  套东西。宿主侧同场景的报错文案是 `got no answer within Nms — the bridge's own
+  budget`，两者按文案就能分开。看到带 `browser approval request for` 的那句，说明卡
+  确实弹过、只是没人应答 —— 这种情况**重试永远无效**。
+- **提醒有三种，每一种都可能不响。** ①助手窗口开着且不在前台时发系统通知；②没有任何
+  助手页面时，尝试打开状态窗（浮动窗形态能打开，侧栏形态没有用户手势会被 Chrome 拒绝，
+  于是只剩通知）；③宿主在调用静默 20 秒后会向用户提问「是不是有个确认卡在等」。
+  通知开关在设置里（默认开），创建失败会记进扩展 debug log 的 `notification-failed`。
+  窗口在前台时不发通知，所以「用户就坐在 Chrome 前面」也可能什么都没弹。
+- **通知一条都不出现时，先查系统，不是查代码。** macOS 的通知设置里同一个 app 可能登记了
+  两条（旧通知通道与 Chrome 152+ 的原生通道各一条），其中一条是「关闭」时，扩展的通知会
+  被系统静默丢掉，而 `chrome.notifications.create` 照样成功、debug log 里也不会有失败。
+  让用户把两条都设为允许通知。代码层能自证的只有一句：日志里没有 `notification-failed`。
+- **子代理不要直接调 `browser_*`。** 浏览器一次只被一个会话持有，子代理既看不到扩展
+  的卡、也收不到宿主那句提问，只会把 60 秒超时当成「站点打不开」来回试。
+
+### 受保护页、错误页与标签页失效
+
+- **加载失败会明说。** 标签停在 Chrome 错误页时（页面没加载出来，`ERR_EMPTY_RESPONSE`、
+  `ERR_CONNECTION_RESET`、`ERR_NAME_NOT_RESOLVED`），工具会返回
+  `This tab is showing Chrome's error page for a load that failed: net::ERR_… (<url>)`，
+  并告诉你下一步：告知用户、`browser_bind_interactive` 换一个页面、没有别的页就让用户
+  Unbind 后 `browser_navigate`。这不是受保护页，重试同一个调用不会好。
+- **失败原因出现在「绑定」的回答里，不在页面列表里。** 选页列表的行格式和宿主之间有
+  契约（`ID=<n> | <title> | <url>`），任何后缀都会让宿主丢掉整行，所以错误页在列表里
+  看起来仍是普通网页；一旦绑上，回答里会写明 `that page failed to load (net::ERR_…)`。
+- **`The content script could not be loaded on this page. Chrome internal and protected
+  pages do not support browser operations.` 才是受保护页**（`chrome://…`、扩展页、下载页、
+  PDF 查看器）。它说明这个文档根本没有内容脚本可用，重试无意义。
+- **怎么判断是不是本机出口的问题**：文案已带 `net::ERR_` 时，用一次
+  `curl -I <同一个 URL>` 确认：服务端空回复（curl 退出码 52）或连接重置，说明这台机器
+  到那个域名就是不通，**换浏览器通道没有意义**，直接走镜像 / 译文 / 官方 RSS（见第七节）。
+  `browser_capture` 截图只在文案没提 `net::ERR_` 时才需要 —— 用来确认标签是不是停在错误页。
+- **`browser_navigate` 报受保护页，说的是发起导航时受控标签的当前状态，不是目标地址
+  打不开。** 同一会话里换个目标再 navigate 常常直接成功，别据此给站点判死刑。
+- **`browser_bind_interactive` 可能把你绑到坏页上**（返回里写 `chosen by the user`）。
+  绑完立刻用 `browser_snapshot {visual: false}` 验证一次：仍报内容脚本失败或加载失败，
+  就换页或请用户关掉那个标签页，再 `browser_navigate` 新开。
+- **别在错误页上 `browser_reload`**：会得到 `The controlled tab changed during the
+  operation`，之后可能变成 `The controlled tab was closed`。错误页直接关标签、重新
+  navigate。
+- 恢复到正常页的顺序：`browser_bind_interactive` 请用户挑一个正常页面（返回
+  `No page was chosen` 表示用户没选，这是等你操作、不是失败，把选择交回用户）；用户
+  不在或不想选，就直接说「受控标签页卡在受保护页，请关掉它或新开一个」，关掉后再
+  `browser_navigate` 新开标签页。别指望 `browser_status` —— 它只报桥接连通性。
 - 落到受保护页的原因多数是手拼了跳转型端点（SSO、cross-auth、短链）。这类 URL 的
   `href` 从页面上取，不要自己拼 —— 少一个参数就可能落到错误页或非 http 页。
+- **一次只有一个会话能操作浏览器。** 受控标签页已被另一个会话持有时，绑定会失败并在
+  文案里点出那个会话（`browser_navigate` 的首次调用也一样）。这种情况什么都不会执行：
+  请用户点 dsh 浏览器面板里的 Unbind，或继续在另一个会话里工作并把答案带回来。
+- 工具报「没有绑定页面」或「受控标签页已消失」时，不要重试同一调用：用
+  `browser_navigate` 打开目标 URL（会新开标签页并绑定本会话），或用
+  `browser_bind_interactive` 让用户在已打开的页面里挑一个。
+
+### 安装与更新
+
 - 工具连不上、或某个工具像是缺了：第一站是 `browser_status`，它会给出唯一的下一个
   动作。首次安装，或它的文案说扩展文件刚刷新过，用 `browser_setup` 准备文件并打开
   扩展页。
@@ -164,7 +219,23 @@ alert / confirm / prompt 是**浏览器 UI，不是页面内容**：弹窗一开
   确认了、动作又像是没改任何东西，先重新取一次快照再下结论 —— 别把「还没确认」或
   「确认后没重读」误判成「操作无效」。
 
-## 七、下一步
+## 七、页面打不开时，先分类再决定换不换通道
+
+浏览器和命令行在同一台机器、同一条出口上，所以「换浏览器试试」只对一类失败有用。
+
+- **Cloudflare 或人机校验页**（403 加 `Just a moment` / `Checking your browser`）：
+  值得用浏览器过一下，浏览器有真实指纹和登录态。
+- **服务端空回复、连接重置、DNS 或 TLS 直接失败**（curl 退出码 52 / 56、Chrome 的
+  `ERR_EMPTY_RESPONSE` / `ERR_CONNECTION_RESET` / `ERR_NAME_NOT_RESOLVED`）：换通道
+  没有任何意义，因为出口是同一条。直接换来源。
+- **换个来源的常用路径**：发行商官方 RSS 常带全文（很多评测的正文就在 CDATA 里，例如
+  `https://www.gamespot.com/feeds/reviews/`），能绕开挑战页；外文长文常能找到可交叉
+  验证的译文站。用二手来源时说明它是二手，并尽量用原文或另一处交叉核对。
+
+判断顺序固定为：先 `curl -I` 看出口通不通，再看是不是挑战页，最后才谈浏览器里的操作。
+先开浏览器绕，会把「这个站从这台机器打不开」误判成「受控标签卡住了」。
+
+## 八、下一步
 
 被驱动的这个页面是（或变成）Google Slides 时，接着加载 `google-slides-via-browser`：
 胶片栏 / 工具栏控件、按页码切页、以及编辑器控件点了没反应，都在那份里。
