@@ -93,6 +93,52 @@ function Assert-Command {
   if (-not (Test-Command $Name)) { Stop-Install $Zh $En }
 }
 
+function Resolve-NativeCommand {
+  <#
+    The .exe/.cmd for a native tool, never the .ps1 shim that may sit beside it.
+
+    Windows PowerShell resolves a bare name to every extension it knows, so a pnpm install
+    that also puts a pnpm.ps1 beside its .cmd/.exe can run the .ps1. The exit code then comes
+    from the shim, not from pnpm: pnpm's shim was observed on Windows 11 + PowerShell 5.1 to
+    print nothing and leave $LASTEXITCODE at 0. A failed step looked like a success, and the
+    install only died later, where the missing build output surfaced as a Resolve-Path error
+    about a `dist` directory. An Application keeps the exit code the process itself returned.
+  #>
+  param([string]$Name)
+
+  # An extensionless shim can count as an Application too; only a real Windows executable
+  # hands back the process's own exit code.
+  $application = @(Get-Command -Name $Name -CommandType Application -ErrorAction SilentlyContinue |
+      Where-Object { $_.Source -match '\.(exe|cmd|bat)$' }) |
+    Select-Object -First 1
+  if ($application) { return $application.Source }
+
+  $fallback = @(Get-Command -Name $Name -ErrorAction SilentlyContinue) | Select-Object -First 1
+  if (-not $fallback) { Stop-Install "未找到 $Name。" "Command not found: $Name." }
+  # A function or alias carries no path; invoking it by name is the only way to run it.
+  if (-not $fallback.Source) { return $Name }
+  Write-Host ("[警告] 只找到 $Name 的脚本版本（{0}），它的退出码不可靠；建议改用同目录下的 .cmd/.exe。" -f $fallback.Source) -ForegroundColor Yellow
+  Write-Host ("[warning] Only a script shim was found for $Name ({0}); its exit code cannot be trusted — use the .cmd/.exe next to it." -f $fallback.Source) -ForegroundColor Yellow
+  return $fallback.Source
+}
+
+function Assert-Output {
+  <#
+    Prove a step produced its output, rather than trusting an exit code.
+
+    A shim that swallows the command, a build that resolves nothing, or a `plugin add` that
+    writes to another profile all report success. Each caller names the path and the command
+    that recreates it, so the failure points at the fix instead of at whatever reads it next.
+  #>
+  param(
+    [Parameter(Mandatory = $true)][string]$Path,
+    [Parameter(Mandatory = $true)][string]$Zh,
+    [Parameter(Mandatory = $true)][string]$En
+  )
+  if (Test-Path -LiteralPath $Path) { return }
+  Stop-Install $Zh $En
+}
+
 function Test-ExcludedPath {
   param([string]$RelativePath, [hashtable]$Excluded)
 
@@ -299,17 +345,25 @@ function Invoke-Quiet {
     [Parameter(Mandatory = $true)][string]$Command,
     [Parameter(Mandatory = $true)][string[]]$Arguments,
     [Parameter(Mandatory = $true)][string]$FailZh,
-    [Parameter(Mandatory = $true)][string]$FailEn
+    [Parameter(Mandatory = $true)][string]$FailEn,
+    # For a step whose failure costs an extra, not the install: report it like a failure, but
+    # let the install continue. The Fail* pair is the warning in that case.
+    [switch]$AllowFailure
   )
 
+  $executable = Resolve-NativeCommand -Name $Command
   Push-Location -LiteralPath $WorkingDirectory
   # PowerShell 7.3+ turns a native command's stderr into a terminating error while
   # $ErrorActionPreference is Stop; a non-zero exit code is the signal we actually want.
   $previousPreference = $ErrorActionPreference
   $ErrorActionPreference = 'Continue'
+  # A command that never starts a native process leaves $LASTEXITCODE at whichever step ran
+  # before it, which is a success in the common case. Reset it so a stale value cannot be
+  # misread as this step's; the Assert-Output calls after each step are the real proof.
+  $global:LASTEXITCODE = 0
   $code = $null
   try {
-    $output = & $Command @Arguments 2>&1
+    $output = & $executable @Arguments 2>&1
     $code = $LASTEXITCODE
   } finally {
     $ErrorActionPreference = $previousPreference
@@ -317,6 +371,11 @@ function Invoke-Quiet {
   }
   if ($code -ne 0) {
     foreach ($line in @($output)) { Write-Host $line }
+    if ($AllowFailure) {
+      Write-Host ("[警告] " + $FailZh) -ForegroundColor Yellow
+      Write-Host ("[warning] " + $FailEn) -ForegroundColor Yellow
+      return
+    }
     Stop-Install $FailZh $FailEn
   }
 }
@@ -394,13 +453,25 @@ Assert-Command 'node' "未找到 Node.js；请先安装受支持的 Node.js 版�
 Write-Step 1 "构建 Chrome 扩展与浏览器桥接" "Build the Chrome extension and the browser bridge"
 Invoke-Quiet -WorkingDirectory $Root -Command 'pnpm' -Arguments @('install', '--frozen-lockfile') `
   -FailZh "依赖安装失败。" -FailEn "Dependency installation failed."
+Assert-Output (Join-Path $Root 'node_modules') `
+  "依赖安装没有产物：仓库根目录下没有 node_modules，说明 pnpm install 没有真正执行。请在仓库根目录手动运行：cmd /c pnpm install --frozen-lockfile" `
+  "Dependency installation produced nothing: there is no node_modules in the repository root, so pnpm install did not actually run. Run it manually from the repository root: cmd /c pnpm install --frozen-lockfile"
 # The extension is built first so the bridge package can copy the fresh dist into itself
 # (`scripts/copy-extension.mjs`, part of its build): the other order leaves the packaged
 # `extension/` one build behind, or missing on a clean checkout.
 Invoke-Quiet -WorkingDirectory $Root -Command 'pnpm' -Arguments @('--filter', 'dsh-browser-extension', 'run', 'build') `
   -FailZh "扩展构建失败。" -FailEn "The extension build failed."
+# `manifest.json` is what makes a directory loadable as an extension, so its absence means the
+# build never ran — not that it produced an empty folder.
+Assert-Output (Join-Path $Ext 'dist\manifest.json') `
+  "扩展构建没有产物（extensions\dsh-browser\dist\manifest.json 不存在），pnpm 可能没有真正执行。请在仓库根目录手动运行：cmd /c pnpm --filter dsh-browser-extension run build" `
+  "The extension build produced nothing (extensions\dsh-browser\dist\manifest.json is missing), so pnpm probably did not actually run. Run it manually from the repository root: cmd /c pnpm --filter dsh-browser-extension run build"
 Invoke-Quiet -WorkingDirectory $Root -Command 'pnpm' -Arguments @('--filter', $BridgePlugin, 'run', 'build') `
   -FailZh "桥接插件构建失败。" -FailEn "The bridge plugin build failed."
+# The loader consumes `lib/`, so a missing entry point is a plugin dsh cannot mount.
+Assert-Output (Join-Path $Plugin 'lib\index.js') `
+  "桥接插件构建没有产物（packages\browser\bridge-browser\lib\index.js 不存在），pnpm 可能没有真正执行。请在仓库根目录手动运行：cmd /c pnpm --filter dsh-bridge-browser run build" `
+  "The bridge plugin build produced nothing (packages\browser\bridge-browser\lib\index.js is missing), so pnpm probably did not actually run. Run it manually from the repository root: cmd /c pnpm --filter dsh-bridge-browser run build"
 
 Write-Step 2 "注册到本机 web profile" "Register with the local web profile"
 foreach ($OldName in @($LegacyPlugin, $RenamedPlugin)) {
@@ -416,17 +487,25 @@ $LinkTarget = $Plugin.Replace('\', '/')
 Invoke-Quiet -WorkingDirectory $Root -Command 'pnpm' `
   -Arguments @('exec', 'dsh', 'plugin', '--profile', 'web', 'add', '-w', "$BridgePlugin@link:$LinkTarget") `
   -FailZh "注册桥接插件失败。" -FailEn "Registering the bridge plugin failed."
+# The step's whole effect is this manifest entry, so read it back instead of trusting the
+# command: a registration that silently skipped leaves an install that looks complete and has
+# no bridge to connect to.
+if (-not (Test-ProfileDependency -Manifest $WebProfileManifest -PackageName $BridgePlugin)) {
+  Stop-Install `
+    "插件注册没有生效：$WebProfileManifest 里没有 $BridgePlugin。请在仓库根目录手动运行：cmd /c pnpm exec dsh plugin --profile web add -w `"$BridgePlugin@link:$LinkTarget`"" `
+    "Registration did not take effect: $WebProfileManifest has no $BridgePlugin entry. Run it manually from the repository root: cmd /c pnpm exec dsh plugin --profile web add -w `"$BridgePlugin@link:$LinkTarget`""
+}
 
 Write-Step 3 "安装技能（所有工作区可用）" "Install skills (available to every workspace)"
 # Copied rather than linked: creating a symlink on Windows needs Developer Mode or elevation,
 # and the installer runs again on every update, so the copy is refreshed there.
-try {
-  Invoke-Quiet -WorkingDirectory $Root -Command 'node' -Arguments @('scripts/install-skills.mjs', '--copy') `
-    -FailZh "技能安装失败。" -FailEn "Skill install failed."
-} catch {
-  Write-Host "技能安装失败（不影响扩展使用，可稍后重跑 scripts/install-skills.mjs）" -ForegroundColor Yellow
-  Write-Host "Skill install failed (the extension still works; rerun scripts/install-skills.mjs later)" -ForegroundColor Yellow
-}
+# -AllowFailure rather than try/catch: Stop-Install ends the run with `exit`, which try/catch
+# cannot catch, so the old wrapper never reached its warning and a failed skill install
+# aborted the whole install instead of costing only the skill.
+Invoke-Quiet -WorkingDirectory $Root -Command 'node' -Arguments @('scripts/install-skills.mjs', '--copy') `
+  -FailZh "技能安装失败（不影响扩展使用，可稍后重跑 scripts/install-skills.mjs）" `
+  -FailEn "Skill install failed (the extension still works; rerun scripts/install-skills.mjs later)" `
+  -AllowFailure
 
 Write-Step 4 "准备扩展并打开 Chrome" "Prepare the extension and open Chrome"
 Confirm-Browser | Out-Null
@@ -465,7 +544,10 @@ if ($ClipboardReady) {
 
 Write-Host ''
 $QuotedRoot = "'" + $Root.Replace("'", "''") + "'"
-Write-Host ("重启 dsh：cd {0}; pnpm start" -f $QuotedRoot)
+# A registered plugin is picked up by a running dsh without a restart (the profile manifest is
+# what it watches), but that is a property of the dsh version, so the command stays as the
+# fallback rather than as a required step.
+Write-Pair ("dsh 正在运行时插件通常会在几秒内热加载；没有加载时重启：cd {0}; pnpm start" -f $QuotedRoot) ("A running dsh usually picks the plugin up within seconds; restart if it does not: cd {0}; pnpm start" -f $QuotedRoot)
 Write-Host ''
 # Single-quoted template + concatenation: the printed command contains `$s` and `$env:TEMP`, and a
 # double-quoted string would evaluate them here instead of printing them.
