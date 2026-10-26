@@ -67,8 +67,9 @@ import {
   type AffinityTab,
 } from './tab-affinity.ts'
 import { FocusedWindowTracker } from './focused-window.ts'
-import { ApprovalCoordinator, type ApprovalRequestResult } from './approval-coordinator.ts'
+import { APPROVAL_TIMEOUT_MS, ApprovalCoordinator, type ApprovalRequestResult } from './approval-coordinator.ts'
 import { unboundNavigateDestination as resolveUnboundNavigateDestination } from './navigate-consent.ts'
+import { clearNavigationFailure, recordNavigationFailure, recordedNavigationFailure } from './page-errors.ts'
 import { detachDevtoolsSession, isSessionAttached, primeSession } from './devtools.ts'
 import { jsDebugTabIds } from './js-debug.ts'
 import { visionAvailable } from './capture.ts'
@@ -219,11 +220,30 @@ function isDshPageUrl(pageUrl: string): boolean {
 const pendingApprovals = new Map<string, ApprovalRequest>()
 /** Open assistant pages (side panel / floating window) that can show cards. */
 let assistantPages = 0
+/**
+ * Windows that host an assistant page.
+ *
+ * A rendered card is only a reminder while its window is in front: a minimized
+ * or background window keeps the card and still lets it expire. These are the
+ * windows a pending approval nudges.
+ */
+const assistantWindows = new Set<number>()
 
 chrome.runtime.onConnect.addListener((port) => {
   if (port.name !== 'assistant') return
   assistantPages += 1
-  port.onDisconnect.addListener(() => { assistantPages = Math.max(0, assistantPages - 1) })
+  let windowId: number | undefined
+  port.onMessage.addListener((message: unknown) => {
+    if (typeof message !== 'object' || message === null) return
+    const candidate = message as { type?: unknown; windowId?: unknown }
+    if (candidate.type !== 'assistant.window' || typeof candidate.windowId !== 'number') return
+    windowId = candidate.windowId
+    assistantWindows.add(windowId)
+  })
+  port.onDisconnect.addListener(() => {
+    assistantPages = Math.max(0, assistantPages - 1)
+    if (windowId !== undefined) assistantWindows.delete(windowId)
+  })
 })
 let lastPersistedAffinity: string | undefined
 let affinityPersistence = Promise.resolve()
@@ -408,48 +428,140 @@ async function syncDevtoolsPriming(): Promise<void> {
 }
 
 const APPROVAL_NOTIFICATION_PREFIX = 'dsh-browser-approval:'
+/** The window as users see it, derived so the copy cannot drift from the timer. */
+const APPROVAL_WINDOW_SECONDS = Math.round(APPROVAL_TIMEOUT_MS / 1000)
+/**
+ * Expired approvals whose notification is kept as a trace, oldest first, with
+ * the window that raised them: the pending entry is gone by then, and a click
+ * on the note still has to bring the right window forward.
+ */
+const expiredApprovalNotifications = new Map<string, number>()
+/** How many expired traces to keep before the oldest is cleared. */
+const MAX_EXPIRED_APPROVAL_NOTIFICATIONS = 3
 
 function approvalNotificationId(id: string): string {
   return `${APPROVAL_NOTIFICATION_PREFIX}${id}`
 }
 
+/**
+ * Render an approval card, or report that no card could be rendered.
+ *
+ * The return value is what the coordinator acts on: `true` means a live
+ * assistant page will show the card, `false` means none is connected and the
+ * coordinator should post the OS notification (the status window opened here is
+ * the fallback for the side-panel form, which cannot open without a gesture).
+ */
 function deliverApproval(request: ApprovalRequest): boolean {
   pendingApprovals.set(request.id, request)
+  // A reminder from an earlier approval has done its job once a new one arrives.
+  clearExpiredApprovalNotifications()
   if (assistantPages > 0) {
     // A live assistant page will render the card from push.approval.
     sendUiPush({ type: 'push.approval', request })
+    remindUnfocusedAssistantWindows(request)
     return true
   }
-  // No assistant UI is open: pop the floating window so the card is hard to
-  // miss (side-panel mode cannot open without a gesture, so keep the OS
-  // notification as the fallback there).
+  // No assistant UI is open: pop the status window so the card is hard to miss.
   openStatusSurface()
-  notifyApproval(request)
-  return true
+  return false
 }
 
-function notifyApproval(request: ApprovalRequest): void {
-  if (!settings.approvalNotifications) return
-  const copy = getUiLocale() === 'zh'
+/**
+ * Post the reminder when the assistant window cannot be seen.
+ *
+ * A card rendered into a minimized or background window is not a reminder, and
+ * it still expires after 60 seconds. The OS notification is the thing that
+ * reaches someone working in another application; drawing attention to the
+ * window (Dock bounce / taskbar flash) was tried and removed — it is the same
+ * chrome.windows API on both platforms, so it added a flash with no extra reach.
+ */
+function remindUnfocusedAssistantWindows(request: ApprovalRequest): void {
+  for (const windowId of assistantWindows) {
+    void Promise.resolve(chrome.windows.get(windowId)).then((win) => {
+      if (win.focused === true) return
+      notifyApproval(request)
+    }).catch(() => {
+      // The window is gone; its port's disconnect handler drops it from the set.
+    })
+  }
+}
+
+function approvalCopy(request: ApprovalRequest, expired: boolean): { title: string; message: string } {
+  const zh = getUiLocale() === 'zh'
+  if (expired) {
+    return zh
+      ? {
+          title: '浏览器操作确认已过期',
+          message: `${request.action} 在 ${APPROVAL_WINDOW_SECONDS} 秒内没有得到答复，未执行。需要时请重新发起。`,
+        }
+      : {
+          title: 'Browser approval expired',
+          message: `No answer within ${APPROVAL_WINDOW_SECONDS} seconds for ${request.action}; nothing ran. Ask again when ready.`,
+        }
+  }
+  return zh
     ? {
         title: '浏览器操作等待确认',
-        message: '点击打开 AI 浏览器助手，并在 60 秒内确认或拒绝。',
+        message: `点击打开 AI 浏览器助手，并在 ${APPROVAL_WINDOW_SECONDS} 秒内确认或拒绝。`,
       }
     : {
         title: 'Browser action awaiting approval',
-        message: 'Click to open AI Browser Assistant, then allow or deny within 60 seconds.',
+        message: `Click to open AI Browser Assistant, then allow or deny within ${APPROVAL_WINDOW_SECONDS} seconds.`,
       }
+}
+
+function postApprovalNotification(request: ApprovalRequest, expired: boolean): void {
+  const copy = approvalCopy(request, expired)
   void Promise.resolve(chrome.notifications.create(approvalNotificationId(request.id), {
     type: 'basic',
     iconUrl: chrome.runtime.getURL('assets/icons/icon128.png'),
     title: copy.title,
     message: copy.message,
     requireInteraction: true,
-  })).catch(() => {})
+  })).catch((error: unknown) => {
+    // A notification that never appeared used to leave no trace at all, which
+    // made "the user missed the card" indistinguishable from "nothing was sent".
+    recordDebugEvent(
+      'notification-failed',
+      `${expired ? 'expired ' : ''}${request.action}: ${error instanceof Error ? error.message : String(error)}`,
+    )
+  })
+}
+
+function notifyApproval(request: ApprovalRequest): void {
+  if (!settings.approvalNotifications) return
+  postApprovalNotification(request, false)
 }
 
 function clearApprovalNotification(id: string): void {
   void Promise.resolve(chrome.notifications.clear(approvalNotificationId(id))).catch(() => {})
+}
+
+/**
+ * Turn an expired approval's notification into a short "this expired" note.
+ *
+ * The card and the pending entry are already gone, so clearing the notification
+ * left the user with no trace of the prompt they missed. The same notification
+ * id is reused; the newest few are kept and older ones are cleared.
+ */
+function expireApprovalNotification(request: ApprovalRequest, windowId: number): void {
+  if (!settings.approvalNotifications) {
+    clearApprovalNotification(request.id)
+    return
+  }
+  postApprovalNotification(request, true)
+  expiredApprovalNotifications.set(request.id, windowId)
+  while (expiredApprovalNotifications.size > MAX_EXPIRED_APPROVAL_NOTIFICATIONS) {
+    const oldest = expiredApprovalNotifications.keys().next().value
+    if (oldest === undefined) break
+    expiredApprovalNotifications.delete(oldest)
+    clearApprovalNotification(oldest)
+  }
+}
+
+function clearExpiredApprovalNotifications(): void {
+  for (const id of expiredApprovalNotifications.keys()) clearApprovalNotification(id)
+  expiredApprovalNotifications.clear()
 }
 
 function approvalResolved(id: string): void {
@@ -459,13 +571,10 @@ function approvalResolved(id: string): void {
 }
 
 const approvals = new ApprovalCoordinator({
-  deliver: (request) => {
-    if (deliverApproval(request)) return true
-    notifyApproval(request)
-    return false
-  },
+  deliver: deliverApproval,
   notify: notifyApproval,
   clearNotification: clearApprovalNotification,
+  expired: expireApprovalNotification,
   resolved: approvalResolved,
 })
 
@@ -1541,6 +1650,11 @@ async function handleVirtualTool(call: ToolCall, signal: AbortSignal): Promise<T
     const lines: string[] = []
     for (const tab of tabs) {
       if (tab.id === undefined || !isBindableTabUrl(tab.url)) continue
+      // The line format is a contract with the host: `parseBindableTabs` reads
+      // exactly `ID=<n> | <title> | <url>` back. Anything appended here — even a
+      // useful note like a failed load — makes the host drop the whole entry,
+      // so the failed page would vanish from the binding question instead of
+      // being explained. That reason travels in the bind answer instead.
       lines.push(formatBindableTab({ id: tab.id, title: tab.title ?? '', url: tab.url ?? '' }))
       if (lines.length >= MAX_BINDABLE_TABS) break
     }
@@ -1588,6 +1702,19 @@ async function handleVirtualTool(call: ToolCall, signal: AbortSignal): Promise<T
     // The URL alone, not `42 — <url>`: the row truncates at 48 characters, and the id spent
     // twelve of them on a number the user never asked about. Hovering the row shows it all.
     labelOp(call.id, summary.url)
+    // A bound page that never loaded is not usable by any subsequent call. Say
+    // that in the answer that made it the target — the alternative is a model
+    // that walks into "no content script" and reads it as a protected page.
+    const failure = recordedNavigationFailure(summary.tabId)
+    if (failure !== undefined) {
+      return {
+        ok: true,
+        result: {
+          text: `Bound session to tab ${summary.tabId}: ${summary.title} — but that page failed to load (${failure.error}), so no browser tool can operate it. `
+            + 'Call browser_bind_interactive and bind another page, or ask the user to Unbind this tab so browser_navigate can open an address that works.',
+        },
+      }
+    }
     return { ok: true, result: { text: `Bound session to tab ${summary.tabId}: ${summary.title}` } }
   }
   return { ok: false, error: { code: 'action-failed', message: `Unknown virtual tool ${call.name}` } }
@@ -1967,16 +2094,62 @@ function restartBridge(): void {
 
 // ---- Notifications ----
 
+/**
+ * Bring the approval surface forward from a notification click.
+ *
+ * A notification click is an extension user gesture, and `chrome.sidePanel.open`
+ * only works on that synchronous stack: any `await` or `.then` before it drops
+ * the gesture and Chrome rejects the call. So the panel is opened first, and
+ * focusing the window — which needs no gesture — follows as the fallback.
+ */
+function revealApprovalSurface(windowId: number | undefined): void {
+  if (windowId !== undefined && settings.statusMode === 'panel') {
+    void chrome.sidePanel.open({ windowId })
+      .then(() => chrome.windows.update(windowId, { focused: true }))
+      .catch(() => {
+        void Promise.resolve(chrome.windows.update(windowId, { focused: true })).catch(() => {})
+      })
+    return
+  }
+  if (windowId !== undefined) {
+    openStatusSurface(windowId)
+    return
+  }
+  // No window on record: an approval that predates this worker. The click is
+  // still a gesture, so the ask keeps working — it just costs one round trip.
+  void chrome.windows.getLastFocused().then((win) => {
+    if (win.id === undefined) return
+    revealApprovalSurface(win.id)
+  }).catch(() => {})
+}
+
 chrome.notifications.onClicked.addListener((notificationId) => {
   if (!notificationId.startsWith(APPROVAL_NOTIFICATION_PREFIX)) return
   const id = notificationId.slice(APPROVAL_NOTIFICATION_PREFIX.length)
-  const windowId = approvals.windowId(id)
-  if (windowId === undefined) return
+  // An expired approval left the pending map; its window travelled with the note.
+  const windowId = approvals.windowId(id) ?? expiredApprovalNotifications.get(id)
+  expiredApprovalNotifications.delete(id)
   clearApprovalNotification(id)
-  // Notification clicks are extension user gestures; both panel APIs require
-  // the call to remain inside this handler.
-  void openStatusSurface(windowId)
+  revealApprovalSurface(windowId)
 })
+
+// ---- Page load failures ----
+
+/**
+ * Track failed top-frame loads.
+ *
+ * A failed page is Chrome's error document under the address that was
+ * requested: `tab.url` still looks like an ordinary https page, so the only
+ * place that knows the tab cannot be operated is here. Nothing is persisted —
+ * the record describes the current document, not history.
+ */
+chrome.webNavigation.onErrorOccurred.addListener((details) => {
+  recordNavigationFailure(details.tabId, details.frameId, details.url, details.error)
+})
+chrome.webNavigation.onCommitted.addListener((details) => {
+  clearNavigationFailure(details.tabId)
+})
+chrome.tabs.onRemoved.addListener((tabId) => { clearNavigationFailure(tabId) })
 
 // ---- Tab affinity ----
 

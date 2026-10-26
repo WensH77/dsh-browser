@@ -21,6 +21,7 @@ function harness(delivered = false) {
     deliver: vi.fn(() => delivered),
     notify: vi.fn(),
     clearNotification: vi.fn(),
+    expired: vi.fn(),
     resolved: vi.fn(),
   }
   const coordinator = new ApprovalCoordinator(callbacks, 60_000)
@@ -59,6 +60,26 @@ describe('ApprovalCoordinator', () => {
 
     await vi.advanceTimersByTimeAsync(1)
     await expect(pending).resolves.toEqual({ status: 'timed-out' })
+  })
+
+  it('turns an expired reminder into an expired note instead of clearing it', async () => {
+    vi.useFakeTimers()
+    vi.spyOn(crypto, 'randomUUID').mockReturnValue('12345678-1234-4234-8234-123456789aba')
+    const { callbacks, coordinator } = harness()
+    const pending = coordinator.request(PROMPT, new AbortController().signal, 7)
+
+    await vi.advanceTimersByTimeAsync(60_000)
+    await expect(pending).resolves.toEqual({ status: 'timed-out' })
+
+    // The reminder is kept and re-labelled, so a user who comes back later can
+    // still see that a prompt was missed; clearing it here was the old behaviour.
+    // The window id travels with it: the pending entry is gone, and a click on
+    // that note still has to reach the right window.
+    expect(callbacks.expired).toHaveBeenCalledWith(expect.objectContaining({
+      id: '12345678-1234-4234-8234-123456789aba',
+    }), 7)
+    expect(callbacks.clearNotification).not.toHaveBeenCalled()
+    expect(callbacks.resolved).toHaveBeenCalledWith('12345678-1234-4234-8234-123456789aba')
   })
 
   it('cancels a pending approval when its tool call is withdrawn', async () => {

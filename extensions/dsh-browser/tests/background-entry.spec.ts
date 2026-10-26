@@ -120,6 +120,22 @@ interface Harness {
   approvalNotificationOptions: () => Frame[]
   /** Answer one approval the way the side panel's buttons do. */
   answer: (id: string, decision: string) => void
+  /** Open an assistant page the way `panel/main.tsx` does, reporting its window. */
+  connectAssistant: (windowId: number) => void
+  /** Notifications the worker asked Chrome to clear, in order. */
+  clearedNotifications: () => string[]
+  /** Window updates the worker asked Chrome for (the attention nudge). */
+  windowUpdates: () => Frame[]
+  /** Pretend the assistant window is the focused one. */
+  setAssistantWindowFocused: (focused: boolean) => void
+  /** Report a failed top-frame load, the way `webNavigation.onErrorOccurred` does. */
+  failLoad: (tabId: number, error?: string) => void
+  /** Make Chrome's own frame readout say the current document failed to load. */
+  setFrameErrorOccurred: (failed: boolean) => void
+  /** Click an approval notification, the way the user does. */
+  clickNotification: (approvalId: string) => void
+  /** Side-panel opens the worker asked Chrome for, in order. */
+  sidePanelOpens: () => Frame[]
   /** Client frames the extension sent to the bridge, in order. */
   sentFrames: () => Frame[]
   /** UI pushes the worker broadcast to the panel, in order. */
@@ -183,12 +199,34 @@ async function boot(
   const closedTabs = new Set<number>()
   const navigations: Frame[] = []
   const tabCreations: Frame[] = []
+  const connectListeners: Listener[] = []
+  const clearedNotificationIds: string[] = []
+  const windowUpdateCalls: Frame[] = []
+  const navigationErrorListeners: Listener[] = []
+  const notificationClickListeners: Listener[] = []
+  const sidePanelOpenCalls: Frame[] = []
+  let assistantWindowFocused = false
+  let frameLoadFailed = false
+
+  /** Open one assistant port the way the panel document does. */
+  const connectAssistant = (windowId: number): void => {
+    const messageListeners: Listener[] = []
+    const port = {
+      name: 'assistant',
+      onMessage: { addListener: (listener: Listener) => { messageListeners.push(listener) } },
+      onDisconnect: { addListener: () => undefined },
+    }
+    for (const listener of connectListeners) (listener as (value: unknown) => void)(port)
+    for (const listener of messageListeners) {
+      (listener as (value: unknown) => void)({ type: 'assistant.window', windowId })
+    }
+  }
 
   const chromeApi = {
     runtime: {
       id: EXTENSION_ID,
       getURL: (path: string) => `chrome-extension://${EXTENSION_ID}/${path}`,
-      onConnect: { addListener: () => undefined },
+      onConnect: { addListener: (listener: Listener) => { connectListeners.push(listener) } },
       onMessage: { addListener: (listener: Listener) => { messageListeners.push(listener) } },
       sendMessage: async (message: Frame) => { runtimeMessages.push(message) },
       openOptionsPage: async () => undefined,
@@ -238,28 +276,39 @@ async function boot(
     webNavigation: {
       // Force `listTabFrames` onto its single-main-frame fallback.
       getAllFrames: async () => { throw new Error('no frame tree in this fake') },
+      // The worker asks Chrome about the current document when nothing was
+      // recorded (a page that failed before the worker started).
+      getFrame: async () => ({ errorOccurred: frameLoadFailed, url: activeTab.url }),
+      onErrorOccurred: { addListener: (listener: Listener) => { navigationErrorListeners.push(listener) } },
+      onCommitted: { addListener: () => undefined },
     },
     scripting: { executeScript: async () => [] },
     windows: {
       WINDOW_ID_NONE: -1,
       WINDOW_ID_CURRENT: -2,
       getLastFocused: async () => ({ id: 1 }),
-      get: async () => ({ id: 7 }),
+      get: async (windowId?: number) => ({ id: windowId ?? 7, focused: assistantWindowFocused }),
       create: async () => ({ id: 7 }),
-      update: async () => ({ id: 7 }),
+      update: async (windowId: number, props?: Frame) => {
+        windowUpdateCalls.push({ windowId, ...props })
+        return { id: windowId }
+      },
       onFocusChanged: { addListener: () => undefined },
       onRemoved: { addListener: () => undefined },
     },
     alarms: { create: () => undefined, onAlarm: { addListener: () => undefined } },
     notifications: {
       create: notifications,
-      clear: async () => undefined,
-      onClicked: { addListener: () => undefined },
+      clear: async (id: string) => { clearedNotificationIds.push(id) },
+      onClicked: { addListener: (listener: Listener) => { notificationClickListeners.push(listener) } },
     },
     action: {
       onClicked: { addListener: () => undefined },
     },
-    sidePanel: { open: async () => undefined, setPanelBehavior: async () => undefined },
+    sidePanel: {
+      open: async (props?: { windowId?: number }) => { sidePanelOpenCalls.push({ ...props }) },
+      setPanelBehavior: async () => undefined,
+    },
     downloads: { download: async () => 1, search: async () => [], onChanged: { addListener: () => undefined } },
     debugger: {
       attach: async () => undefined,
@@ -342,6 +391,22 @@ async function boot(
       .filter(([id]) => typeof id === 'string' && id.startsWith(APPROVAL_NOTIFICATION_PREFIX))
       .map(([, options]) => options as Frame),
     sentFrames: () => socket.sent.map((raw) => JSON.parse(raw) as Frame),
+    connectAssistant,
+    clearedNotifications: () => [...clearedNotificationIds],
+    windowUpdates: () => [...windowUpdateCalls],
+    setAssistantWindowFocused: (focused: boolean) => { assistantWindowFocused = focused },
+    failLoad: (tabId: number, error = 'net::ERR_EMPTY_RESPONSE') => {
+      for (const listener of navigationErrorListeners) {
+        (listener as (value: unknown) => void)({ tabId, frameId: 0, url: activeTab.url, error })
+      }
+    },
+    setFrameErrorOccurred: (failed: boolean) => { frameLoadFailed = failed },
+    clickNotification: (approvalId: string) => {
+      for (const listener of notificationClickListeners) {
+        (listener as (value: unknown) => void)(`${APPROVAL_NOTIFICATION_PREFIX}${approvalId}`)
+      }
+    },
+    sidePanelOpens: () => [...sidePanelOpenCalls],
     uiPushes: () => [...runtimeMessages],
     storedSettings: () => storageWrites.at(-1)?.['dshSettings'] as Frame | undefined,
     storedAffinity: () => sessionStorageWrites
@@ -405,6 +470,99 @@ async function card(harness: Harness, count: number): Promise<string> {
   return ids[count - 1]!
 }
 
+describe('approval notification clicks', () => {
+  let harness: Harness
+
+  beforeEach(async () => {
+    harness = await boot(APP_TAB, { bridgeUrl: BRIDGE_URL, statusMode: 'panel' })
+  })
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    vi.restoreAllMocks()
+  })
+
+  it('opens the side panel on the click stack, with the window the approval came from', async () => {
+    await harness.bind(APP_TAB.id, 's1')
+    harness.call({ id: 'c1', name: 'browser_headers', args: { pattern: '/api/' }, sessionId: 's1' })
+    const approvalId = await card(harness, 1)
+
+    // Raising the card already tried to open the surface (panel form, no
+    // gesture, so Chrome rejects it); only the click's own call matters here.
+    const before = harness.sidePanelOpens().length
+    harness.clickNotification(approvalId)
+
+    // Nothing may be awaited before `sidePanel.open`: Chrome drops the user
+    // gesture otherwise, which is exactly what made a clicked reminder do
+    // nothing visible.
+    expect(harness.sidePanelOpens().slice(before)).toEqual([{ windowId: 1 }])
+    expect(harness.clearedNotifications()).toContain(`${APPROVAL_NOTIFICATION_PREFIX}${approvalId}`)
+
+    harness.answer(approvalId, 'allow-once')
+    await harness.settle('c1')
+  })
+})
+
+describe('failed page loads', () => {
+  let harness: Harness
+
+  beforeEach(async () => {
+    harness = await boot()
+  })
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    vi.restoreAllMocks()
+  })
+
+  it('names the load failure instead of calling the page protected', async () => {
+    // The tab URL is still https, so every protocol check passes; only the
+    // load record says this document is Chrome's error page.
+    await harness.bind(APP_TAB.id, 's1')
+    harness.failLoad(APP_TAB.id, 'net::ERR_EMPTY_RESPONSE')
+    harness.call({ id: 'c1', name: 'browser_snapshot', args: {}, sessionId: 's1' })
+
+    const message = JSON.stringify(await harness.settle('c1'))
+    expect(message).toContain('net::ERR_EMPTY_RESPONSE')
+    expect(message).toContain('browser_bind_interactive')
+    expect(message).not.toContain('protected pages')
+  })
+
+  it('keeps every tab row parseable by the host, even for a failed page', async () => {
+    // The host reads these rows back with `ID=<n> | <title> | <url>`; a note
+    // appended here makes it drop the whole entry, hiding the page from the
+    // binding question. The failed-load reason travels in the bind answer.
+    harness.failLoad(APP_TAB.id)
+    harness.call({ id: 'c1', name: 'browser_list_tabs', args: {}, sessionId: 's1' })
+
+    const frame = await harness.settle('c1') as { result?: { text?: string } }
+    const lines = String(frame.result?.text ?? '').split('\n')
+    expect(lines.length).toBeGreaterThan(0)
+    for (const line of lines) {
+      expect(line).toMatch(/^ID=\d+ \| .* \| \S+$/)
+    }
+  })
+
+  it('says a bound page never loaded, in the answer that bound it', async () => {
+    harness.failLoad(APP_TAB.id)
+    harness.call({ id: 'b1', name: 'browser_bind_tab', args: { tabId: APP_TAB.id }, sessionId: 's1' })
+
+    const message = JSON.stringify(await harness.settle('b1'))
+    expect(message).toContain('failed to load')
+    expect(message).toContain('net::ERR_EMPTY_RESPONSE')
+  })
+
+  it('asks Chrome about the document when nothing was recorded', async () => {
+    // A page that failed before this worker started has no record; Chrome can
+    // still say the frame failed, just not which error.
+    await harness.bind(APP_TAB.id, 's1')
+    harness.setFrameErrorOccurred(true)
+    harness.call({ id: 'c1', name: 'browser_snapshot', args: {}, sessionId: 's1' })
+
+    expect(JSON.stringify(await harness.settle('c1'))).toContain('the page did not load')
+  })
+})
+
 describe('background entry consent gate', () => {
   let harness: Harness
 
@@ -415,6 +573,62 @@ describe('background entry consent gate', () => {
   afterEach(() => {
     vi.unstubAllGlobals()
     vi.restoreAllMocks()
+  })
+
+  it('posts a notification when no assistant page can show the card', async () => {
+    // No assistant page is open, so the card has nowhere to render: the status
+    // window is opened and the OS notification is what reaches the user.
+    await harness.bind(APP_TAB.id, 's1')
+    harness.call({ id: 'c1', name: 'browser_headers', args: { pattern: '/api/' }, sessionId: 's1' })
+
+    const approvalId = await card(harness, 1)
+    expect(harness.approvalNotificationOptions()).toEqual([
+      expect.objectContaining({ title: expect.stringContaining('awaiting approval') }),
+    ])
+
+    harness.answer(approvalId, 'allow-once')
+    await harness.settle('c1')
+  })
+
+  it('notifies when the assistant window is not in front, without flashing it', async () => {
+    harness.connectAssistant(9)
+    await harness.bind(APP_TAB.id, 's1')
+    harness.call({ id: 'c1', name: 'browser_headers', args: { pattern: '/api/' }, sessionId: 's1' })
+
+    const approvalId = await card(harness, 1)
+    expect(harness.uiPushes().some((message) => message.type === 'push.approval')).toBe(true)
+    // A card rendered into a background window is not a reminder, so the OS
+    // notification is posted. The window is not flashed: `drawAttention` is the
+    // same API on Windows (taskbar flash) and reached nobody the notification
+    // did not already reach.
+    await vi.waitFor(() => {
+      expect(harness.approvalNotificationOptions()).toHaveLength(1)
+    })
+    expect(harness.windowUpdates()).toEqual([])
+
+    harness.answer(approvalId, 'allow-once')
+    await harness.settle('c1')
+  })
+
+  it('leaves a focused assistant window alone', async () => {
+    harness.connectAssistant(9)
+    harness.setAssistantWindowFocused(true)
+    await harness.bind(APP_TAB.id, 's1')
+    harness.call({ id: 'c1', name: 'browser_headers', args: { pattern: '/api/' }, sessionId: 's1' })
+
+    // The card goes to the window on screen, so there is nothing to nudge and
+    // nothing to notify. `card()` counts notifications, so read the push here.
+    const approvalId = await vi.waitFor(() => {
+      const push = harness.uiPushes().find((message) => message.type === 'push.approval')
+      expect(push).toBeDefined()
+      const request = (push as { request: Frame }).request
+      return request.id as string
+    })
+    expect(harness.windowUpdates()).toEqual([])
+    expect(harness.approvalNotificationOptions()).toHaveLength(0)
+
+    harness.answer(approvalId, 'allow-once')
+    await harness.settle('c1')
   })
 
   it('raises one card for a session-scoped action and runs the repeat without asking again', async () => {

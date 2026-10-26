@@ -26,6 +26,7 @@ import { addBlockRule, addHeaderRule, clearTabRules, listTabRules, parseHeaderCh
 import { wrapUntrustedContent, wrapUntrustedResult } from '../security/untrusted.ts'
 import { recordDebugEvent } from './debug-log.ts'
 import { approvalPromptForCall } from './authorization.ts'
+import { pageLoadFailure, type NavigationFailure } from './page-errors.ts'
 import { waitForNextDocumentReady } from './navigation.ts'
 import type { ApprovalAuthorization, ApprovalPrompt, ApprovalRefusal } from '../security/approval.ts'
 
@@ -362,6 +363,22 @@ export function frameMissingFailure(frameId: number): ToolAnswer {
 /** @see frameMissingFailure */
 export function frameArgumentInvalid(): ToolAnswer {
   return { ok: false, error: { code: 'action-failed', message: 'frame must be a non-negative integer.' } }
+}
+
+/**
+ * A page Chrome never managed to load.
+ *
+ * The bridge cannot operate an error document and no retry changes that: the
+ * tab is showing Chrome's own page, not the site. Name the load error — it is
+ * the fact the model cannot see — plus the ways out, cheapest first.
+ */
+export function pageLoadFailedFailure(failure: NavigationFailure): ToolAnswer {
+  return unavailable(
+    `This tab is showing Chrome's error page for a load that failed: ${failure.error} (${failure.url}). `
+    + 'No browser tool can operate an error page, and retrying the same call cannot work — this is a network-level failure, not a protected page. '
+    + 'Tell the user the page did not load, then call browser_bind_interactive and bind another page; '
+    + 'if there is no other page, ask the user to Unbind this tab so browser_navigate can open an address that works.',
+  )
 }
 
 /** Preserve the factual approval outcome for the model without prescribing a response. */
@@ -1161,6 +1178,11 @@ export async function dispatchToolCall(
       if (error instanceof PageDialogInterrupt) {
         return error.dispatched ? dialogInterruptFailure(error.dialog) : dialogHoldFailure(error.dialog)
       }
+      // A page that failed to load is not a protected page: it looks like an
+      // ordinary http(s) tab, and only webNavigation knows the difference. Which
+      // one it is decides what the model does next, so ask before guessing.
+      const failure = tab.id === undefined ? undefined : await pageLoadFailure(tab.id, tab.url)
+      if (failure !== undefined) return pageLoadFailedFailure(failure)
       return unavailable('The content script could not be loaded on this page. Chrome internal and protected pages do not support browser operations.')
     }
   }
