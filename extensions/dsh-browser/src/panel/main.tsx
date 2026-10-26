@@ -17,5 +17,12 @@ const root = document.getElementById('root')
 if (root === null) throw new Error('panel root missing')
 createRoot(root).render(<App />)
 
-// Signal the background that this assistant page can display approvals.
-chrome.runtime.connect({ name: 'assistant' })
+// Signal the background that this assistant page can display approvals. The
+// window id travels with it so a pending approval can draw attention to this
+// window when it is not in front — a card in a background window is not a
+// reminder, and the approval expires after 60 seconds either way.
+const port = chrome.runtime.connect({ name: 'assistant' })
+void chrome.windows.getCurrent().then((win) => {
+  if (win.id === undefined) return
+  port.postMessage({ type: 'assistant.window', windowId: win.id })
+}).catch(() => {})

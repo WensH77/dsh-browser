@@ -12,9 +12,22 @@ interface PendingApproval {
 }
 
 interface ApprovalCoordinatorCallbacks {
+  /**
+   * Render the card. The boolean is "a card is now visible", not "the request
+   * was handled": `false` is what makes {@link ApprovalCoordinatorCallbacks.notify}
+   * the reminder instead of a duplicate of the card.
+   */
   deliver: (request: ApprovalRequest) => boolean
   notify: (request: ApprovalRequest, windowId: number) => void
   clearNotification: (id: string) => void
+  /**
+   * Called instead of {@link ApprovalCoordinatorCallbacks.clearNotification}
+   * when the window elapsed with no answer, so the reminder can be turned into
+   * a "this expired" note rather than disappearing without a trace. The window
+   * id travels with it: the pending entry is gone, and a click on that note
+   * must still be able to bring the right window forward.
+   */
+  expired?: (request: ApprovalRequest, windowId: number) => void
   resolved: (id: string) => void
 }
 
@@ -84,7 +97,11 @@ export class ApprovalCoordinator {
       console.warn('[dsh-browser] approval', id, 'settled', result.status)
     }
     pending.resolve(result)
-    this.callbacks.clearNotification(id)
+    if (result.status === 'timed-out' && this.callbacks.expired !== undefined) {
+      this.callbacks.expired(pending.request, pending.windowId)
+    } else {
+      this.callbacks.clearNotification(id)
+    }
     this.callbacks.resolved(id)
   }
 }
