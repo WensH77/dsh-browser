@@ -58,4 +58,19 @@ describe('UI bundle contract', () => {
     const shared = (await readdir(`${dist}/assets`)).filter((name) => name.endsWith('.js'))
     expect(shared.length, 'exactly one shared JS chunk').toBe(1)
   })
+
+  // A page-level `color-scheme: light` is not a cosmetic choice: it pins the
+  // canvas, the scrollbars and the native controls to light whatever the
+  // stylesheet says, so a Mac that turns dark at sunset drew a dark panel inside
+  // light chrome. `light dark` is also what lets the switch happen without a
+  // reload, so both pages have to declare it and neither may drift back.
+  it('leaves both pages free to follow the system colour scheme', async () => {
+    for (const page of ['panel', 'options']) {
+      const html = await readText(`${page}/index.html`)
+
+      expect(html, `${page}/index.html must not pin one scheme`).toContain(
+        '<meta name="color-scheme" content="light dark" />',
+      )
+    }
+  })
 })

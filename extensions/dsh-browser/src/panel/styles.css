@@ -1,20 +1,52 @@
+/* One palette per appearance, and every rule below reads its colour from here.
+   `prefers-color-scheme` is re-evaluated in place when the system flips -- on a
+   Mac set to switch automatically that moment is sunset -- so the panel moves
+   with Chrome without a reload and without a JS listener.
+   Tokens ending in `-ink` are foreground colours and need their own dark value:
+   the light-mode greens, ambers and reds are dark enough to disappear on
+   `--bg` once it is #1c1f24, and `--accent` doubles as a button fill (where
+   white text sits on it), so the readable-on-dark variant is `--accent-ink`. */
 :root {
   color-scheme: light dark;
   --bg: #f6f7f9;
-  --bg-dark: #1c1f24;
+  --surface: #ffffff;
   --fg: #1c1f24;
-  --fg-dark: #e7e9ec;
   --muted: #6b7280;
-  --muted-dark: #9aa1ab;
   --accent: #2f6fed;
+  --accent-ink: #2f6fed;
+  --accent-wash: rgba(47, 111, 237, 0.06);
   --ok: #22a06b;
+  --ok-ink: #1a7f55;
+  --warn-ink: #b45309;
   --err: #c9372c;
+  --err-ink: #b3261b;
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #1c1f24;
+    --surface: #23272e;
+    --fg: #e7e9ec;
+    --muted: #9aa1ab;
+    --accent-ink: #8ab0ff;
+    --accent-wash: rgba(47, 111, 237, 0.16);
+    --ok: #34c27f;
+    --ok-ink: #7fd3ab;
+    --warn-ink: #e8c07a;
+    --err: #f07a6e;
+    --err-ink: #f19a90;
+  }
 }
 
 * { box-sizing: border-box; }
 
 html, body { margin: 0; height: 100%; }
+
+/* The canvas, not just `body`: with the body at `height: 100%` anything the body
+   does not cover (a scroll corner, the moment before React mounts) would show the
+   UA's own white, which is the one surface a dark panel cannot fix from inside. */
+html { background: var(--bg); }
 
 /* The React mount point is `.panel`'s parent, so it has to carry the height too:
    `height: 100%` resolves against the parent, and with `#root` left at `auto` the
@@ -26,10 +58,6 @@ html, body { margin: 0; height: 100%; }
 body {
   background: var(--bg);
   color: var(--fg);
-}
-
-@media (prefers-color-scheme: dark) {
-  body { background: var(--bg-dark); color: var(--fg-dark); }
 }
 
 .panel {
@@ -67,7 +95,7 @@ body {
 .panel__state { font-weight: 600; font-size: 13px; }
 .panel__header-fill { flex: 1; }
 .panel__reconnect { font-size: 12px; padding: 3px 8px; border-radius: 6px; border: 1px solid rgba(128,128,128,.4); background: transparent; color: inherit; cursor: pointer; }
-.panel__reconnect:hover { border-color: var(--accent); color: var(--accent); }
+.panel__reconnect:hover { border-color: var(--accent); color: var(--accent-ink); }
 
 /* `min-height: 0` is what lets this shrink: a flex item defaults to
    `min-height: auto`, so without it the body refuses to go below its content
@@ -144,7 +172,7 @@ button {
 
 .btn--sm { padding: 3px 9px; font-size: 11.5px; }
 
-.btn--ghost:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); background: rgba(47, 111, 237, 0.06); }
+.btn--ghost:hover:not(:disabled) { border-color: var(--accent); color: var(--accent-ink); background: var(--accent-wash); }
 
 .btn:disabled { opacity: 0.42; cursor: not-allowed; }
 
@@ -182,7 +210,11 @@ button {
    be arbitrarily long: as a normal flow element it scrolled out of the viewport,
    so the prompt was invisible while the pending call ran down its 90s and then
    failed. It sticks to the top of the feed instead. The opaque background and
-   z-index are what stop the rows scrolling *through* it. */
+   z-index are what stop the rows scrolling *through* it.
+   The amber wash goes in as an image, not as a second colour in the shorthand:
+   `background: rgba(...) var(--bg)` is not a valid declaration (one colour per
+   shorthand), so it was dropped at computed-value time and the section stayed
+   transparent -- exactly the see-through sticky box this comment is about. */
 .approvals {
   position: sticky;
   top: 0;
@@ -191,11 +223,11 @@ button {
   padding: 10px;
   border: 1px solid rgba(217,119,6,.45);
   border-radius: 10px;
-  background: rgba(217,119,6,.06) var(--bg);
+  background-color: var(--bg);
+  background-image: linear-gradient(rgba(217,119,6,.06), rgba(217,119,6,.06));
   animation: approvals-in 260ms ease-out;
 }
-@media (prefers-color-scheme: dark) { .approvals { background: rgba(217,119,6,.06) var(--bg-dark); } }
-.approvals__card { border: 1px solid rgba(128,128,128,.3); border-radius: 9px; padding: 9px; margin-bottom: 8px; background: var(--bg); }
+.approvals__card { border: 1px solid rgba(128,128,128,.3); border-radius: 9px; padding: 9px; margin-bottom: 8px; background: var(--surface); }
 .approvals__card:last-child { margin-bottom: 0; }
 @keyframes approvals-in { from { opacity: 0; transform: translateY(-3px); } to { opacity: 1; transform: none; } }
 .btn--primary { border-color: var(--accent); background: var(--accent); color: #fff; }
@@ -314,14 +346,14 @@ button {
 }
 
 .ops__state { margin-left: auto; flex: none; font-size: 10.5px; padding: 0 6px; border-radius: 8px; line-height: 16px; }
-.ops__state--running { background: rgba(34, 160, 107, .15); color: #1a7f55; }
-.ops__state--waiting { background: rgba(217, 119, 6, .15); color: #b45309; }
-.ops__state--error { background: rgba(201, 55, 44, .14); color: #b3261b; }
-.ops__state--cancelled { background: rgba(154, 161, 171, .18); color: #6b7280; }
+.ops__state--running { background: rgba(34, 160, 107, .15); color: var(--ok-ink); }
+.ops__state--waiting { background: rgba(217, 119, 6, .15); color: var(--warn-ink); }
+.ops__state--error { background: rgba(201, 55, 44, .14); color: var(--err-ink); }
+.ops__state--cancelled { background: rgba(154, 161, 171, .18); color: var(--muted); }
 
-.ops__dot--running { background: #22a06b; animation: ops-pulse 1.4s ease-in-out infinite; }
+.ops__dot--running { background: var(--ok); animation: ops-pulse 1.4s ease-in-out infinite; }
 .ops__dot--waiting { background: #d97706; }
-.ops__dot--done { background: #22a06b; }
+.ops__dot--done { background: var(--ok); }
 .ops__dot--error { background: var(--err); }
 .ops__dot--cancelled { background: #9aa1ab; }
 
