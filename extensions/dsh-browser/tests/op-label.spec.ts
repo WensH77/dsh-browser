@@ -142,7 +142,12 @@ describe('panel layout contract', () => {
     expect(rule).toContain('position: sticky')
     expect(rule).toContain('top: 0')
     expect(rule).toContain('z-index')
-    expect(rule).toContain('background:')
+    // The opaque fill has to be its own declaration: `background: rgba(...) var(--bg)`
+    // is one colour too many for the shorthand, so it was dropped at computed-value
+    // time and the box stayed transparent -- the see-through sticky prompt this test
+    // is about. The amber wash rides on `background-image` instead.
+    expect(rule).toContain('background-color: var(--bg)')
+    expect(rule).toContain('background-image:')
   })
 
   it('lists the newest operation first, without dropping the oldest', async () => {

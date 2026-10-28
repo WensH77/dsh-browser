@@ -66,8 +66,10 @@ describe('no-match chip styling', () => {
     const css = (await readFile(resolve(import.meta.dirname, '../src/panel/styles.css'), 'utf8'))
       .replace(/\/\*[\s\S]*?\*\//g, '')
     // A `done` operation stays green: the read succeeded, so the mark must not
-    // have moved the operation to the error colour to be noticeable.
-    expect(css).toContain('.ops__dot--done { background: #22a06b; }')
+    // have moved the operation to the error colour to be noticeable. The green
+    // is the `--ok` token now, which is what lets the dot brighten in dark mode
+    // instead of staying the light-mode green on a dark panel.
+    expect(css).toContain('.ops__dot--done { background: var(--ok); }')
     expect(css).not.toContain('.ops__dot--no-match')
   })
 })

@@ -3,8 +3,14 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="color-scheme" content="light" />
-    <meta name="theme-color" content="#f4f6fa" />
+    <!-- `light` here pinned the page to a light colour scheme whatever the system
+         said: the canvas, scrollbars and native controls stayed light while the
+         stylesheet below them switched to dark, and a user whose macOS turns dark
+         at sunset got exactly that mix. `light dark` lets the user agent follow
+         the same `prefers-color-scheme` value the stylesheet reads. -->
+    <meta name="color-scheme" content="light dark" />
+    <meta name="theme-color" media="(prefers-color-scheme: light)" content="#f6f7f9" />
+    <meta name="theme-color" media="(prefers-color-scheme: dark)" content="#1c1f24" />
     <title>AI Browser Assistant</title>
   </head>
   <body>
