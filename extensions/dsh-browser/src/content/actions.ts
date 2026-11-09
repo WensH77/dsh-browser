@@ -297,7 +297,7 @@ function targetOrThrow(args: Record<string, unknown>, ids: ElementIds): { elemen
  *
  * A selector matching several elements resolves to the first *visible* one, and
  * answering only `selector "a,button"` left the model unable to tell which
- * element it hit. Measured 2026-11-05 in the a business app session: two clicks on
+ * element it hit. Measured 2026-11-05 on a real page: two clicks on
  * comma-joined selectors returned plain success, and the model then widened the
  * selector further (`a[href*=forum],button,li,span`) instead of re-targeting by
  * index. The count is structural — no page-authored text is spliced in.
@@ -761,7 +761,7 @@ function isEditableElement(el: Element | null): el is HTMLElement {
  *
  * A real mousedown blurs whatever held focus; a synthesized `click` never does. A field that
  * commits its value on blur therefore never commits, and the save that follows posts the stale
- * value: measured on a business app's consultation sidebar, the input showed 49 while the request
+ * value: measured on a real app sidebar, the input showed 49 while the request
  * carried 45, and the value did reach the database once the blur was delivered.
  *
  * `blur()` is the faithful call, because it moves `document.activeElement` too. But a document

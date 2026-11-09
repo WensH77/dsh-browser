@@ -6,7 +6,7 @@
  * bridge does leaves the renderer running, so the failure mode here is new: a
  * paused renderer cannot answer a content-script call at all, and every
  * page-facing tool would sit on it until the per-call budget ran out (measured
- * on the dialog freeze, `session-redacted`: 69s and 80s hangs against a 90s
+ * on the dialog freeze, `session-8`: 69s and 80s hangs against a 90s
  * budget). Two things keep that from becoming a trap:
  *
  * - `pausedAtBreakpoint` lets the dispatcher refuse page-facing calls *before*

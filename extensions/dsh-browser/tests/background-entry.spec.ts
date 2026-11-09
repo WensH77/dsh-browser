@@ -1452,7 +1452,7 @@ describe('background entry follow origins', () => {
     const harness = await boot(
       tab,
       { bridgeUrl: BRIDGE_URL, followOrigins: ['https://app.example.com'] },
-      () => ({ ok: true, result: { text: 'specialist form' } }),
+      () => ({ ok: true, result: { text: 'form page' } }),
     )
     await harness.bind(42, 's1')
 
@@ -1460,7 +1460,7 @@ describe('background entry follow origins', () => {
     // with the URL already set (a second update after the commit is also fired).
     tab.id = 55
     tab.windowId = 2
-    tab.title = 'Add specialist'
+    tab.title = 'Add record'
     tab.url = 'https://app.example.com/records/new?recordId=1234'
     harness.openTab({ ...tab })
 
@@ -1481,7 +1481,7 @@ describe('background entry follow origins', () => {
     // One notice per move: the next answer is the page's own text again.
     harness.call({ id: 'f2', name: 'browser_get_text', args: {}, sessionId: 's1' })
     const second = await harness.settle('f2')
-    expect((second.result as Frame).text).toContain('specialist form')
+    expect((second.result as Frame).text).toContain('form page')
     expect((second.result as Frame).text).not.toContain('moved to tab')
   })
 
@@ -1490,7 +1490,7 @@ describe('background entry follow origins', () => {
     const harness = await boot(
       tab,
       { bridgeUrl: BRIDGE_URL },
-      () => ({ ok: true, result: { text: 'specialist form' } }),
+      () => ({ ok: true, result: { text: 'form page' } }),
     )
     await harness.bind(42, 's1')
 
@@ -1498,7 +1498,7 @@ describe('background entry follow origins', () => {
     harness.openTab({
       id: 55,
       windowId: 2,
-      title: 'Add specialist',
+      title: 'Add record',
       url: 'https://app.example.com/records/new?recordId=1234',
     })
 
@@ -1526,7 +1526,7 @@ describe('background entry follow origins', () => {
     harness.openTab({
       id: 66,
       windowId: 2,
-      title: 'Add specialist',
+      title: 'Add record',
       url: 'https://app2.example.com/records/new?recordId=2',
     })
     await vi.waitFor(() => { expect(harness.approvalIds().length).toBeGreaterThan(0) })
@@ -1546,7 +1546,7 @@ describe('background entry follow origins', () => {
     const harness = await boot(
       tab,
       { bridgeUrl: BRIDGE_URL, followOrigins: ['https://app.example.com'] },
-      () => ({ ok: true, result: { text: 'specialist form' } }),
+      () => ({ ok: true, result: { text: 'form page' } }),
     )
     await harness.bind(42, 's1')
 

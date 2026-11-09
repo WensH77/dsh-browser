@@ -42,7 +42,7 @@ describe('shouldRemoveExport', () => {
   })
 
   it('matches on the canonical prefixed spelling only', () => {
-    expect(shouldRemoveExport(entry('session-redacted', RETENTION_DAYS + 1), ['session-redacted'], NOW)).toBe(true)
+    expect(shouldRemoveExport(entry('session-12', RETENTION_DAYS + 1), ['session-12'], NOW)).toBe(true)
     // Without the prefix the name is not the shape this plugin writes, so it is
     // left alone even when the bare id is a real session.
     expect(shouldRemoveExport(entry('1d74e5c5', RETENTION_DAYS + 1), ['1d74e5c5'], NOW)).toBe(false)

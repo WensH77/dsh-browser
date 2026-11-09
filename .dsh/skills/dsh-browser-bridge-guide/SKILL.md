@@ -52,7 +52,7 @@ pointer 对这个场景零副作用，对症的是 blur。不要写「表单提�
 无效再换 `browser_click_pointer`**，不要一上来就用它。
 
 **④ 的另一面：按压即翻转状态的控件，完整序列等于连按两次。** chosen 这类下拉
-（a business app 的 Referrer 字段即此）在 `mousedown` 上展开、在紧随的 `click` 上收起，
+（某个业务系统的 Referrer 字段即此）在 `mousedown` 上展开、在紧随的 `click` 上收起，
 `browser_click_pointer` 的完整序列会让它开一次又关掉，两次都报成功、界面停在原状。
 要坐实这条机制，在展开状态下只发 `click` 看它是否收起：收起即此因，仍开着就换别的解释。
 判据是这次按压对控件属于**触发**（激活、提交）还是**翻转**（开/收、选中/取消）：
@@ -60,6 +60,14 @@ pointer 对这个场景零副作用，对症的是 blur。不要写「表单提�
 结果写进哪个容器（chosen 是 `select` 的 `option` 与 `ul.chosen-results`，不是 jQuery UI
 的 `ul.ui-autocomplete`），在错的容器里读到空不能判定没渲染 —— 这个控件在 `delay`
 与请求窗口内也会把结果列表清空，同一处读到空还有时序这一种解释。
+
+**自绘的联想框不是 jQuery UI，别拿它的 API 试。** `$el.autocomplete('search')` 报
+「prior to initialization」就说明这个控件自己实现了联想：触发条件可能是 `keyup`
+（几百毫秒 debounce）而不是 `input`，结果插在 `body` 下，点中 `li` 才把选择写进隐藏
+字段。做法是「focusin → 写搜索框 → trigger `keyup` → 等菜单出来 → 点目标 `li`」，点完
+**回读隐藏的 id 字段**确认写进去了；只把文本塞进输入框会留下空的 id，页面自己会弹
+「找不到该公司」这类提示。公司这类实体的候选列表，用同一个 finder 接口多拉几条、按唯一
+键（页面给的链接、地址）对齐，别取第一个同名结果。
 
 **⑤ 以上都不成立，再回头核对目标。** 重取一次快照；用 `browser_dom_query` 拿
 它验证过的唯一选择器，不要手写 `:nth-of-type(N)` 猜。下面这些报错都出在这一步，
@@ -72,9 +80,9 @@ pointer 对这个场景零副作用，对症的是 blur。不要写「表单提�
 - `No element … matches selector`：先确认页面没换。一次点击让 URL 变了（结果里会写
   `Page change v2 (https://…)`），旧选择器就作废，原地再点同一个 selector 必然找不到 ——
   重读快照，或换新页面上的 selector。
-- 属性选择器按 DOM 里的**字面值**匹配。`href="client_users.php?client_user_ID=1"`
-  这种相对链接，写成 `a[href="/client_users.php?…"]` 不匹配；拿不准就退成
-  `a[href*="client_user_ID=1"]`。
+- 属性选择器按 DOM 里的**字面值**匹配。`href="report.php?record_ID=1"`
+  这种相对链接，写成 `a[href="/report.php?…"]` 不匹配；拿不准就退成
+  `a[href*="record_ID=1"]`。
 - 框架生成的类名（`MuiButton-contained`、`MuiFormControlLabel-root`）随版本变，
   优先用 `browser_dom_query` 验证过的 selector，或按可见文本定位。
 - `… is not visible`：先 `browser_scroll`，或点包住它的可见元素（复选框常见是
@@ -161,8 +169,8 @@ alert / confirm / prompt 是**浏览器 UI，不是页面内容**：弹窗一开
 会把本会话的受控页直接改绑过去（只限绑定之后新开的页，已开的页不动）。没配过的域名如果
 是**在新窗口**里打开的，浏览器面板会弹一张确认卡（「跟随这次 / 不跟随 / 总是跟随此站点」），
 用户选「总是」才写进列表；模型看不到这张卡，只会看到结果——跟了就出现下面那行提示。
-比如用户在 a business page 页点 Capture 扩展，它在新窗口打开内部系统的 specialist 表单，本会话
-就跟着过去。
+典型场景是抓取类扩展：它在页面上取完数据，再在新窗口打开业务系统的录入表单，本会话就
+跟着过去。
 
 改绑后，模型的下一条**成功**工具回答开头会有一行：
 
@@ -214,6 +222,42 @@ alert / confirm / prompt 是**浏览器 UI，不是页面内容**：弹窗一开
 - 工具报「没有绑定页面」或「受控标签页已消失」时，不要重试同一调用：用
   `browser_navigate` 打开目标 URL（会新开标签页并绑定本会话），或用
   `browser_bind_interactive` 让用户在已打开的页面里挑一个。
+
+### 桥接够不到的地方：工具栏图标与扩展自己的页面
+
+扩展的工具栏图标、以及它自己开的 `chrome-extension://…` 页面，都不在 `browser_*` 的射程
+内：content script 只匹配 `http/https`，对着这类页面取快照会得到
+`The content script could not be loaded on this page…`。用户说「用那个扩展做 X」时，先分清
+哪一步是网页、哪一步只能在浏览器 UI 里点。
+
+- **只能点页面，点不到浏览器 UI。** 要按工具栏图标、要在扩展弹窗里按按钮，只剩两条路：
+  系统层点击，或请用户点。换个 `browser_*` 工具不会绕过去。
+- **别把扩展页当普通页面驱动。** `browser_navigate` 只收 http(s)；Chrome 的「允许 Apple
+  事件中的 JavaScript」对 `chrome-extension://` 同样被拒，报 `此网址不允许使用开发者工具`。
+  **那个开关对扩展页无效**，别当成出口去开它。
+- **AX 也读不到扩展页里的网页内容。** 遍历那个窗口的 AX 树只有工具栏 / 信息栏 / 窗口按钮，
+  没有 `AXWebArea`，所以 `System Events` 的 `click at`、`AXPress` 对页面里的按钮无效，只
+  能点原生 UI。
+- **系统层点击分两种，按目标切。** `osascript -e 'tell application "System Events" to click
+  at {x,y}'` 点工具栏、标题栏通常成功，点到网页内容上会报 `-25211 … 不允许辅助访问`，**权限
+  正常时也照报**，不要反复重试同一条。合成事件更稳：JXA 里 `ObjC.import('CoreGraphics')`，
+  `CGEventCreateMouseEvent(…, CGPointMake(x, y), …)` 配 `CGEventPost(kCGHIDEventTap, …)`。
+  坐标必须走 `CGPointMake`，传普通对象会落到别处。
+- **按下之前把指针读回来。** `CGEventGetLocation(CGEventCreate())` 循环「post move → 读回 →
+  比差」，进到 3px 内再 down/up。鼠标平滑类工具和用户自己的鼠标都会让「固定 sleep 后按」
+  落在移动途中；按下前后各读一次，位置跳了就是这次点击被抢走了，别把它当成「按钮没反应」。
+- **非活动窗口吃掉第一次点击。** 截图看红绿灯：灰色的第一次点击只负责激活窗口，先点一下
+  窗口，再点目标控件。
+- **坐标换算与复验。** `screencapture -x -R<x>,<y>,<w>,<h>` 在 Retina 上出的是 CSS 点的 2
+  倍图，除 2 再加 `-R` 原点；窗口位置另用 AX 的 `position`/`size` 交叉核对。每个动作后截
+  一张图确认，**别用窗口顺序判断谁在前台**（多显示器下它会和截图矛盾）。
+- **空挂载点不代表扩展坏了。** 这类扩展常在页面里留一个空容器，抓取时才渲染遮罩或错误框；
+  真正的面板是它自己开的独立窗口。看到「容器在、里面是空的」先去找那个窗口。
+- **卡片式按钮的可点击区可能只是卡片里的一张图。** 用户说「点了没反应」时，去读那个组件的
+  源码找 `onClick` 挂在哪一层，比按直觉点标题条可靠。
+- **接回业务表单用 URL，不要点。** 扩展最终会新开一个普通的 `http(s)` 表单页；直接
+  `browser_navigate` 到同一个 URL 最省事（命中跟随站点会带那行 `This session was moved to
+  tab N`，没命中就 `browser_bind_interactive` 让用户选）。
 
 ### 安装与更新
 

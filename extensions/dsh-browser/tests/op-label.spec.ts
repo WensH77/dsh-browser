@@ -28,7 +28,7 @@ describe('opLabel', () => {
   it('names a navigation by host, not by the whole URL', () => {
     expect(opLabel(op({
       name: 'browser_navigate',
-      args: { url: 'https://qa.example.org/records/view.php?id=1003&tab=calls' },
+      args: { url: 'https://qa.example.org/records/view.php?id=1&tab=calls' },
     }), copy)).toBe('Navigate to qa.example.org')
   })
 

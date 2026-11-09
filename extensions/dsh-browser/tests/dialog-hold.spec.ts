@@ -24,7 +24,7 @@ interface Harness {
   getAllFrames: ReturnType<typeof vi.fn>
 }
 
-const TAB = { id: 1, url: 'https://staging.example.org/projects/1001' }
+const TAB = { id: 1, url: 'https://staging.example.org/projects/1' }
 const OK = { ok: true, result: { text: 'page' } }
 const SNAPSHOT = { id: 'tool-1', name: 'browser_snapshot', args: {} }
 

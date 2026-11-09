@@ -7,7 +7,7 @@
  * and the tool answers "ok". The two values are independent — a tab can be visible
  * while its window is unfocused — so both are read and both are named.
  *
- * Measured 2026-10-13 on a business app: in a hidden tab a `focus()`/`blur()` pair
+ * Measured 2026-10-13 on a real app: in a hidden tab a `focus()`/`blur()` pair
  * delivered zero blur and zero focusout events, and a save that depended on the
  * `blur` commit posted the field's stale value while the tool reported success.
  *

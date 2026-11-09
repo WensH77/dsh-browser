@@ -19,7 +19,7 @@
 ```sh
 node benchmark/tokens.mjs --project '' --days 3     # 全部工作区：7 个会话，310,546 字符 ≈ 77.6k token
 node benchmark/tokens.mjs --days 3                 # 仅 dsh-browser：4 个会话，89,404 字符 ≈ 22.4k token
-node benchmark/tokens.mjs --project a business app --days 1   # 仅业务站：1 个会话，211,868 字符 ≈ 53k token
+node benchmark/tokens.mjs --project my-workspace --days 1   # 仅业务站：1 个会话，211,868 字符 ≈ 53k token
 ```
 
 字符数按 `字符/4 ≈ token` 折算，图片按 1.5k 字符/token 当量计入。**单个会话就占了全部浏览器 token 的 68%**——省 token 的收益高度集中在少数长会话上。
