@@ -185,6 +185,26 @@ function defaultUpdateCommand(): string {
 }
 
 /**
+ * Close code for "another client now owns the single slot".
+ *
+ * The extension reads this one as an ownership handoff: it stops on purpose and
+ * does not retry (two browsers must not evict each other forever), so a manual
+ * reconnect is the only way back. Reserved for an actual replacement — using it
+ * for a host shutdown parked the extension in that terminal state after every
+ * `dsh` restart.
+ */
+const REPLACED_CLOSE_CODE = 4000
+
+/**
+ * Close code for "this host is going away" (shutdown, plugin reload).
+ *
+ * Any close other than {@link REPLACED_CLOSE_CODE} is a transport failure to the
+ * extension, which is what a restart is: it enters its backoff loop and
+ * reconnects by itself once a host is listening again.
+ */
+const GOING_AWAY_CLOSE_CODE = 1001
+
+/**
  * Token-authenticated bridge server. Construct once per plugin instance;
  * dispose with {@link close}.
  */
@@ -315,6 +335,12 @@ export class BridgeServer {
   /**
    * Terminate the server: close the acceptor, drop all sockets, reject all
    * in-flight tool calls.
+   *
+   * The socket is closed with {@link GOING_AWAY_CLOSE_CODE}, never with the
+   * replacement code: a shutdown is not an ownership handoff, and telling the
+   * extension otherwise left it stopped (no automatic retry) after every
+   * restart, with the panel claiming another client had taken the slot.
+   *
    * @returns a promise resolving after the acceptor stops.
    */
   async close(): Promise<void> {
@@ -322,7 +348,7 @@ export class BridgeServer {
     // "The server is not running" when closing an already-closed server).
     if (this.closed) return
     this.closed = true
-    this.replaceConnection()
+    this.dropConnection(GOING_AWAY_CLOSE_CODE, 'host shutting down', 'the bridge is shutting down')
     for (const socket of this.wss.clients) socket.terminate()
     this.current = null
     await new Promise<void>((resolve, reject) => {
@@ -640,8 +666,24 @@ export class BridgeServer {
     else pending.reject(new BridgeToolError(payloadCode(payload), payloadMessage(payload), payloadNeedsPageChoice(payload)))
   }
 
-  /** Close the current connection (if any) and settle its in-flight calls. */
+  /** Close the current connection (if any) because another one took the slot. */
   private replaceConnection(): void {
+    this.dropConnection(REPLACED_CLOSE_CODE, 'replaced', 'the extension connection was replaced')
+  }
+
+  /**
+   * Close the current connection (if any) and settle its in-flight calls.
+   *
+   * `code` decides what the extension does next, so it is never incidental:
+   * {@link REPLACED_CLOSE_CODE} means it yielded the slot and must not fight for
+   * it, {@link GOING_AWAY_CLOSE_CODE} means the host is leaving and it should
+   * reconnect. Both facts used to be spelled the same way.
+   *
+   * @param code - WebSocket close code the extension reads.
+   * @param reason - close reason sent with it.
+   * @param pendingMessage - why in-flight tool calls are being rejected.
+   */
+  private dropConnection(code: number, reason: string, pendingMessage: string): void {
     const hadCaps = this.clientCaps !== undefined
     this.clientCaps = undefined
     // The language belonged to that socket too: the next extension reports its
@@ -656,12 +698,12 @@ export class BridgeServer {
     this.current = null
     clearInterval(conn.ping)
     if (conn.ws.readyState === WebSocket.OPEN || conn.ws.readyState === WebSocket.CONNECTING) {
-      conn.ws.close(4000, 'replaced')
+      conn.ws.close(code, reason)
     }
     for (const [id, pending] of this.pendingTools) {
       clearTimeout(pending.timer)
       this.pendingTools.delete(id)
-      pending.reject(new BridgeToolError('bridge-closed', 'the extension connection was replaced'))
+      pending.reject(new BridgeToolError('bridge-closed', pendingMessage))
     }
   }
 }

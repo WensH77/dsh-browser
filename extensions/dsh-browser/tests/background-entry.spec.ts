@@ -152,6 +152,8 @@ interface Harness {
   acceptHandshake: () => void
   /** Fire the real `chrome.tabs.onActivated` handler. */
   activateTab: (tabId: number, windowId: number) => void
+  /** Report a newly opened page the way Chrome does (create + commit). */
+  openTab: (tab: { id: number; windowId: number; title?: string; url: string }) => void
   /** Deliver a message the way this extension's content script would. */
   contentMessage: (message: unknown, sender?: Frame) => void
   /** Tab navigations the background performed, in order. */
@@ -196,6 +198,8 @@ async function boot(
   const sessionStorageWrites: Frame[] = []
   const tabRemovedListeners: Listener[] = []
   const tabActivatedListeners: Listener[] = []
+  const tabCreatedListeners: Listener[] = []
+  const tabUpdatedListeners: Listener[] = []
   const closedTabs = new Set<number>()
   const navigations: Frame[] = []
   const tabCreations: Frame[] = []
@@ -267,7 +271,8 @@ async function boot(
         return contentScript(message)
       },
       onActivated: { addListener: (listener: Listener) => { tabActivatedListeners.push(listener) } },
-      onUpdated: { addListener: () => undefined },
+      onCreated: { addListener: (listener: Listener) => { tabCreatedListeners.push(listener) } },
+      onUpdated: { addListener: (listener: Listener) => { tabUpdatedListeners.push(listener) } },
       onReplaced: { addListener: () => undefined },
       // Real listener on purpose: closing a tab is what prunes the binding, and
       // a test that skips this handler would test a state Chrome never reaches.
@@ -428,6 +433,12 @@ async function boot(
     }),
     activateTab: (tabId, windowId) => {
       for (const listener of tabActivatedListeners) (listener as (event: { tabId: number; windowId: number }) => void)({ tabId, windowId })
+    },
+    openTab: (tab) => {
+      for (const listener of tabCreatedListeners) (listener as (tab: unknown) => void)(tab)
+      for (const listener of tabUpdatedListeners) {
+        (listener as (tabId: number, change: unknown, tab: unknown) => void)(tab.id, { url: tab.url, status: 'complete' }, tab)
+      }
     },
     contentMessage: (message, sender) => {
       for (const listener of messageListeners) {
@@ -1419,5 +1430,130 @@ describe('background entry bindings report', () => {
     })
 
     expect(bindingsReports(harness)).toHaveLength(reportsBefore)
+  })
+})
+
+/**
+ * Following a page the user's own workflow opened.
+ *
+ * A capture tool opens its form in a new window; the session that was driving
+ * the page it came from moves there instead of leaving the user to bind again.
+ * The move is a rebinding, and the answer after it says so — otherwise the
+ * model would read a form page as if it were still the profile it captured.
+ */
+describe('background entry follow origins', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    vi.restoreAllMocks()
+  })
+
+  it('moves a bound session onto a newly opened page on a follow origin, and says so once', async () => {
+    const tab = { id: 42, windowId: 1, title: 'Lead', url: 'https://www.example.net/directory/1' }
+    const harness = await boot(
+      tab,
+      { bridgeUrl: BRIDGE_URL, followOrigins: ['https://app.example.com'] },
+      () => ({ ok: true, result: { text: 'specialist form' } }),
+    )
+    await harness.bind(42, 's1')
+
+    // The capture tool opens its form in a new window; Chrome reports it first
+    // with the URL already set (a second update after the commit is also fired).
+    tab.id = 55
+    tab.windowId = 2
+    tab.title = 'Add specialist'
+    tab.url = 'https://app.example.com/records/new?recordId=1234'
+    harness.openTab({ ...tab })
+
+    await vi.waitFor(async () => {
+      const state = await harness.uiRequest({ type: 'ui.state' }) as Frame
+      expect(state.controlled).toMatchObject({ tabId: 55 })
+    })
+
+    harness.call({ id: 'f1', name: 'browser_get_text', args: {}, sessionId: 's1' })
+    const frame = await harness.settle('f1')
+
+    expect(frame.ok).toBe(true)
+    const text = (frame.result as Frame).text as string
+    expect(text).toContain('moved to tab 55')
+    expect(text).toContain('https://app.example.com/records/new?recordId=1234')
+    expect(text).toContain('no longer under this session')
+
+    // One notice per move: the next answer is the page's own text again.
+    harness.call({ id: 'f2', name: 'browser_get_text', args: {}, sessionId: 's1' })
+    const second = await harness.settle('f2')
+    expect((second.result as Frame).text).toContain('specialist form')
+    expect((second.result as Frame).text).not.toContain('moved to tab')
+  })
+
+  it('asks before following a page in a new window, and "always" writes the origin', async () => {
+    const tab = { id: 42, windowId: 1, title: 'Lead', url: 'https://www.example.net/directory/1' }
+    const harness = await boot(
+      tab,
+      { bridgeUrl: BRIDGE_URL },
+      () => ({ ok: true, result: { text: 'specialist form' } }),
+    )
+    await harness.bind(42, 's1')
+
+    // Another window, an origin that is not on the follow list yet.
+    harness.openTab({
+      id: 55,
+      windowId: 2,
+      title: 'Add specialist',
+      url: 'https://app.example.com/records/new?recordId=1234',
+    })
+
+    await vi.waitFor(() => { expect(harness.approvalIds().length).toBeGreaterThan(0) })
+    // Nothing moves before the user answers.
+    const before = await harness.uiRequest({ type: 'ui.state' }) as Frame
+    expect(before.controlled).toMatchObject({ tabId: 42 })
+
+    harness.answer(harness.approvalIds()[0]!, 'follow-always')
+
+    await vi.waitFor(async () => {
+      const state = await harness.uiRequest({ type: 'ui.state' }) as Frame
+      expect(state.controlled).toMatchObject({ tabId: 55 })
+    })
+    await vi.waitFor(() => {
+      expect(harness.storedSettings()?.['followOrigins']).toEqual(['https://app.example.com'])
+    })
+  })
+
+  it('keeps the session where it is when the user declines the new window', async () => {
+    const tab = { id: 42, windowId: 1, title: 'Lead', url: 'https://www.example.net/directory/1' }
+    const harness = await boot(tab, { bridgeUrl: BRIDGE_URL }, () => ({ ok: true, result: { text: 'form' } }))
+    await harness.bind(42, 's1')
+
+    harness.openTab({
+      id: 66,
+      windowId: 2,
+      title: 'Add specialist',
+      url: 'https://app2.example.com/records/new?recordId=2',
+    })
+    await vi.waitFor(() => { expect(harness.approvalIds().length).toBeGreaterThan(0) })
+    harness.answer(harness.approvalIds()[0]!, 'deny')
+
+    await vi.waitFor(async () => {
+      const state = await harness.uiRequest({ type: 'ui.state' }) as Frame
+      expect((state.pendingApprovals as Frame[]).length).toBe(0)
+      expect(state.controlled).toMatchObject({ tabId: 42 })
+    })
+    // A declined page never reaches the settings.
+    expect(harness.storedSettings()?.['followOrigins']).toBeUndefined()
+  })
+
+  it('leaves the session alone when the new page is not on the follow list', async () => {
+    const tab = { id: 42, windowId: 1, title: 'Lead', url: 'https://www.example.net/directory/1' }
+    const harness = await boot(
+      tab,
+      { bridgeUrl: BRIDGE_URL, followOrigins: ['https://app.example.com'] },
+      () => ({ ok: true, result: { text: 'specialist form' } }),
+    )
+    await harness.bind(42, 's1')
+
+    harness.openTab({ id: 55, windowId: 2, title: 'Inbox', url: 'https://mail.example/inbox' })
+    await vi.waitFor(async () => {
+      const state = await harness.uiRequest({ type: 'ui.state' }) as Frame
+      expect(state.controlled).toMatchObject({ tabId: 42 })
+    })
   })
 })

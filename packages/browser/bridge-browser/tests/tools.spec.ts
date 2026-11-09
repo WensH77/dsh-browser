@@ -1428,7 +1428,15 @@ describe('registerBrowserTools', () => {
       expect(text).toContain('extension files: up-to-date at /tmp/mirror')
       // No id/version line without a connection: there is nothing to report.
       expect(text).not.toContain('extension version:')
-      expect(lastLine(text)).toBe('next: run browser_setup to open chrome://extensions and load the extension')
+      // Current files are not a reason to install anything: "not connected" can
+      // simply mean Chrome is closed or the extension is waking up. Naming
+      // browser_setup here sent users to chrome://extensions for an ordinary
+      // reconnect (measured 2026-11-05).
+      expect(lastLine(text)).toBe(
+        'next: ask the user to open the extension panel in Chrome — the files are current, '
+        + 'so it reconnects by itself; browser_setup is only for a first install',
+      )
+      expect(lastLine(text)).not.toContain('chrome://extensions')
       // "One next action" is a property of the text, not of the writer.
       expect(text.match(/^next: /gm)).toHaveLength(1)
     })

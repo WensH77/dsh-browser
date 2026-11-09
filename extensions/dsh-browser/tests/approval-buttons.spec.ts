@@ -9,6 +9,9 @@ const COPY = {
   alwaysAllowReads: 'Always allow reads',
   trustOrigin: 'Trust this site',
   allowInSession: 'Allow in this session',
+  followOnce: 'Follow this time',
+  followAlways: 'Always follow this site',
+  denyFollow: 'Do not follow',
 }
 
 function request(overrides: Partial<ApprovalRequest>): ApprovalRequest {
@@ -63,6 +66,21 @@ describe('panel approval buttons', () => {
   it('never offers a session grant without a session to hand it to', () => {
     expect(ids({ action: 'browser_headers', canTrust: false })).toEqual(['allow-once', 'deny'])
     expect(ids({ action: 'browser_headers', canTrust: false, sessionId: '   ' })).toEqual(['allow-once', 'deny'])
+  })
+
+  it('asks about a new page instead of offering action trust', () => {
+    const buttons = decisionButtons(request({
+      action: 'follow-page',
+      summary: 'A new window opened at https://app.example/add',
+      origins: ['https://app.example'],
+      canTrust: false,
+    }), COPY)
+
+    expect(buttons).toEqual([
+      { id: 'allow-once', label: 'Follow this time' },
+      { id: 'deny', label: 'Do not follow' },
+      { id: 'follow-always', label: 'Always follow this site' },
+    ])
   })
 
   it('keeps reads on their own persistent button', () => {

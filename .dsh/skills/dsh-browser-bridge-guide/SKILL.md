@@ -155,6 +155,28 @@ alert / confirm / prompt 是**浏览器 UI，不是页面内容**：弹窗一开
 - **子代理不要直接调 `browser_*`。** 浏览器一次只被一个会话持有，子代理既看不到扩展
   的卡、也收不到宿主那句提问，只会把 60 秒超时当成「站点打不开」来回试。
 
+### 自动跟随：受控页被换掉时，回答会先说
+
+用户在扩展设置里配了「自动跟随的站点」（`followOrigins`）时，这些站点上**新打开**的页面
+会把本会话的受控页直接改绑过去（只限绑定之后新开的页，已开的页不动）。没配过的域名如果
+是**在新窗口**里打开的，浏览器面板会弹一张确认卡（「跟随这次 / 不跟随 / 总是跟随此站点」），
+用户选「总是」才写进列表；模型看不到这张卡，只会看到结果——跟了就出现下面那行提示。
+比如用户在 a business page 页点 Capture 扩展，它在新窗口打开内部系统的 specialist 表单，本会话
+就跟着过去。
+
+改绑后，模型的下一条**成功**工具回答开头会有一行：
+
+`This session was moved to tab N — <url> — because that page opened on a follow origin. The previous page is no longer under this session's control: re-read this page before acting on it.`
+
+判据与动作：
+
+- 看到这行就以它为准：**旧页的快照、选择器、坐标全部作废**，先重新 `browser_snapshot`
+  或 `browser_get_text` 读新页，再继续。不要拿旧页的上下文往新页上套。
+- 这行只出现一次；它出现后旧页的会话授权已被撤销（页面换了），动作会重新问一遍。
+- 没命中跟随列表的新页面不会自动跟；需要时仍用 `browser_bind_interactive` 让用户选。
+- 受控页被**关掉**是另一条路径：工具会报 `The controlled tab was closed`（`needsPageChoice`），
+  宿主会弹选页，不会把用户当前看的页面偷偷绑上。
+
 ### 受保护页、错误页与标签页失效
 
 - **加载失败会明说。** 标签停在 Chrome 错误页时（页面没加载出来，`ERR_EMPTY_RESPONSE`、

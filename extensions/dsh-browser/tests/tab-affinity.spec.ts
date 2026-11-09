@@ -53,6 +53,22 @@ describe('TabAffinityController', () => {
     expect(affinity.resolveTarget()).toEqual({ kind: 'handoff' })
   })
 
+  it('moves a bound session to another tab when it follows a page', () => {
+    // Following is a rebinding: one page per session, so the previous page stops
+    // being a target for this session the moment the new one is taken.
+    const affinity = new TabAffinityController()
+    affinity.observeActive(tab(1))
+    affinity.bindInitial(tab(1), 'session-a')
+    affinity.observeActive(tab(2))
+
+    expect(affinity.bindNewSession('session-a', tab(2))).toBe(true)
+
+    expect(affinity.resolveTarget('session-a')).toMatchObject({ kind: 'target', tab: { tabId: 2 } })
+    expect(affinity.allowsTarget(1, 'session-a')).toBe(false)
+    expect(affinity.allowsTarget(2, 'session-a')).toBe(true)
+    expect(affinity.competingBinding('session-b')).toEqual({ sessionId: 'session-a', tab: tab(2) })
+  })
+
   it('keeps operating the bound tab in the background after an explicit keep choice', () => {
     const affinity = new TabAffinityController()
     affinity.observeActive(tab(1))

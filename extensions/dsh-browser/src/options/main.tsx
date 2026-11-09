@@ -56,6 +56,9 @@ const zh = {
   bulkDone: '完成',
   emptyTrusted: '列表为空：每次动作都会询问。',
   emptyBlocked: '列表为空：没有站点被拒绝。',
+  follow: '自动跟随的站点',
+  followHint: '这些站点上新打开的页面会自动成为受控页（只跟随绑定之后新开的页面）。',
+  emptyFollow: '列表为空：新开的页面不会自动跟随。',
   bulkHint: '每行一个；https://*.example.com 覆盖整域。',
   crossDomain: '允许跨域名导航',
   crossDomainHint: '默认关闭：只能在同一台主机的页面间导航，换站请用「绑定网页」或首次导航。',
@@ -129,6 +132,9 @@ const en = {
   bulkDone: 'Done',
   emptyTrusted: 'Empty: every action asks first.',
   emptyBlocked: 'Empty: nothing is refused.',
+  follow: 'Follow origins',
+  followHint: 'Newly opened pages on these origins become the controlled page automatically (only pages opened after binding).',
+  emptyFollow: 'Empty: newly opened pages are not followed.',
   bulkHint: 'One per line; https://*.example.com covers the whole domain.',
   crossDomain: 'Allow cross-domain navigation',
   crossDomainHint: 'Off by default: navigation stays on the bound page’s host. Switch hosts with “bind to the page” or a first navigation.',
@@ -460,6 +466,15 @@ export function OptionsApp(): ReactElement {
                 copy={copy}
               />
             </div>
+            <OriginLedger
+              title={copy.follow}
+              hint={copy.followHint}
+              tone="allow"
+              empty={copy.emptyFollow}
+              entries={settings.followOrigins}
+              onChange={(next) => { patch({ followOrigins: next }) }}
+              copy={copy}
+            />
             <label className="field field--check">
               <input
                 type="checkbox"

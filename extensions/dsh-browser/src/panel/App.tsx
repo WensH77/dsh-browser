@@ -42,6 +42,10 @@ export const zh = {
   alwaysAllowReads: '始终允许读取',
   trustOrigin: '信任此网站',
   allowInSession: '本会话内允许',
+  followPage: '自动跟随新页面',
+  followOnce: '跟随这次',
+  followAlways: '总是跟随此站点',
+  denyFollow: '不跟随',
   sessionGrants: '本会话已授予：',
   sessionGrantsNone: '无',
   grantSeparator: '、',
@@ -121,6 +125,10 @@ export const en = {
   alwaysAllowReads: 'Always allow reads',
   trustOrigin: 'Trust this site',
   allowInSession: 'Allow in this session',
+  followPage: 'Follow the new page?',
+  followOnce: 'Follow this time',
+  followAlways: 'Always follow this site',
+  denyFollow: 'Do not follow',
   sessionGrants: 'Session grants: ',
   sessionGrantsNone: 'none',
   grantSeparator: ', ',
@@ -375,7 +383,11 @@ export function App(): ReactElement {
             {pending.map((request) => (
               <article className="approvals__card" key={request.id}>
                 <div className="approvals__head">
-                  <strong>{request.kind === 'read' ? copy.read : copy.action}: {request.action}</strong>
+                  <strong>
+                    {request.action === 'follow-page'
+                      ? copy.followPage
+                      : `${request.kind === 'read' ? copy.read : copy.action}: ${request.action}`}
+                  </strong>
                 </div>
                 <div className="approvals__body">
                   {request.summary}

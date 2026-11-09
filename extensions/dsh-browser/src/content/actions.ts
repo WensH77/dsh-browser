@@ -247,21 +247,22 @@ async function pointerPressPoint(el: Element): Promise<{ x: number; y: number }>
  * with no accessible name still has a CSS path — without falling back to
  * running JavaScript, which bypasses approval, auditing, and settle detection.
  *
- * @param args - model arguments: `index` and/or `selector`.
- * @param ids - the snapshot inventory.
- * @returns the resolved element and how it was addressed.
- */
-/**
- * Resolve the element an action targets.
- *
  * `label` is how both the side panel and the tool-result text point at the
  * element: `[<index>]` or `selector "<css>"`. It is deliberately structural —
  * page-authored text belongs inside the untrusted-content boundary, and an
  * element's accessible name spliced into a status line would sit outside it.
  * The element's own name reaches the model through browser_dom_query, which
  * encloses its answer.
+ *
+ * `matched` is the number of elements the selector matched (only when more than
+ * one): the action used the first visible one, and the caller says so instead of
+ * reporting an unqualified success the model cannot audit.
+ *
+ * @param args - model arguments: `index` and/or `selector`.
+ * @param ids - the snapshot inventory.
+ * @returns the resolved element, how it was addressed, and the match count when ambiguous.
  */
-function targetOrThrow(args: Record<string, unknown>, ids: ElementIds): { element: Element; label: string } {
+function targetOrThrow(args: Record<string, unknown>, ids: ElementIds): { element: Element; label: string; matched?: number } {
   const selector = typeof args.selector === 'string' ? args.selector.trim() : ''
   if (selector !== '') {
     let matches: Element[]
@@ -278,13 +279,35 @@ function targetOrThrow(args: Record<string, unknown>, ids: ElementIds): { elemen
     if (visible === undefined) {
       throw new ActionError('action-failed', `The only element matching "${selector}" is not visible, so it was not clicked. Scroll it into view or use a visible match.`)
     }
-    return { element, label: `selector "${selector}"` }
+    return {
+      element,
+      label: `selector "${selector}"`,
+      ...(matches.length > 1 ? { matched: matches.length } : {}),
+    }
   }
   const index = optionalNumberArg(args, 'index')
   if (index === undefined) {
     throw new ActionError('bad-args', 'Provide either index (from browser_snapshot) or selector (CSS).')
   }
   return { element: elementOrThrow(ids, index), label: `[${index}]` }
+}
+
+/**
+ * How ambiguous the selector was, appended to the action's own sentence.
+ *
+ * A selector matching several elements resolves to the first *visible* one, and
+ * answering only `selector "a,button"` left the model unable to tell which
+ * element it hit. Measured 2026-11-05 in the a business app session: two clicks on
+ * comma-joined selectors returned plain success, and the model then widened the
+ * selector further (`a[href*=forum],button,li,span`) instead of re-targeting by
+ * index. The count is structural — no page-authored text is spliced in.
+ *
+ * @param matched - how many elements the selector matched, when more than one.
+ * @returns the note, or an empty string for an unambiguous target.
+ */
+function ambiguityNote(matched: number | undefined): string {
+  if (matched === undefined) return ''
+  return ` (${matched} elements match this selector; the first visible one was used — target by index to pick another)`
 }
 
 function elementOrThrow(ids: ElementIds, index: number): Element {
@@ -578,9 +601,11 @@ async function clickAction(
 ): Promise<ActionResult> {
   const resolved = targetOrThrow(args, ctx.ids)
   const el = resolved.element
+  // Where the call landed, with the match count when the selector was ambiguous.
+  const where = `${resolved.label}${ambiguityNote(resolved.matched)}`
   const option = typeof args.option === 'string' ? args.option.trim() : ''
   if (option !== '' && !(el instanceof HTMLSelectElement)) {
-    throw new ActionError('bad-args', `option chooses a value in a <select>, but ${resolved.label} is a <${el.localName}>. Drop option, or target the select itself.`)
+    throw new ActionError('bad-args', `option chooses a value in a <select>, but ${where} is a <${el.localName}>. Drop option, or target the select itself.`)
   }
   // A real press blurs the focused field before the target acts on it; a synthesized
   // click never does. One call site covers every press this action makes — select, link
@@ -611,7 +636,7 @@ async function clickAction(
       if (requiresNativeActivation) {
         setTimeout(() => { el.click() }, 0)
         return {
-          text: `Clicked link ${resolved.label} using native browser activation. Call browser_snapshot to read the resulting state.`,
+          text: `Clicked link ${where} using native browser activation. Call browser_snapshot to read the resulting state.`,
           label,
         }
       }
@@ -624,7 +649,7 @@ async function clickAction(
       }))
       if (!shouldNavigate) {
         await waitForPageSettled(ACTION_SETTLE)
-        return withPageDelta(`Clicked link ${resolved.label}.`, ctx, label)
+        return withPageDelta(`Clicked link ${where}.`, ctx, label)
       }
       const sameDocument = href.origin === location.origin
         && href.pathname === location.pathname
@@ -632,7 +657,7 @@ async function clickAction(
       if (sameDocument) {
         if (href.hash !== location.hash) location.hash = href.hash
         await waitForPageSettled(ACTION_SETTLE)
-        return withPageDelta(`Clicked link ${resolved.label}.`, ctx, label)
+        return withPageDelta(`Clicked link ${where}.`, ctx, label)
       }
       // A cross-document navigation can unload this content script before an
       // awaited response. Answer first and navigate in the next task.
@@ -640,20 +665,20 @@ async function clickAction(
         setTimeout(() => { location.href = href.href }, 0)
       }
       return {
-        text: `Clicked link ${resolved.label}. Call browser_snapshot again after navigation settles.`,
+        text: `Clicked link ${where}. Call browser_snapshot again after navigation settles.`,
         label,
         navigationPending: true,
       }
     }
     setTimeout(() => { el.click() }, 0)
-    return { text: `Clicked link ${resolved.label}. The link may open outside the controlled frame.`, label }
+    return { text: `Clicked link ${where}. The link may open outside the controlled frame.`, label }
   }
   if (el instanceof HTMLButtonElement && el.disabled) {
-    throw new ActionError('action-failed', `Button ${resolved.label} is disabled.`)
+    throw new ActionError('action-failed', `Button ${where} is disabled.`)
   }
   await activate(el)
   await waitForPageSettled(ACTION_SETTLE)
-  return withPageDelta(`Clicked ${resolved.label}.`, ctx, label)
+  return withPageDelta(`Clicked ${where}.`, ctx, label)
 }
 
 /** How many `<select>` options one `browser_dom_query` answer lists. */
@@ -833,10 +858,11 @@ async function typeAction(args: Record<string, unknown>, ctx: ActionContext): Pr
   const replace = args.replace === true
   const resolved = targetOrThrow(args, ctx.ids)
   const el = resolved.element
+  const where = `${resolved.label}${ambiguityNote(resolved.matched)}`
   const label = accessibleName(el)
   const contentEditable = el instanceof HTMLElement && el.isContentEditable
   if (!(el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement || contentEditable)) {
-    throw new ActionError('action-failed', `Element ${resolved.label} is not editable (${el.tagName.toLowerCase()}).`)
+    throw new ActionError('action-failed', `Element ${where} is not editable (${el.tagName.toLowerCase()}).`)
   }
   // Typing into a field is what a user does by clicking into it: the field that held focus
   // gives it up first, and this one takes it. Without both halves a form whose fields commit
@@ -853,7 +879,7 @@ async function typeAction(args: Record<string, unknown>, ctx: ActionContext): Pr
     setNativeValue(el, `${el.value}${text}`)
   }
   await waitForPageSettled(TYPE_SETTLE)
-  return withPageDelta(`Entered ${text.length} characters into ${resolved.label}.`, ctx, label)
+  return withPageDelta(`Entered ${text.length} characters into ${where}.`, ctx, label)
 }
 
 async function pressAction(args: Record<string, unknown>, ctx: ActionContext): Promise<ActionResult> {

@@ -3,7 +3,7 @@
 import { isSessionScopableAction } from './session-allowance.ts'
 
 export type ApprovalKind = 'read' | 'action'
-export type ApprovalDecision = 'deny' | 'allow-once' | 'always-allow-reads' | 'trust-session' | 'trust-origin' | 'allow-in-session'
+export type ApprovalDecision = 'deny' | 'allow-once' | 'always-allow-reads' | 'trust-session' | 'trust-origin' | 'allow-in-session' | 'follow-always'
 /**
  * Background authorization result; transport failures must not masquerade as a
  * user decision. `renew` is not a failure: the request expired while the panel
@@ -52,6 +52,7 @@ export function isApprovalDecision(value: unknown): value is ApprovalDecision {
     || value === 'trust-session'
     || value === 'trust-origin'
     || value === 'allow-in-session'
+    || value === 'follow-always'
 }
 
 /** What the background needs to know about a prompt to record a session grant. */

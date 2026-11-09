@@ -1152,6 +1152,14 @@ function mirrorLine(result: SyncResult): string {
  * mask that entirely — the bridge answers, every tool works, and the one thing
  * that cannot happen any more is refreshing the files Chrome loads.
  *
+ * Nothing connected with current files is not a mirror problem, so it must not
+ * borrow the install wording: the files being current says nothing about whether
+ * Chrome is open or the extension is merely asleep and about to reconnect. That
+ * branch used to name `browser_setup` (chrome://extensions) for every
+ * disconnected moment, which turned an ordinary reconnect into an install
+ * prompt — measured 2026-11-05, a status call said "not connected" eight seconds
+ * before the extension connected on its own.
+ *
  * @param connected - whether an extension is connected right now.
  * @param skew - the version comparison.
  * @param sync - the mirror pass that just ran.
@@ -1162,7 +1170,11 @@ function nextAction(connected: boolean, skew: Skew, sync: SyncResult): string {
     if (sync.status === 'unavailable') return 'install the extension from a checkout — this plugin ships no extension build'
     if (sync.status === 'failed') return 'run browser_setup to retry refreshing the extension files'
     if (sync.status === 'synced') return 'load the extension on chrome://extensions — the files were just refreshed'
-    return 'run browser_setup to open chrome://extensions and load the extension'
+    // Up-to-date files: the browser side is the unknown, not the mirror. The
+    // extension panel is where the user sees the state and where a stopped
+    // client offers Reconnect; opening it also wakes a sleeping service worker,
+    // which then connects on its own.
+    return 'ask the user to open the extension panel in Chrome — the files are current, so it reconnects by itself; browser_setup is only for a first install'
   }
   if (skew.verdict === 'restart-dsh') return 'restart dsh so it loads the newer plugin build'
   if (sync.status === 'failed') return 'run browser_setup to retry refreshing the extension files'

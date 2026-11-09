@@ -27,6 +27,7 @@ describe('settingsPatch', () => {
       'approvalNotifications',
       'blockedOrigins',
       'bridgeUrl',
+      'followOrigins',
       'sharePageContent',
       'statusMode',
       'token',

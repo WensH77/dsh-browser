@@ -67,6 +67,7 @@ import {
   type AffinityTab,
 } from './tab-affinity.ts'
 import { FocusedWindowTracker } from './focused-window.ts'
+import { FollowCandidates, announceFollow, askableFollowOrigin, followableOrigin, takeFollowNotice } from './follow.ts'
 import { APPROVAL_TIMEOUT_MS, ApprovalCoordinator, type ApprovalRequestResult } from './approval-coordinator.ts'
 import { unboundNavigateDestination as resolveUnboundNavigateDestination } from './navigate-consent.ts'
 import { clearNavigationFailure, recordNavigationFailure, recordedNavigationFailure } from './page-errors.ts'
@@ -163,6 +164,10 @@ let caps: BridgeCaps | null = null
 let handshakeNotice: BridgeNotice | null = null
 let bridge: BridgeClient | null = null
 const tabAffinity = new TabAffinityController()
+/** Newly opened tabs that may pull a session onto a follow origin. */
+const followCandidates = new FollowCandidates()
+/** The one follow question on screen, if any. */
+let followPrompt: { tabId: number; controller: AbortController } | undefined
 const focusedWindow = new FocusedWindowTracker()
 /** Ephemeral allowlist: cleared when the worker restarts. */
 const sessionTrustedActionOrigins = new Set<string>()
@@ -174,6 +179,14 @@ const sessionTrustedActionOrigins = new Set<string>()
 const sessionAllowances = new SessionAllowance()
 /** Tool calls that can still be withdrawn by a bridge `tool.cancel` frame. */
 const activeToolCalls = new Map<string, AbortController>()
+/**
+ * The tab each in-flight call was dispatched against.
+ *
+ * Kept so a rebinding can withdraw the calls still running on the page it
+ * leaves: their answers describe a page this session no longer operates, and a
+ * capture tool opening a window is exactly when that overlap happens.
+ */
+const callTargets = new Map<string, number>()
 
 /**
  * Read the in-flight tool calls from the worker's own console.
@@ -273,6 +286,9 @@ function normalizeSettings(candidate: Settings): Settings {
     trustJsExecution: candidate.trustJsExecution === true,
     blockedOrigins: Array.isArray(candidate.blockedOrigins)
       ? [...new Set(candidate.blockedOrigins.map(normalizeTrustedOrigin).filter((entry): entry is string => entry !== undefined))].sort()
+      : [],
+    followOrigins: Array.isArray(candidate.followOrigins)
+      ? [...new Set(candidate.followOrigins.map(normalizeTrustedOrigin).filter((entry): entry is string => entry !== undefined))].sort()
       : [],
   }
 }
@@ -662,6 +678,159 @@ function observeActiveSummary(summary: AffinityTab): void {
 function observeActiveTab(tab: chrome.tabs.Tab): void {
   const summary = summarizeTab(tab)
   if (summary !== null) observeActiveSummary(summary)
+}
+
+/**
+ * Withdraw the calls still running on a page this session is leaving.
+ *
+ * Their answers would describe the page the session no longer operates, and a
+ * rebinding happens between calls — the one case where an in-flight answer can
+ * arrive after the page changed underneath it.
+ *
+ * @param tabId - the tab the session is leaving.
+ */
+function abortCallsOnTab(tabId: number): void {
+  for (const [callId, target] of callTargets) {
+    if (target === tabId) activeToolCalls.get(callId)?.abort()
+  }
+}
+
+/**
+ * Move a session to a page that opened on a follow origin.
+ *
+ * A rebinding, not an addition: one session drives one page, so the previous
+ * page stops being controlled and its approvals stop with it. The move is
+ * announced in the session's next tool answer — the model's next call already
+ * runs on this page, and nothing else would tell it that.
+ *
+ * @param sessionId - the session that held the browser when the tab appeared.
+ * @param summary - the page to take.
+ * @param origin - the follow origin that allowed it, for the debug log.
+ */
+function followSession(sessionId: string, summary: AffinityTab, origin: string): void {
+  const current = tabAffinity.getSessionTab(sessionId)
+  if (current?.tabId === summary.tabId) return
+  const previousTabId = current?.tabId
+  followCandidates.forget(summary.tabId)
+  forgetSession(sessionId, 'rebind')
+  resetTabSnapshot(summary.tabId)
+  tabAffinity.bindNewSession(sessionId, summary)
+  keepTabAlive(summary.tabId)
+  announceFollow(sessionId, summary)
+  persistTabAffinity()
+  broadcastTabAffinity()
+  if (previousTabId !== undefined) abortCallsOnTab(previousTabId)
+  recordDebugEvent('follow', `session ${sessionId} -> tab ${summary.tabId} on ${origin}`)
+}
+
+/**
+ * Add one origin to the follow list, so later pages there skip the question.
+ *
+ * @param origin - the origin the user chose to always follow.
+ */
+async function addFollowOrigin(origin: string): Promise<void> {
+  if (settings.followOrigins.includes(origin)) return
+  await persistSettings({ followOrigins: [...settings.followOrigins, origin] })
+  recordDebugEvent('follow', `origin ${origin} added to the follow list`)
+}
+
+/**
+ * Ask whether this session should follow a page that opened in a new window.
+ *
+ * Only the new-window hand-off asks — an ordinary new tab in the same window
+ * stays silent — and only once per page, with one question on screen at a time.
+ * "Always" writes the origin into the follow list, so later pages there follow
+ * without asking; a timeout or a refusal leaves the session where it was.
+ *
+ * @param page - the page that opened.
+ * @param sessionId - the session holding the browser.
+ * @param origin - the origin the card names.
+ * @param held - the page the session currently operates, for the summary.
+ */
+function askFollow(page: AffinityTab, sessionId: string, origin: string, held: AffinityTab): void {
+  if (followPrompt !== undefined) return
+  followCandidates.markAsked(page.tabId)
+  const controller = new AbortController()
+  followPrompt = { tabId: page.tabId, controller }
+  const zh = getUiLocale() === 'zh'
+  const prompt: ApprovalPrompt = {
+    kind: 'action',
+    action: 'follow-page',
+    summary: zh
+      ? `新窗口打开了 ${page.url}，要让本会话（当前在 ${held.url}）跟过去吗？`
+      : `A new window opened at ${page.url}. Let this session (currently on ${held.url}) follow it?`,
+    origins: [origin],
+    canTrust: false,
+  }
+  void approvals.request(prompt, controller.signal, page.windowId, sessionId).then(async (result) => {
+    followPrompt = undefined
+    if (result.status !== 'decision') return
+    if (result.decision !== 'allow-once' && result.decision !== 'follow-always') return
+    if (result.decision === 'follow-always') await addFollowOrigin(origin)
+    if (!tabAffinity.hasBinding(sessionId)) return
+    const current = tabAffinity.getSessionTab(sessionId)
+    if (current === undefined || current.tabId === page.tabId) return
+    followSession(sessionId, page, origin)
+  })
+}
+
+/**
+ * Follow a newly opened page when its origin is on the follow list.
+ *
+ * Runs from tab creation/update events, so it may see a candidate before its
+ * URL is committed; `followableOrigin` refuses anything that is not a real
+ * http(s) page yet, and the next update tries again.
+ *
+ * @param tab - the tab that just appeared or changed.
+ */
+function maybeFollowTab(tab: chrome.tabs.Tab): void {
+  const tabId = tab.id
+  if (tabId === undefined) return
+  const sessionId = followCandidates.sessionFor(tabId)
+  if (sessionId === undefined) return
+  void settingsReady.then(() => {
+    // The tab may have been bound, closed, or followed while settings loaded.
+    if (followCandidates.sessionFor(tabId) === undefined) return
+    if (!tabAffinity.hasBinding(sessionId)) {
+      followCandidates.forget(tabId)
+      return
+    }
+    const summary = summarizeTab(tab)
+    if (summary === null) return
+    const held = tabAffinity.getSessionTab(sessionId)
+    if (held === undefined) {
+      followCandidates.forget(tabId)
+      return
+    }
+    const boundTabIds = new Set<number>()
+    for (const bound of Object.values(tabAffinity.sessionMap())) boundTabIds.add(bound.tabId)
+    const origin = followableOrigin({
+      url: summary.url,
+      tabId,
+      boundTabIds,
+      followOrigins: settings.followOrigins,
+      blockedOrigins: settings.blockedOrigins,
+      isDshPage: isDshPageUrl,
+    })
+    if (origin !== undefined) {
+      followSession(sessionId, summary, origin)
+      return
+    }
+    // Not on the list yet: a page in a new window is the hand-off worth one
+    // question, and only once (maybeFollowTab runs on every tab update).
+    if (followCandidates.hasAsked(tabId)) return
+    const askOrigin = askableFollowOrigin({
+      url: summary.url,
+      tabId,
+      tabWindowId: summary.windowId,
+      boundWindowId: held.windowId,
+      boundTabIds,
+      followOrigins: settings.followOrigins,
+      blockedOrigins: settings.blockedOrigins,
+      isDshPage: isDshPageUrl,
+    })
+    if (askOrigin !== undefined) askFollow(summary, sessionId, askOrigin, held)
+  })
 }
 
 async function syncActiveTab(): Promise<chrome.tabs.Tab | undefined> {
@@ -1102,6 +1271,7 @@ async function openBoundTab(sessionId: string, destination: URL): Promise<boolea
   await affinityReady
   if (tabAffinity.hasBinding(sessionId)) return true
   if (!tabAffinity.bindNewSession(sessionId, summary)) return true
+  followCandidates.forget(summary.tabId)
   keepTabAlive(summary.tabId)
   persistTabAffinity()
   broadcastTabAffinity()
@@ -1694,6 +1864,7 @@ async function handleVirtualTool(call: ToolCall, signal: AbortSignal): Promise<T
     forgetSession(sessionId, 'rebind')
     resetTabSnapshot(summary.tabId)
     tabAffinity.bindNewSession(sessionId, summary)
+    followCandidates.forget(summary.tabId)
     keepTabAlive(summary.tabId)
     persistTabAffinity()
     broadcastTabAffinity()
@@ -1731,6 +1902,33 @@ async function handleVirtualTool(call: ToolCall, signal: AbortSignal): Promise<T
 function recordToolFailure(call: ToolCall, answer: ToolAnswer): void {
   if (answer.ok || answer.error === undefined) return
   recordDebugEvent('tool-error', `${call.name}: ${answer.error.message}`)
+}
+
+/**
+ * Lead an answer with the "this session moved" line, when one is queued.
+ *
+ * The move happens between calls, inside a Chrome event; a call that ran on the
+ * new page must not read like an answer about the old one. Only a successful
+ * answer consumes the notice — a refusal never ran on a page, so the line is
+ * still owed to the next real answer.
+ *
+ * @param answer - the answer the extension produced.
+ * @param sessionId - the session the call belongs to, when it has one.
+ * @returns the same answer, with the notice in front of its text.
+ */
+function withFollowNotice(answer: ToolAnswer, sessionId: string | undefined): ToolAnswer {
+  if (!answer.ok) return answer
+  const notice = takeFollowNotice(sessionId)
+  if (notice === undefined) return answer
+  const result = answer.result
+  if (typeof result === 'string') return { ok: true, result: `${notice}\n${result}` }
+  if (typeof result === 'object' && result !== null) {
+    const text = (result as { text?: unknown }).text
+    if (typeof text === 'string') {
+      return { ok: true, result: { ...(result as Record<string, unknown>), text: `${notice}\n${text}` } }
+    }
+  }
+  return answer
 }
 
 function routeToolCall(call: ToolCall): void {
@@ -1811,9 +2009,12 @@ function routeToolCall(call: ToolCall): void {
       return authorization === 'renew' ? 'timed-out' : authorization
     }))
     .then((early) => early ?? debugToolRefusal(call.name, settings.allowExtensionDebug) ?? resolveToolTab(call.sessionId))
-    .then((target) => 'ok' in target
-    ? target
-    : (operationGuard(call, target as { url?: string }) ?? dispatchToolCall(
+    .then((target) => {
+      if ('ok' in target) return target
+      // Remember which page this call runs against, so a rebinding can
+      // withdraw it while it is in flight.
+      if (target.id !== undefined) callTargets.set(call.id, target.id)
+      return operationGuard(call, target as { url?: string }) ?? dispatchToolCall(
         call,
         settings.sharePageContent,
         budget,
@@ -1821,7 +2022,8 @@ function routeToolCall(call: ToolCall): void {
         controller.signal,
         target,
         () => target.id !== undefined && tabAffinity.allowsTarget(target.id, call.sessionId),
-      ))).then(
+      )
+    }).then(
     (answer) => {
       if (controller.signal.aborted) {
         if (activeToolCalls.get(call.id) === controller) {
@@ -1837,6 +2039,7 @@ function routeToolCall(call: ToolCall): void {
       }
       const socket = bridge
       if (socket === null) return
+      answer = withFollowNotice(answer, call.sessionId)
       recordToolFailure(call, answer)
       if (answer.ok) {
         if (typeof answer.result === 'object' && answer.result !== null) {
@@ -1880,6 +2083,7 @@ function routeToolCall(call: ToolCall): void {
     },
   ).finally(() => {
     if (expiryTimer !== undefined) clearTimeout(expiryTimer)
+    callTargets.delete(call.id)
     if (activeToolCalls.get(call.id) === controller) activeToolCalls.delete(call.id)
   })
 }
@@ -2037,6 +2241,7 @@ chrome.runtime.onMessage.addListener((message: unknown, sender, sendResponse) =>
     case 'session.unbind': {
       const sessionId = tabAffinity.focusedSession()
       if (sessionId !== null && tabAffinity.unbindSession(sessionId)) {
+        followCandidates.forgetSession(sessionId)
         forgetSession(sessionId, 'unbound')
         persistTabAffinity()
         broadcastTabAffinity()
@@ -2166,8 +2371,21 @@ chrome.tabs.onActivated.addListener(({ tabId, windowId }) => {
   })
 })
 
+chrome.tabs.onCreated.addListener((tab) => {
+  void affinityReady.then(() => {
+    const tabId = tab.id
+    if (tabId === undefined) return
+    const sessionId = tabAffinity.focusedSession()
+    if (sessionId === null || !tabAffinity.hasBinding(sessionId)) return
+    // The URL is often still pending here; the update event below retries.
+    followCandidates.note(tabId, sessionId)
+    maybeFollowTab(tab)
+  })
+})
+
 chrome.tabs.onUpdated.addListener((tabId, _changeInfo, tab) => {
   void affinityReady.then(() => {
+    maybeFollowTab(tab)
     if (!tabAffinity.tracks(tabId)) return
     const summary = summarizeTab(tab)
     if (summary !== null && tabAffinity.observeTab(summary)) broadcastTabAffinity()
@@ -2192,6 +2410,11 @@ chrome.tabs.onReplaced.addListener((addedTabId, removedTabId) => {
 
 chrome.tabs.onRemoved.addListener((tabId) => {
   // Debugging sessions and their rules belong to the tab; drop both with it.
+  followCandidates.forget(tabId)
+  if (followPrompt?.tabId === tabId) {
+    followPrompt.controller.abort()
+    followPrompt = undefined
+  }
   primedTabs.delete(tabId)
   void detachDevtoolsSession(tabId)
   void clearTabRules(tabId).catch(() => undefined)

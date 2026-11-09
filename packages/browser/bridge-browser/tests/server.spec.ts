@@ -679,6 +679,39 @@ describe('BridgeServer', () => {
     ws.close()
   })
 
+  it('sends the going-away code on shutdown, never the replacement code', async () => {
+    // 4000 says "another client owns the slot": the extension stops on purpose
+    // and never retries, so a dsh restart arriving as 4000 left the bridge down
+    // until someone clicked Reconnect. Any other code is a transport failure to
+    // the extension, which reconnects on its own once a host is back.
+    const h = await startBridge()
+    harnesses.push(h)
+    const { ws, frames } = await connect(h.url)
+    send(ws, { t: 'hello', token: TOKEN, caps: CAPS })
+    await waitFor(() => frames.some((f) => f.t === 'hello.ok'))
+    const closed = new Promise<number>((resolve) => ws.on('close', (code) => resolve(code)))
+    await h.bridge.close()
+    expect(await closed).not.toBe(4000)
+  })
+
+  it('keeps the replacement code for an actual ownership handoff', async () => {
+    const h = await startBridge()
+    harnesses.push(h)
+    const first = await connect(h.url)
+    send(first.ws, { t: 'hello', token: TOKEN, caps: CAPS })
+    await waitFor(() => first.frames.some((f) => f.t === 'hello.ok'))
+    const closed = new Promise<{ code: number; reason: string }>((resolve) => {
+      first.ws.on('close', (code, reason) => resolve({ code, reason: reason.toString() }))
+    })
+
+    const second = await connect(h.url)
+    send(second.ws, { t: 'hello', token: TOKEN, caps: CAPS })
+    await waitFor(() => second.frames.some((f) => f.t === 'hello.ok'))
+
+    expect(await closed).toEqual({ code: 4000, reason: 'replaced' })
+    second.ws.close()
+  })
+
   it('refuses a hello whose reported extension version is present but empty', async () => {
     // The wire contract reads present-but-empty as malformed, so the host must
     // drop the frame rather than treat it as "an extension with no version" —

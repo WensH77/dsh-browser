@@ -24,6 +24,7 @@ export function settingsPatch(settings: Settings): Partial<Settings> {
     token: settings.token,
     sharePageContent: settings.sharePageContent,
     trustedActionOrigins: settings.trustedActionOrigins,
+    followOrigins: settings.followOrigins,
     approvalNotifications: settings.approvalNotifications,
     statusMode: settings.statusMode,
     allowCrossDomainNavigation: settings.allowCrossDomainNavigation,

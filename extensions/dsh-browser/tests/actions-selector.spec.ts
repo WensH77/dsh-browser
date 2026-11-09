@@ -45,6 +45,8 @@ describe('selector-addressed actions', () => {
 
     expect(clicked).toHaveBeenCalledTimes(1)
     expect(result.text).toContain('selector "i.icon-specialist-email"')
+    // One match: no ambiguity note, so an ordinary click stays one short line.
+    expect(result.text).not.toContain('elements match this selector')
     expect(icon.scrollIntoView).toHaveBeenCalled()
   })
 
@@ -75,11 +77,17 @@ describe('selector-addressed actions', () => {
     hiddenButton!.addEventListener('click', clicked)
     visibleButton!.addEventListener('click', clicked)
 
-    await settle(runAction('browser_click', { selector: 'button.go' }, { ids: new ElementIds(), budget: BUDGET }))
+    const result = await settle(runAction('browser_click', { selector: 'button.go' }, { ids: new ElementIds(), budget: BUDGET }))
 
     expect(clicked).toHaveBeenCalledTimes(1)
     expect(visibleButton!.scrollIntoView).toHaveBeenCalled()
     expect(hiddenButton!.scrollIntoView).not.toHaveBeenCalled()
+    // The answer has to say the selector was ambiguous and which rule picked the
+    // element: a bare `Clicked selector "button.go"` let a model believe it hit
+    // the element it meant, and it widened the selector instead of re-targeting
+    // by index (measured 2026-11-05).
+    expect(result.text).toContain('2 elements match this selector; the first visible one was used')
+    expect(result.text).toContain('target by index to pick another')
   })
 
   it('refuses to click an element the user cannot see', async () => {
@@ -113,6 +121,16 @@ describe('selector-addressed actions', () => {
 
     expect(field.value).toBe('Test')
     expect(result.text).toContain('selector "input[name=surname]"')
+  })
+
+  it('reports how many elements a typing target matched', async () => {
+    document.body.innerHTML = '<form><input name="a" type="text"><input name="b" type="text"></form>'
+    const first = document.querySelectorAll('input')[0]!
+
+    const result = await settle(runAction('browser_type', { selector: 'input', text: 'x' }, { ids: new ElementIds(), budget: BUDGET }))
+
+    expect(first.value).toBe('x')
+    expect(result.text).toContain('2 elements match this selector; the first visible one was used')
   })
 
   it('hands the previous field over when typing into the next one', async () => {

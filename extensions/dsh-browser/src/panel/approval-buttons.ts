@@ -26,9 +26,21 @@ export interface ApprovalCopy {
   alwaysAllowReads: string
   trustOrigin: string
   allowInSession: string
+  followOnce: string
+  followAlways: string
+  denyFollow: string
 }
 
 export function decisionButtons(request: ApprovalRequest, copy: ApprovalCopy): ApprovalButton[] {
+  // A follow card is not an action approval: its wording is about the page, and
+  // "always" persists an origin into the follow list, not into action trust.
+  if (request.action === 'follow-page') {
+    return [
+      { id: 'allow-once', label: copy.followOnce },
+      { id: 'deny', label: copy.denyFollow },
+      { id: 'follow-always', label: copy.followAlways },
+    ]
+  }
   const buttons: ApprovalButton[] = [
     { id: 'allow-once', label: copy.allowOnce },
     { id: 'deny', label: copy.deny },

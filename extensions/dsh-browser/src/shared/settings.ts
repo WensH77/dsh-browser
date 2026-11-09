@@ -16,6 +16,11 @@ export interface Settings {
   sharePageContent: 'ask' | 'auto' | 'off'
   /** Origins whose state-changing actions may run without another prompt. */
   trustedActionOrigins: string[]
+  /** Origins whose newly opened pages pull the bound session onto them.
+   * Empty by default: every other way of taking a page stays the user's
+   * choice. Only pages opened while a session holds the browser are followed,
+   * and the move is announced in the next tool answer. */
+  followOrigins: string[]
   /** Show an OS notification when no UI can display an approval. */
   approvalNotifications: boolean
   /** Which surface carries the persistent status view when opened. */
@@ -47,6 +52,7 @@ export const SETTINGS_DEFAULTS: Settings = {
   token: '',
   sharePageContent: 'auto',
   trustedActionOrigins: [],
+  followOrigins: [],
   approvalNotifications: true,
   statusMode: 'floating',
   allowCrossDomainNavigation: false,
