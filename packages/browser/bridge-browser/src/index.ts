@@ -600,7 +600,12 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
     ctx.effect(() => systemPrompt.section({
       name: 'tool:bridge-browser',
       order: 107,
-      text: 'A browser bridge may be connected. To read or operate the user\'s active browser page, call browser_snapshot '
+      text: 'A browser bridge may be connected. Before the first browser_* call in a session, load the dsh-browser-bridge-guide skill: '
+        + 'it is the entry point and routes by what you are about to do, and it carries the recipes — which tool reads text, how an embedded picture '
+        + 'is fetched, when a capture is the right question, what a "clicked, but nothing changed" result means, how the tab\'s visible/focused state '
+        + 'is reported, which link types browser_navigate opens as ordinary pages, how a Chrome confirmation relates to a call that seems to have '
+        + 'changed nothing, and how to bind, install, and update the bridge. '
+        + 'To read or operate the user\'s active browser page, call browser_snapshot '
         + '(numbered items are the click/type targets; it also returns a screenshot of the same moment unless you pass visual:false), '
         + 'unless the current turn already includes a plugin-provided followed-page browser_snapshot. Reuse that injected snapshot and its indices '
         + 'directly instead of taking another one. Never assume page content you have not snapshotted. '
@@ -614,10 +619,6 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
         + 'A JavaScript dialog (alert / confirm / prompt) freezes the page it belongs to: page-facing tools are refused while one is open and the '
         + 'refusal quotes the dialog, so read it and answer with browser_dialog. A call already running when the dialog opens is cut off the same way, '
         + 'with the dialog quoted — answer it, then re-read the page instead of repeating that call. '
-        + 'To drive the page, troubleshoot it, or combine these tools, load the dsh-browser-bridge-guide skill; it carries the recipes — which tool '
-        + 'reads text, how an embedded picture is fetched, when a capture is the right question, what a "clicked, but nothing changed" result means, '
-        + 'how the tab\'s visible/focused state is reported, which link types browser_navigate opens as ordinary pages, how a Chrome confirmation '
-        + 'relates to a call that seems to have changed nothing, and how to bind, install, and update the bridge. '
         + 'A refusal is a boundary, not a puzzle: never look for another transport to reach the same content (curl, a reader proxy, an unauthenticated '
         + 'export URL, or a different tool) — that circumvents the user\'s gate rather than solving the task. If two tools each name a route the other '
         + 'refuses, or a refusal names a route that cannot work for this content, stop and tell the user what contradicted and what you need, instead of '

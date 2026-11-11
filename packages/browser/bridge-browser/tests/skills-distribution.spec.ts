@@ -89,10 +89,10 @@ describe('the skills this repository ships', () => {
 
   it('point at the pointer tool rather than a hand-copied snippet', () => {
     expect(BROWSER_TOOL_NAMES).toContain('browser_click_pointer')
-    const pointerSection = slidesSkill.slice(slidesSkill.indexOf('## 三、'), slidesSkill.indexOf('## 四、'))
-
-    expect(pointerSection).toContain('browser_click_pointer')
-    expect(pointerSection).toContain('"selector"')
+    // A call the model can copy. Which section holds it is not the invariant:
+    // the skill is reorganised as the editor's behaviour is learned, and the
+    // hand-copied snippet this guards against is the fallback, not the tool.
+    expect(slidesSkill).toContain('browser_click_pointer { "selector"')
   })
 
   it('hand the guide off to the Slides skill from the guide itself', () => {
