@@ -8,8 +8,6 @@ description: 任何工作区（any workspace）用 dsh-browser 的 browser_* 工
 这份指南是 `browser_*` 工具的入口：先判断这一次是哪一类，再走到对应的小节或兄弟文件。
 行为红线（不得凭空断言页面内容、拒绝是边界不是谜题等）在 system prompt 里，这里不重复。
 
-**开始前先说一句：** Using dsh-browser-bridge-guide for <这次要做的事>。
-
 ## Step 0 — 先判断这一次是哪一类，再往下走
 
 | 这一次要做的 | 去哪里 |
@@ -21,7 +19,7 @@ description: 任何工作区（any workspace）用 dsh-browser 的 browser_* 工
 | 审批卡卡住、页面被自动跟随改绑 | `approval-and-binding.md` |
 | 操作扩展工具栏、扩展弹窗 | `desktop-click.md` |
 | 安装、更新、工具连不上 | `install-update.md` |
-| 目标页是 Google Slides | `google-slides-via-browser` |
+| 目标页是（或途中变成）Google Slides | `google-slides-via-browser` |
 
 审批、子代理、单会话持有这些每次都用得到的规则留在本文件，不在各分册重复。遇到新的、
 能复现的 `browser_*` 报错，把**触发条件 + 判据 + 出口**补进对应小节 —— 这份文档按报错
@@ -211,8 +209,3 @@ alert / confirm / prompt 是**浏览器 UI，不是页面内容**：弹窗一开
 ## 八、安装与更新
 
 - 工具连不上、`browser_status` 报扩展文件刚刷新过、或用户问怎么更新时，读 `install-update.md`：Update 按钮给的是已发布版本的命令，要更新本地 checkout 用 `browser_update` 给的那条。
-
-## 九、下一步
-
-被驱动的这个页面是（或变成）Google Slides 时，接着加载 `google-slides-via-browser`：
-胶片栏 / 工具栏控件、按页码切页、以及编辑器控件点了没反应，都在那份里。
