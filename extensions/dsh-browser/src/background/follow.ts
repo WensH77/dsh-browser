@@ -16,6 +16,7 @@
  */
 
 import { originMatchesTrusted } from '../security/trusted-origins.ts'
+import type { AffinityTab } from './tab-affinity.ts'
 
 /** The page a session moved to on its own. */
 export interface FollowedPage {
@@ -188,4 +189,94 @@ export class FollowCandidates {
       if (sid === sessionId) this.byTab.delete(tabId)
     }
   }
+}
+
+/**
+ * The page a session followed from, so a helper tab that closes itself gives
+ * the session back.
+ *
+ * The follow list moves a session onto a page a workflow opens — in practice a
+ * capture popup that scrapes for a few seconds and then closes itself. The move
+ * is a rebinding, so the page the session came from stops being controlled; if
+ * the popup then closes, that page is the one the user is still looking at, and
+ * reporting "the controlled tab was closed" describes the popup, not their work.
+ * Remembering the page that was handed over is what lets the close handler put
+ * the session back instead of failing closed.
+ *
+ * Only the most recent hand-over is kept: a second follow replaces the first,
+ * because the page before that one is two moves back and no longer what the
+ * session was working on. Records are in memory only — a worker restart in the
+ * seconds between following and the popup closing simply falls back to the
+ * old behaviour.
+ */
+export class FollowReturn {
+  private readonly records = new Map<string, { from: AffinityTab; followedTabId: number }>()
+
+  /**
+   * Remember the page a session is leaving for `followedTabId`.
+   *
+   * @param sessionId - the session being moved.
+   * @param from - the page it held before the move.
+   * @param followedTabId - the page it is moving to.
+   */
+  remember(sessionId: string, from: AffinityTab, followedTabId: number): void {
+    if (sessionId.trim() === '' || from.tabId === followedTabId) return
+    this.records.set(sessionId, { from: { ...from }, followedTabId })
+  }
+
+  /**
+   * The page to go back to, when the closed tab is the one this session followed to.
+   *
+   * Taking the record is a one-shot: the return is a rebinding of its own, and a
+   * later close must not be answered with another implicit move.
+   *
+   * @param sessionId - the session whose tab closed.
+   * @param closedTabId - the tab Chrome removed.
+   * @returns the page it followed from, or undefined when this close is not a follow's end.
+   */
+  take(sessionId: string, closedTabId: number): AffinityTab | undefined {
+    const record = this.records.get(sessionId)
+    if (record === undefined || record.followedTabId !== closedTabId) return undefined
+    this.records.delete(sessionId)
+    return { ...record.from }
+  }
+
+  /** Drop one session's record, for a binding that was chosen rather than followed. */
+  forget(sessionId: string): void {
+    this.records.delete(sessionId)
+  }
+
+  /**
+   * Drop every record that named a tab which no longer exists.
+   *
+   * The remembered page can be closed while the session is on the followed one;
+   * returning to it would bind a tab Chrome already removed.
+   *
+   * @param tabId - the tab Chrome removed.
+   */
+  forgetTab(tabId: number): void {
+    for (const [sessionId, record] of this.records) {
+      if (record.from.tabId === tabId || record.followedTabId === tabId) this.records.delete(sessionId)
+    }
+  }
+}
+
+/**
+ * What the model is told when a followed page closed and the session went back.
+ *
+ * The model's next call already runs on the page it was on before the move, so
+ * an answer without this line would read as if nothing had happened — and the
+ * page may well have changed while the session was away.
+ *
+ * @param page - the page the session is back on.
+ * @returns one model-facing line.
+ */
+export function followedBackNotice(page: FollowedPage): string {
+  return `This session is back on tab ${page.tabId} — ${page.url} — because the page it had followed closed. `
+    + 'Re-read this page before acting on it: it may have changed while the session was following the other one.'
+}
+
+/** Queue the one line the next answer from this session must lead with. */
+export function announceFollowBack(sessionId: string, page: FollowedPage): void {
+  pendingBySession.set(sessionId, followedBackNotice(page))
 }

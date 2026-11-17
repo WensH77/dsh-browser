@@ -67,7 +67,15 @@ import {
   type AffinityTab,
 } from './tab-affinity.ts'
 import { FocusedWindowTracker } from './focused-window.ts'
-import { FollowCandidates, announceFollow, askableFollowOrigin, followableOrigin, takeFollowNotice } from './follow.ts'
+import {
+  FollowCandidates,
+  FollowReturn,
+  announceFollow,
+  announceFollowBack,
+  askableFollowOrigin,
+  followableOrigin,
+  takeFollowNotice,
+} from './follow.ts'
 import { APPROVAL_TIMEOUT_MS, ApprovalCoordinator, type ApprovalRequestResult } from './approval-coordinator.ts'
 import { unboundNavigateDestination as resolveUnboundNavigateDestination } from './navigate-consent.ts'
 import { clearNavigationFailure, recordNavigationFailure, recordedNavigationFailure } from './page-errors.ts'
@@ -166,6 +174,8 @@ let bridge: BridgeClient | null = null
 const tabAffinity = new TabAffinityController()
 /** Newly opened tabs that may pull a session onto a follow origin. */
 const followCandidates = new FollowCandidates()
+/** Pages sessions followed from, so a helper tab that closes itself gives one back. */
+const followReturns = new FollowReturn()
 /** The one follow question on screen, if any. */
 let followPrompt: { tabId: number; controller: AbortController } | undefined
 const focusedWindow = new FocusedWindowTracker()
@@ -711,6 +721,10 @@ function followSession(sessionId: string, summary: AffinityTab, origin: string):
   const current = tabAffinity.getSessionTab(sessionId)
   if (current?.tabId === summary.tabId) return
   const previousTabId = current?.tabId
+  // The move is a rebinding, so the page it leaves stops being controlled. If
+  // the page it moves to is a helper that closes itself (a capture popup does),
+  // that page is still the user's work and must not be reported as a closed tab.
+  if (current !== undefined) followReturns.remember(sessionId, current, summary.tabId)
   followCandidates.forget(summary.tabId)
   forgetSession(sessionId, 'rebind')
   resetTabSnapshot(summary.tabId)
@@ -721,6 +735,37 @@ function followSession(sessionId: string, summary: AffinityTab, origin: string):
   broadcastTabAffinity()
   if (previousTabId !== undefined) abortCallsOnTab(previousTabId)
   recordDebugEvent('follow', `session ${sessionId} -> tab ${summary.tabId} on ${origin}`)
+}
+
+/**
+ * The page a session can be put back on, when the page it followed closed.
+ *
+ * `followSession` hands the browser to a page a workflow opened; when that page
+ * was a helper (a capture popup closes itself the moment it is done) the page
+ * the session came from is still the user's work. Returning there is a
+ * rebinding, so it obeys the same rules as every other binding: another session
+ * holding the browser wins, and a page that has since become unbindable is not
+ * handed to a session. A page Chrome already removed is simply not a target.
+ *
+ * @param sessionId - the session whose followed page closed.
+ * @param back - the page it held before the move.
+ * @returns the live page to rebind, or undefined when the session must stay unbound.
+ */
+async function followReturnTarget(sessionId: string, back: AffinityTab): Promise<AffinityTab | undefined> {
+  // A call in between may have bound this session somewhere else already (the
+  // return is not a reason to pull it back off a page the user chose).
+  if (tabAffinity.hasBinding(sessionId) || tabAffinity.competingBinding(sessionId) !== undefined) return undefined
+  try {
+    const live = summarizeTab(await chrome.tabs.get(back.tabId))
+    if (live === null) return undefined
+    // Re-checked after the await: a bind that landed meanwhile is the newer
+    // decision, and this return must not undo it.
+    if (tabAffinity.hasBinding(sessionId) || tabAffinity.competingBinding(sessionId) !== undefined) return undefined
+    if (!isBindableTabUrl(live.url) || blockedOriginFailure(live.url) !== undefined) return undefined
+    return live
+  } catch {
+    return undefined
+  }
 }
 
 /**
@@ -894,6 +939,7 @@ async function restoreTabAffinity(): Promise<void> {
   // name several sessions. Keep the one the panel was showing and release the
   // rest, so a worker restart cannot leave two sessions on the browser.
   for (const dropped of tabAffinity.dropCompetingBindings(tabAffinity.focusedSession())) {
+    followReturns.forget(dropped)
     forgetSession(dropped, 'rebind')
   }
 
@@ -937,6 +983,7 @@ const affinityReady = restoreTabAffinity()
 function releaseLostBinding(sessionId?: string): void {
   const sid = sessionId?.trim()
   if (sid === undefined || sid === '') return
+  followReturns.forget(sid)
   tabAffinity.unbindSession(sid)
   forgetSession(sid, 'closed')
   persistTabAffinity()
@@ -1271,6 +1318,7 @@ async function openBoundTab(sessionId: string, destination: URL): Promise<boolea
   await affinityReady
   if (tabAffinity.hasBinding(sessionId)) return true
   if (!tabAffinity.bindNewSession(sessionId, summary)) return true
+  followReturns.forget(sessionId)
   followCandidates.forget(summary.tabId)
   keepTabAlive(summary.tabId)
   persistTabAffinity()
@@ -1861,6 +1909,7 @@ async function handleVirtualTool(call: ToolCall, signal: AbortSignal): Promise<T
     await affinityReady
     if (signal.aborted) return { ok: false, error: { code: 'bridge-closed', message: 'Tool call was cancelled' } }
     // The session is being pointed at another tab: its grants named the old one.
+    followReturns.forget(sessionId)
     forgetSession(sessionId, 'rebind')
     resetTabSnapshot(summary.tabId)
     tabAffinity.bindNewSession(sessionId, summary)
@@ -2242,6 +2291,7 @@ chrome.runtime.onMessage.addListener((message: unknown, sender, sendResponse) =>
       const sessionId = tabAffinity.focusedSession()
       if (sessionId !== null && tabAffinity.unbindSession(sessionId)) {
         followCandidates.forgetSession(sessionId)
+        followReturns.forget(sessionId)
         forgetSession(sessionId, 'unbound')
         persistTabAffinity()
         broadcastTabAffinity()
@@ -2395,6 +2445,7 @@ chrome.tabs.onUpdated.addListener((tabId, _changeInfo, tab) => {
 chrome.tabs.onReplaced.addListener((addedTabId, removedTabId) => {
   void affinityReady.then(() => {
     const affectedSessions = tabAffinity.sessionIdsForTab(removedTabId)
+    followReturns.forgetTab(removedTabId)
     if (!tabAffinity.replaceTab(removedTabId, addedTabId)) return
     for (const sid of affectedSessions) forgetSession(sid, 'replaced')
     resetTabSnapshot(removedTabId)
@@ -2418,10 +2469,30 @@ chrome.tabs.onRemoved.addListener((tabId) => {
   primedTabs.delete(tabId)
   void detachDevtoolsSession(tabId)
   void clearTabRules(tabId).catch(() => undefined)
-  void affinityReady.then(() => {
+  void affinityReady.then(async () => {
     const affectedSessions = tabAffinity.sessionIdsForTab(tabId)
+    // A session that followed onto this tab gets the page it came from back.
+    // The closed tab is the workflow's helper, not the page the user was
+    // working on, and "the controlled tab was closed" would describe the popup
+    // to someone whose own page never moved. Read the hand-over before
+    // `removeTab` prunes the session, then drop every record that named a tab
+    // Chrome just removed so a return can never target one.
+    const returning = affectedSessions
+      .map((sid) => ({ sessionId: sid, back: followReturns.take(sid, tabId) }))
+      .filter((entry): entry is { sessionId: string; back: AffinityTab } => entry.back !== undefined)
+    followReturns.forgetTab(tabId)
     if (!tabAffinity.removeTab(tabId)) return
     for (const sid of affectedSessions) forgetSession(sid, 'closed')
+    for (const { sessionId, back } of returning) {
+      const live = await followReturnTarget(sessionId, back)
+      if (live === undefined) continue
+      forgetSession(sessionId, 'rebind')
+      resetTabSnapshot(live.tabId)
+      tabAffinity.bindNewSession(sessionId, live)
+      keepTabAlive(live.tabId)
+      announceFollowBack(sessionId, live)
+      recordDebugEvent('follow-back', `session ${sessionId} -> tab ${live.tabId}`)
+    }
     persistTabAffinity()
     broadcastTabAffinity()
   })

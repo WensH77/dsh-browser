@@ -1556,4 +1556,89 @@ describe('background entry follow origins', () => {
       expect(state.controlled).toMatchObject({ tabId: 42 })
     })
   })
+
+  it('gives a session its own page back when the page it followed closes itself', async () => {
+    // The reported bug: clicking capture opens a LinkedIn popup on a follow
+    // origin, the session moves there, the popup closes when the capture ends,
+    // and the answer said "the controlled tab was closed" to someone whose
+    // intranet page had never moved. The close of a followed helper is not the
+    // close of the user's page, so the session goes back instead of failing.
+    const tab = { id: 42, windowId: 1, title: 'Profile', url: 'https://www.example.net/directory/1' }
+    const harness = await boot(
+      tab,
+      { bridgeUrl: BRIDGE_URL, followOrigins: ['https://app.example.com'] },
+      () => ({ ok: true, result: { text: 'form page' } }),
+    )
+    await harness.bind(42, 's1')
+
+    tab.id = 55
+    tab.windowId = 2
+    tab.title = 'Capture'
+    tab.url = 'https://app.example.com/records/new?recordId=1'
+    harness.openTab({ ...tab })
+    await vi.waitFor(async () => {
+      const state = await harness.uiRequest({ type: 'ui.state' }) as Frame
+      expect(state.controlled).toMatchObject({ tabId: 55 })
+    })
+
+    // The helper closed itself; Chrome still has the original page open.
+    tab.id = 42
+    tab.windowId = 1
+    tab.title = 'Profile'
+    tab.url = 'https://www.example.net/directory/1'
+    harness.closeTab(55)
+
+    await vi.waitFor(async () => {
+      const state = await harness.uiRequest({ type: 'ui.state' }) as Frame
+      expect(state.controlled).toMatchObject({ tabId: 42 })
+    })
+
+    harness.call({ id: 'back-1', name: 'browser_get_text', args: {}, sessionId: 's1' })
+    const frame = await harness.settle('back-1')
+    expect(frame.ok).toBe(true)
+    const text = (frame.result as Frame).text as string
+    expect(text).toContain('back on tab 42')
+    expect(text).toContain('https://www.example.net/directory/1')
+    // One notice for the return, so the next answer is the page's own text.
+    expect(text).toContain('form page')
+
+    harness.call({ id: 'back-2', name: 'browser_get_text', args: {}, sessionId: 's1' })
+    const second = await harness.settle('back-2')
+    expect((second.result as Frame).text).not.toContain('back on tab 42')
+  })
+
+  it('keeps the session unbound when the page it followed from is gone too', async () => {
+    const tab = { id: 42, windowId: 1, title: 'Profile', url: 'https://www.example.net/directory/1' }
+    const harness = await boot(
+      tab,
+      { bridgeUrl: BRIDGE_URL, followOrigins: ['https://app.example.com'] },
+      () => ({ ok: true, result: { text: 'form page' } }),
+    )
+    await harness.bind(42, 's1')
+
+    tab.id = 55
+    tab.windowId = 2
+    tab.title = 'Capture'
+    tab.url = 'https://app.example.com/records/new?recordId=1'
+    harness.openTab({ ...tab })
+    await vi.waitFor(async () => {
+      const state = await harness.uiRequest({ type: 'ui.state' }) as Frame
+      expect(state.controlled).toMatchObject({ tabId: 55 })
+    })
+
+    // The original page closed while the session was following; there is no
+    // page to go back to, so the failure stays the honest one.
+    harness.closeTab(42)
+    harness.closeTab(55)
+
+    await vi.waitFor(async () => {
+      const state = await harness.uiRequest({ type: 'ui.state' }) as Frame
+      expect(state.controlled).toBeNull()
+    })
+
+    harness.call({ id: 'gone-1', name: 'browser_get_text', args: {}, sessionId: 's1' })
+    const frame = await harness.settle('gone-1')
+    expect(frame.ok).toBe(false)
+    expect(((frame.error as Frame).message as string)).toContain('controlled tab was closed')
+  })
 })

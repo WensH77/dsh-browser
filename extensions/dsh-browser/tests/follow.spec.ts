@@ -1,9 +1,12 @@
 import { describe, expect, it } from 'vitest'
 import {
   FollowCandidates,
+  FollowReturn,
   announceFollow,
+  announceFollowBack,
   askableFollowOrigin,
   followableOrigin,
+  followedBackNotice,
   followedNotice,
   takeFollowNotice,
 } from '../src/background/follow.ts'
@@ -136,5 +139,59 @@ describe('follow notice', () => {
     expect(takeFollowNotice('session-b')).toBeUndefined()
     expect(takeFollowNotice(undefined)).toBeUndefined()
     expect(takeFollowNotice('')).toBeUndefined()
+  })
+})
+
+const ORIGINAL = { tabId: 42, windowId: 1, title: 'Profile', url: 'https://www.example.net/directory/1' }
+const FOLLOWED = { tabId: 55, windowId: 2, title: 'Capture', url: 'https://app.example.com/records/new' }
+
+describe('FollowReturn', () => {
+  it('gives back the page a session followed from, once', () => {
+    const returns = new FollowReturn()
+    returns.remember('s1', ORIGINAL, FOLLOWED.tabId)
+    expect(returns.take('s1', FOLLOWED.tabId)).toEqual(ORIGINAL)
+    // One return per hand-over: a later close is not another implicit move.
+    expect(returns.take('s1', FOLLOWED.tabId)).toBeUndefined()
+  })
+
+  it('does not answer for a tab this session did not follow to, or another session', () => {
+    const returns = new FollowReturn()
+    returns.remember('s1', ORIGINAL, FOLLOWED.tabId)
+    expect(returns.take('s1', 99)).toBeUndefined()
+    expect(returns.take('s2', FOLLOWED.tabId)).toBeUndefined()
+    expect(returns.take('s1', FOLLOWED.tabId)).toEqual(ORIGINAL)
+  })
+
+  it('forgets hand-overs when either page is removed or the session rebinds', () => {
+    const returns = new FollowReturn()
+    returns.remember('s1', ORIGINAL, FOLLOWED.tabId)
+    returns.forgetTab(ORIGINAL.tabId)
+    expect(returns.take('s1', FOLLOWED.tabId)).toBeUndefined()
+
+    returns.remember('s1', ORIGINAL, FOLLOWED.tabId)
+    returns.forgetTab(FOLLOWED.tabId)
+    expect(returns.take('s1', FOLLOWED.tabId)).toBeUndefined()
+
+    returns.remember('s1', ORIGINAL, FOLLOWED.tabId)
+    returns.forget('s1')
+    expect(returns.take('s1', FOLLOWED.tabId)).toBeUndefined()
+  })
+
+  it('replaces the remembered page on a second move and names both in the notices', () => {
+    const returns = new FollowReturn()
+    returns.remember('s1', ORIGINAL, FOLLOWED.tabId)
+    const third = { tabId: 66, windowId: 2, title: 'Capture 2', url: 'https://app.example.com/records/2' }
+    returns.remember('s1', FOLLOWED, third.tabId)
+    expect(returns.take('s1', FOLLOWED.tabId)).toBeUndefined()
+    expect(returns.take('s1', third.tabId)).toEqual(FOLLOWED)
+
+    expect(followedBackNotice(ORIGINAL)).toContain('back on tab 42')
+    expect(followedBackNotice(ORIGINAL)).toContain(ORIGINAL.url)
+  })
+
+  it('delivers the return line through the same one-shot queue', () => {
+    announceFollowBack('s9', ORIGINAL)
+    expect(takeFollowNotice('s9')).toContain('back on tab 42')
+    expect(takeFollowNotice('s9')).toBeUndefined()
   })
 })

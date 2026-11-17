@@ -47,6 +47,15 @@
 - 这行只出现一次；它出现后旧页的会话授权已被撤销（页面换了），动作会重新问一遍。
 - 没命中跟随列表的新页面不会自动跟；需要时仍用 `browser_bind_interactive` 让用户选。
 
+**跟过去的临时页自行关闭时，会话会退回原页。** 抓取类扩展常先开一个弹窗取几秒数据再
+自己关掉；关的是它，不是用户的页。这种情况下下一次**成功**工具回答开头是：
+
+`This session is back on tab N — <url> — because the page it had followed closed. Re-read this page before acting on it: it may have changed while the session was following the other one.`
+
+看到它就按原页处理：旧的快照与选择器作废，先重读；不要把它当成「受控标签页被关闭」。
+退回只在原页还活着、还能绑定、且没有别的会话持有浏览器时发生；原页已关、页面已不可绑定、
+或会话在这期间已被绑到别处，就仍按关闭处理。退回本身不改用户正在看的标签页。
+
 **做完了，能指出这一条：**工具回答开头有没有 `This session was moved to tab N` 那行；有的话，重读后的新页 URL。
 
 ## 三、点击前先判断：新标签页是目标还是副作用
