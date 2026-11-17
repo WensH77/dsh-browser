@@ -2413,6 +2413,42 @@ function routeToolCall(call: ToolCall): void {
         target,
         () => target.id !== undefined && tabAffinity.allowsTarget(target.id, call.sessionId),
       )
+    }).then(async (answer) => {
+      // A tab can close between the target lookup and the content-script
+      // delivery: `tabs.get` succeeded, so this is not the affinity "lost"
+      // path, and the call fails with "the content script could not be loaded"
+      // even though the tab is gone. The capture flow closes its page under
+      // exactly that timing. Reconnect to the page the workflow returned to and
+      // tell the model to retry, instead of leaving the user to rebind by hand.
+      if (answer.ok || call.sessionId === undefined) return answer
+      if (answer.error?.code !== 'content-unavailable'
+        || !answer.error.message.startsWith('The content script could not be loaded')) return answer
+      const held = tabAffinity.getSessionTab(call.sessionId)
+      if (held === undefined) return answer
+      const alive = await chrome.tabs.get(held.tabId).then(() => true, () => false)
+      if (alive) return answer
+      // The tab is gone but the binding still names it: prune first, or the
+      // reconnect below would see the session as already bound.
+      const affected = tabAffinity.sessionIdsForTab(held.tabId)
+      if (tabAffinity.removeTab(held.tabId)) {
+        for (const sid of affected) forgetSession(sid, 'closed')
+        persistTabAffinity()
+        broadcastTabAffinity()
+      }
+      if (!(await reconnectLastPage(call.sessionId, RECONNECT_WAIT_MS))) {
+        scheduleLateReconnect(call.sessionId)
+        return affinityFailureAnswer('retrying')
+      }
+      const rebound = tabAffinity.getSessionTab(call.sessionId)
+      if (rebound === undefined) return answer
+      const moved: ToolAnswer = {
+        ok: false,
+        error: {
+          code: 'content-unavailable',
+          message: `The page this call ran on was closed while the call was in flight. This session is now bound to tab ${rebound.tabId} — ${rebound.url}; retry the call.`,
+        },
+      }
+      return moved
     }).then(
     (answer) => {
       if (controller.signal.aborted) {

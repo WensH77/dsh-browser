@@ -25,6 +25,8 @@
 - 绑定丢了不等于页面没了：扩展会**先静默重连**——按记住的 tab id，或全页唯一一个「同一页」（相同路径与查询串，host 可以不同：capture 常把页面换回它自己的环境，优先同 origin）的标签页找回上一页，找回就在这次调用里继续，回答开头是
   `This session is on tab N — <url> — again: the page it had was still open`。
   看到这行就按它给的页继续，先重读再动作；这不是失败。
+- 页在**调用途中**被关掉时（拿到目标之后、消息送达之前），错误是 `The content script could not be loaded on this page.`，不是「被关闭」。现在扩展会先剪掉死绑定、绑回退页，并回答
+  `The page this call ran on was closed while the call was in flight. This session is now bound to tab N — <url>; retry the call.`——会话已经绑好，**重试同一个调用**即可，不要选页。
 - 关掉的是 capture 打开的页（LinkedIn）时，扩展会退一步找**上一页**：工作流回退到的 intranet 页若开着，就直接绑那一页，**不新开 tab**，回答开头是
   `This session is on tab N — <url> — the page the workflow returned to, so it was rebound there instead of in a new tab.`。看到它就按这一页继续。
 - 这一版还会**等页面回来**：调用里先等约 2 秒；没等到就回答

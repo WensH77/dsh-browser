@@ -150,6 +150,8 @@ interface Harness {
   closeTab: (tabId: number) => void
   /** Make `chrome.tabs.query` report these open tabs; undefined restores the active one. */
   setOpenTabs: (tabs: Array<{ id: number; windowId: number; title?: string; url: string }> | undefined) => void
+  /** Make one tab disappear for `tabs.get`/`query` without firing onRemoved (a mid-call close). */
+  setTabVanished: (tabId: number) => void
   /** Answer the pending `hello` when automatic acknowledgement is off. */
   acceptHandshake: () => void
   /** Fire the real `chrome.tabs.onActivated` handler. */
@@ -203,6 +205,7 @@ async function boot(
   const tabCreatedListeners: Listener[] = []
   const tabUpdatedListeners: Listener[] = []
   const closedTabs = new Set<number>()
+  const vanishedTabs = new Set<number>()
   let queriedTabs: Array<{ id: number; windowId: number; title?: string; url: string }> | undefined
   const navigations: Frame[] = []
   const tabCreations: Frame[] = []
@@ -253,9 +256,9 @@ async function boot(
       // A closed tab is not in a query result, exactly like Chrome: the reconnect
       // path relies on this to tell a lost page from one that is still open.
       query: async () => queriedTabs
-        ?? (activeTab.id !== undefined && closedTabs.has(activeTab.id) ? [] : [activeTab]),
+        ?? (activeTab.id !== undefined && !closedTabs.has(activeTab.id) && !vanishedTabs.has(activeTab.id) ? [activeTab] : []),
       get: async (tabId?: number) => {
-        if (tabId !== undefined && closedTabs.has(tabId)) throw new Error(`No tab with id: ${tabId}`)
+        if (tabId !== undefined && (closedTabs.has(tabId) || vanishedTabs.has(tabId))) throw new Error(`No tab with id: ${tabId}`)
         return activeTab
       },
       update: async (tabId: number, props?: { url?: string }) => {
@@ -436,6 +439,7 @@ async function boot(
       for (const listener of tabRemovedListeners) (listener as (tabId: number) => void)(tabId)
     },
     setOpenTabs: (tabs) => { queriedTabs = tabs },
+    setTabVanished: (tabId) => { vanishedTabs.add(tabId) },
     acceptHandshake: () => socket.receive({
       t: 'hello.ok',
       caps: { proto: 3, toolset: 5, debugger: false, snapshotMaxChars: 32_000, maxInteractiveItems: 60 },
@@ -1821,6 +1825,57 @@ describe('background entry lost-page reconnect', () => {
     expect(((frame.error as Frame).message as string)).toContain('keeps looking')
     // A recovery already under way must not raise the page picker.
     expect((frame.error as { needsPageChoice?: unknown }).needsPageChoice).toBeUndefined()
+  })
+
+  it('rebinds the returned page when the tab closes between the target lookup and delivery', async () => {
+    // The real timing: browser_wait resolved its target, and by the time the
+    // message reached the tab the capture flow had closed it. That is not the
+    // affinity "lost" path (tabs.get still succeeded), so the call failed with
+    // "the content script could not be loaded" and the user had to rebind by
+    // hand. It must reconnect to the page the workflow returned to instead.
+    const pageA = 'https://d15a.intranet.test15.tbeng.pro/Experts_display.php?id_expert=1'
+    const tab = { id: 42, windowId: 1, title: 'LinkedIn', url: 'https://www.linkedin.com/in/someone/' }
+    let vanishOnDelivery = false
+    let harnessRef: Harness | undefined
+    const harness = await boot(tab, { bridgeUrl: BRIDGE_URL }, () => {
+      if (vanishOnDelivery) {
+        harnessRef?.setTabVanished(42)
+        throw new Error('Could not establish connection. Receiving end does not exist.')
+      }
+      return { ok: true, result: { text: 'page body' } }
+    })
+    harnessRef = harness
+    await harness.bind(42, 's1')
+
+    // Start on the intranet page, then the capture click navigates to LinkedIn.
+    tab.url = pageA
+    harness.call({ id: 'warm', name: 'browser_get_text', args: {}, sessionId: 's1' })
+    await harness.settle('warm')
+    tab.url = 'https://www.linkedin.com/in/someone/'
+
+    // The flow comes back to the intranet page in another tab, and closes the
+    // LinkedIn one at the same moment the call is being delivered.
+    harness.setOpenTabs([{ id: 96, windowId: 1, title: 'Expert', url: pageA }])
+    vanishOnDelivery = true
+
+    harness.call({ id: 'race-1', name: 'browser_get_text', args: {}, sessionId: 's1' })
+    const frame = await harness.settle('race-1')
+    expect(frame.ok).toBe(false)
+    const message = (frame.error as Frame).message as string
+    expect(message).toContain('tab 96')
+    expect(message).toContain('retry the call')
+
+    // The session is already bound to the returned page, so a retry works
+    // without the user picking anything.
+    vanishOnDelivery = false
+    tab.id = 96
+    tab.windowId = 1
+    tab.title = 'Expert'
+    tab.url = pageA
+    harness.call({ id: 'race-2', name: 'browser_get_text', args: {}, sessionId: 's1' })
+    const retried = await harness.settle('race-2')
+    expect(retried.ok).toBe(true)
+    expect(((retried.result as Frame).text as string)).toContain('page body')
   })
 
   it('rebinds on its own when the page comes back after the call failed', async () => {
