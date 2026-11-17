@@ -23,6 +23,8 @@ import SessionStore from '@deepseek-ai/dsh-session'
 import AgentRegistry from '@deepseek-ai/dsh-agent'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRegistry from '@deepseek-ai/dsh-tools'
+// 该包只导出具名（apply/inject/name），没有 default：用命名空间导入交给 Loader
+import * as ToolExecutorNative from '@deepseek-ai/dsh-tool-executor-native'
 import LlmService from '@deepseek-ai/dsh-llm'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import UserQuestionService from '@deepseek-ai/dsh-user-questions'
@@ -80,6 +82,9 @@ async function loadComposition(): Promise<{ ctx: Context; configPath: string; po
     "- name: '@deepseek-ai/dsh-agent'",
     "- name: '@deepseek-ai/dsh-system-prompt'",
     "- name: '@deepseek-ai/dsh-tools'",
+    // dsh-tools 0.2.2-rc.3 起，assemble() 会在选不到 executor 时抛 ToolExecutorUnavailableError，
+    // 所以最小组合必须真的装一个执行器（宿主默认装配里就是 native 这个）
+    "- name: '@deepseek-ai/dsh-tool-executor-native'",
     "- name: '@deepseek-ai/dsh-llm'",
     "- name: '@deepseek-ai/dsh-agent-loop'",
     "- name: 'test:api-host'",
@@ -102,6 +107,7 @@ async function loadComposition(): Promise<{ ctx: Context; configPath: string; po
     ['@deepseek-ai/dsh-agent', AgentRegistry],
     ['@deepseek-ai/dsh-system-prompt', SystemPrompt],
     ['@deepseek-ai/dsh-tools', ToolRegistry],
+    ['@deepseek-ai/dsh-tool-executor-native', ToolExecutorNative],
     ['@deepseek-ai/dsh-llm', LlmService],
     ['@deepseek-ai/dsh-agent-loop', AgentLoop],
     ['test:api-host', ApiHost],
