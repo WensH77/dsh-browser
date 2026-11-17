@@ -55,12 +55,57 @@ function eligibleOrigin(input: {
 }
 
 /**
+ * The environment label a URL belongs to: the first DNS label of its host.
+ *
+ * `ts1.intranet.test6.pro` → `ts1`, `d15a.intranet.test15.tbeng.pro` → `d15a`.
+ * The environments this bridge is used against are siblings that share a
+ * domain wildcard, so a wildcard follow entry alone cannot tell `ts1` from
+ * `d15a` — the label is what names the environment the user is working in.
+ *
+ * @param address - a URL or an origin.
+ * @returns the label, or undefined for an address that has none (IP literals, garbage).
+ */
+export function hostPrefix(address: string | undefined): string | undefined {
+  if (address === undefined || address === '') return undefined
+  try {
+    const host = new URL(address).hostname.toLowerCase()
+    if (host === '') return undefined
+    // An IP literal names a machine, not an environment.
+    if (/^\d+(?:\.\d+){3}$/.test(host) || host.includes(':')) return undefined
+    return host.split('.')[0]
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * Whether two addresses name the same environment label.
+ *
+ * @param address - one URL or origin.
+ * @param other - the other URL or origin.
+ * @returns true only when both have a label and the labels are equal.
+ */
+export function sameHostPrefix(address: string | undefined, other: string | undefined): boolean {
+  const prefix = hostPrefix(address)
+  return prefix !== undefined && prefix === hostPrefix(other)
+}
+
+/**
  * The origin a newly opened tab is allowed to pull the session onto.
  *
  * Blocked origins win over follow origins: a page the user refused to operate
  * is never a follow target, even when both lists name it.
  *
- * @param input - the candidate tab, the pages already held, and both lists.
+ * The environment prefix is part of the match: the follow list is written in
+ * origins, and a wildcard entry covers every environment under it, so a page on
+ * `ts1` would otherwise pull a session working on `d15a` — two systems the user
+ * keeps apart. Only a page whose first host label equals the held page's may
+ * follow on its own; a cross-environment page is offered as a session grant
+ * instead (see {@link askableCrossPrefixOrigin}), which is the one consent that
+ * needs no widening of the list.
+ *
+ * @param input - the candidate tab, the page the session holds, the pages
+ *   already held, and both lists.
  * @returns the origin to follow, or undefined when this tab must not pull the
  *   session.
  */
@@ -73,10 +118,20 @@ export function followableOrigin(input: {
   blockedOrigins: readonly string[]
   /** The dsh UI itself is never handed to a session. */
   isDshPage: (url: string) => boolean
+  /** The page the session holds; the candidate must share its host prefix. */
+  currentUrl: string | undefined
+  /**
+   * Origins this session may follow across environments, from an explicit
+   * "Allow in this session" on a cross-prefix page. The grant is the consent,
+   * so it needs no follow-list entry.
+   */
+  sessionOrigins?: ReadonlySet<string>
 }): string | undefined {
   const origin = eligibleOrigin(input)
   if (origin === undefined) return undefined
-  return originMatchesTrusted(origin, input.followOrigins) ? origin : undefined
+  if (input.sessionOrigins?.has(origin) === true) return origin
+  if (!originMatchesTrusted(origin, input.followOrigins)) return undefined
+  return sameHostPrefix(origin, input.currentUrl) ? origin : undefined
 }
 
 /**
@@ -104,6 +159,38 @@ export function askableFollowOrigin(input: {
   if (origin === undefined) return undefined
   if (input.tabWindowId === input.boundWindowId) return undefined
   return originMatchesTrusted(origin, input.followOrigins) ? undefined : origin
+}
+
+/**
+ * The origin to ask about when a new window opens in another environment.
+ *
+ * A page on the follow list still cannot follow on its own when its environment
+ * label differs from the held page's — the list is written in origins, and
+ * "always follow this site" cannot say "but only from d15a". The card is where
+ * the user says yes for this session, so the page is offered even though the
+ * list already names it.
+ *
+ * Asking stays limited to the shape that is a hand-off: a page in a *different
+ * window*. An ordinary new tab in the same window never asks.
+ *
+ * @param input - the candidate tab, the page the session holds, and the blocked list.
+ * @returns the origin to ask about, or undefined when no card is due.
+ */
+export function askableCrossPrefixOrigin(input: {
+  url: string | undefined
+  tabId: number
+  tabWindowId: number
+  boundWindowId: number
+  boundTabIds: ReadonlySet<number>
+  blockedOrigins: readonly string[]
+  isDshPage: (url: string) => boolean
+  /** The page the session holds; the ask is about a different prefix. */
+  currentUrl: string | undefined
+}): string | undefined {
+  const origin = eligibleOrigin(input)
+  if (origin === undefined) return undefined
+  if (input.tabWindowId === input.boundWindowId) return undefined
+  return sameHostPrefix(origin, input.currentUrl) ? undefined : origin
 }
 
 /**
@@ -279,4 +366,46 @@ export function followedBackNotice(page: FollowedPage): string {
 /** Queue the one line the next answer from this session must lead with. */
 export function announceFollowBack(sessionId: string, page: FollowedPage): void {
   pendingBySession.set(sessionId, followedBackNotice(page))
+}
+
+/**
+ * What the model is told when a lost binding was silently reconnected.
+ *
+ * The call did not fail: it ran on the page the session had, found again after
+ * the binding was pruned. Saying so is the difference between "your page is
+ * still there, read it again" and the model believing it is still on whatever
+ * the old answer described.
+ *
+ * @param page - the page the session is back on.
+ * @returns one model-facing line.
+ */
+export function reconnectedNotice(page: FollowedPage): string {
+  return `This session is on tab ${page.tabId} — ${page.url} — again: the page it had was still open (possibly reopened in another tab), so it was rebound instead of reported closed. `
+    + 'Re-read this page before acting on it: it may have changed, and its host may differ from the one in the old answers.'
+}
+
+/** Queue the reconnect line for the next answer from this session. */
+export function announceReconnect(sessionId: string, page: FollowedPage): void {
+  pendingBySession.set(sessionId, reconnectedNotice(page))
+}
+
+/**
+ * What the model is told when the session was rebound on the page the workflow
+ * returned to, rather than on the page that closed.
+ *
+ * The capture flow opens LinkedIn, then closes it and comes back to the intranet
+ * page it started from. Re-executing the call on that page is what the user is
+ * looking at; opening another tab for the same record would duplicate it.
+ *
+ * @param page - the page the session is back on.
+ * @returns one model-facing line.
+ */
+export function returnedNotice(page: FollowedPage): string {
+  return `This session is on tab ${page.tabId} — ${page.url} — the page the workflow returned to, so it was rebound there instead of in a new tab. `
+    + 'Re-read this page before acting on it: it may have changed while the other page was open.'
+}
+
+/** Queue the return-to-page line for the next answer from this session. */
+export function announceReturned(sessionId: string, page: FollowedPage): void {
+  pendingBySession.set(sessionId, returnedNotice(page))
 }

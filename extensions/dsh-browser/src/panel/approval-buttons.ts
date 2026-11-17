@@ -35,6 +35,21 @@ export function decisionButtons(request: ApprovalRequest, copy: ApprovalCopy): A
   // A follow card is not an action approval: its wording is about the page, and
   // "always" persists an origin into the follow list, not into action trust.
   if (request.action === 'follow-page') {
+    // A page in another environment cannot be persisted into a prefix-scoped
+    // list, so that card offers the grant that can be scoped: this session.
+    // "Always follow this site" is deliberately absent even when no session can
+    // hold a grant: pressing it would add an origin this environment still may
+    // not follow, which reads as a button that did nothing.
+    if (request.crossEnvironment === true) {
+      const buttons: ApprovalButton[] = [
+        { id: 'allow-once', label: copy.followOnce },
+        { id: 'deny', label: copy.denyFollow },
+      ]
+      if (request.sessionId !== undefined && request.sessionId.trim() !== '') {
+        buttons.push({ id: 'allow-in-session', label: copy.allowInSession })
+      }
+      return buttons
+    }
     return [
       { id: 'allow-once', label: copy.followOnce },
       { id: 'deny', label: copy.denyFollow },

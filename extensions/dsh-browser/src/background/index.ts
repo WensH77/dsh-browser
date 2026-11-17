@@ -53,6 +53,7 @@ import {
 import {
   SessionAllowance,
   scopeKeyForCall,
+  type SessionGrant,
   type SessionGrantRevocation,
   type SessionGrantRevocationReason,
 } from '../security/session-allowance.ts'
@@ -72,6 +73,9 @@ import {
   FollowReturn,
   announceFollow,
   announceFollowBack,
+  announceReconnect,
+  announceReturned,
+  askableCrossPrefixOrigin,
   askableFollowOrigin,
   followableOrigin,
   takeFollowNotice,
@@ -176,6 +180,62 @@ const tabAffinity = new TabAffinityController()
 const followCandidates = new FollowCandidates()
 /** Pages sessions followed from, so a helper tab that closes itself gives one back. */
 const followReturns = new FollowReturn()
+/**
+ * The pages each session held, most recent first, kept after the binding is pruned.
+ *
+ * A pruned binding is not proof the page is gone: the same page is often open
+ * in another tab after the workflow re-opens it, a false prune (a tab the
+ * extension could not read for a moment) leaves the page untouched, and the
+ * capture flow closes the page it opened and comes back to the intranet page it
+ * started from. The user's rule for all of them: a lost binding looks for its
+ * own page and reconnects on its own, not answer "the tab was closed" while the
+ * page is still on screen. The previous page is what makes the last case work —
+ * the page that closed is LinkedIn, and the page to take is the one before it.
+ * Bounded and in memory only; cleared by Unbind, so an explicit release is not
+ * undone.
+ */
+const pageTrail = new Map<string, AffinityTab[]>()
+
+/** How many pages one session's trail keeps; only the newest two are looked for. */
+const PAGE_TRAIL_MAX = 5
+
+/** Remember the page a session is on, for a later silent reconnect. */
+function rememberLastPage(sessionId: string | undefined, tab: AffinityTab): void {
+  const sid = sessionId?.trim()
+  if (sid === undefined || sid === '') return
+  const trail = pageTrail.get(sid) ?? []
+  const previous = trail[0]
+  // A call that ran while the tab was mid-navigation carries an empty URL; keep
+  // the last known one, because an empty URL is what makes a later reconnect
+  // impossible to match.
+  const url = tab.url !== '' ? tab.url : (previous?.tabId === tab.tabId ? previous.url : '')
+  const entry: AffinityTab = { tabId: tab.tabId, windowId: tab.windowId, title: tab.title, url }
+  if (previous !== undefined && previous.tabId === entry.tabId && previous.url === entry.url) {
+    // Same page, newer title: no move, just metadata.
+    pageTrail.set(sid, [{ ...previous, title: entry.title }, ...trail.slice(1)])
+    return
+  }
+  // A move (another tab, or this tab navigated): the page left behind stays in
+  // the trail, so a workflow that closes the new page and returns to it can be
+  // followed without opening another tab.
+  pageTrail.set(sid, [entry, ...trail.filter((page) => page.tabId !== entry.tabId || page.url !== entry.url)].slice(0, PAGE_TRAIL_MAX))
+}
+
+/** How long one failing call waits for its page to come back before answering. */
+const RECONNECT_WAIT_MS = 2_000
+/** How long a late watcher keeps looking after that call has already refused. */
+const RECONNECT_LATE_WINDOW_MS = 60_000
+/** Poll interval for both the in-call wait and the late watcher. */
+const RECONNECT_POLL_MS = 500
+/** Late watchers, one per session, so a page that returns later is still taken. */
+const lateReconnectTimers = new Map<string, ReturnType<typeof setTimeout>>()
+
+/** Stop looking for a page this session is no longer waiting on. */
+function cancelLateReconnect(sessionId: string): void {
+  const timer = lateReconnectTimers.get(sessionId)
+  if (timer !== undefined) clearTimeout(timer)
+  lateReconnectTimers.delete(sessionId)
+}
 /** The one follow question on screen, if any. */
 let followPrompt: { tabId: number; controller: AbortController } | undefined
 const focusedWindow = new FocusedWindowTracker()
@@ -187,6 +247,18 @@ const sessionTrustedActionOrigins = new Set<string>()
  * the tab it was driving.
  */
 const sessionAllowances = new SessionAllowance()
+/**
+ * Permissions to follow one origin regardless of environment, for this session.
+ *
+ * Kept apart from {@link sessionAllowances} on purpose: those grants die with
+ * the binding that defined them, and a follow is itself a rebinding — putting
+ * the grant there would revoke it the moment it was used, and the next capture
+ * popup would ask again. This one belongs to the dsh session, so it survives
+ * follows and returns and dies with Unbind or a worker restart.
+ */
+const followAllowances = new SessionAllowance()
+/** Grant-key prefix one origin's follow permission is filed under. */
+const FOLLOW_GRANT_PREFIX = 'follow-page#'
 /** Tool calls that can still be withdrawn by a bridge `tool.cancel` frame. */
 const activeToolCalls = new Map<string, AbortController>()
 /**
@@ -368,7 +440,7 @@ function uiState(): UiState {
     controlled: controlledTabInfo(),
     pendingApprovals: [...pendingApprovals.values()],
     recentOps: activeOps(),
-    sessionGrants: sessionId === null ? [] : sessionAllowances.grantsFor(sessionId),
+    sessionGrants: sessionId === null ? [] : sessionGrantsForPanel(sessionId),
     grantRevocation: sessionId === null ? null : sessionAllowances.revocationFor(sessionId) ?? null,
     locale: getUiLocale(),
   }
@@ -399,7 +471,7 @@ function broadcastTabAffinity(): void {
  * @param revocation - what was dropped and why; omitted when a grant was added.
  */
 function broadcastSessionGrants(sessionId: string, revocation?: SessionGrantRevocation): void {
-  sendUiPush(sessionGrantsPush(sessionId, sessionAllowances.grantsFor(sessionId), revocation))
+  sendUiPush(sessionGrantsPush(sessionId, sessionGrantsForPanel(sessionId), revocation))
 }
 
 /** Bound tabs we already hold an eager debugging session for. */
@@ -623,8 +695,12 @@ function cancelPendingApprovals(sessionId?: string): void {
  */
 function forgetSession(sessionId: string, reason: SessionGrantRevocationReason): void {
   const revocation = sessionAllowances.revoke(sessionId, reason)
+  // A follow grant belongs to the session, not to the page it was given from:
+  // it survives the very rebinding it causes (and the return that follows), and
+  // ends when the user unlinks the session from the browser.
+  const followRevoked = reason === 'unbound' && followAllowances.clear(sessionId)
   cancelPendingApprovals(sessionId)
-  if (revocation !== undefined) broadcastSessionGrants(sessionId, revocation)
+  if (revocation !== undefined || followRevoked) broadcastSessionGrants(sessionId, revocation)
 }
 
 function summarizeTab(tab: chrome.tabs.Tab): AffinityTab | null {
@@ -706,6 +782,30 @@ function abortCallsOnTab(tabId: number): void {
 }
 
 /**
+ * Origins this session may follow across environments.
+ *
+ * The grant is filed per origin, so allowing LinkedIn does not also allow every
+ * cross-prefix page the workflow opens.
+ *
+ * @param sessionId - the session asking to follow.
+ * @returns the granted origins; empty when it holds none.
+ */
+function followSessionOrigins(sessionId: string): ReadonlySet<string> {
+  const origins = new Set<string>()
+  for (const grant of followAllowances.grantsFor(sessionId)) {
+    if (grant.action === 'follow-page' && grant.key.startsWith(FOLLOW_GRANT_PREFIX)) {
+      origins.add(grant.key.slice(FOLLOW_GRANT_PREFIX.length))
+    }
+  }
+  return origins
+}
+
+/** Every grant the panel lists for one session: action grants and follow grants. */
+function sessionGrantsForPanel(sessionId: string): SessionGrant[] {
+  return [...sessionAllowances.grantsFor(sessionId), ...followAllowances.grantsFor(sessionId)]
+}
+
+/**
  * Move a session to a page that opened on a follow origin.
  *
  * A rebinding, not an addition: one session drives one page, so the previous
@@ -728,8 +828,10 @@ function followSession(sessionId: string, summary: AffinityTab, origin: string):
   followCandidates.forget(summary.tabId)
   forgetSession(sessionId, 'rebind')
   resetTabSnapshot(summary.tabId)
+  cancelLateReconnect(sessionId)
   tabAffinity.bindNewSession(sessionId, summary)
   keepTabAlive(summary.tabId)
+  rememberLastPage(sessionId, summary)
   announceFollow(sessionId, summary)
   persistTabAffinity()
   broadcastTabAffinity()
@@ -787,12 +889,20 @@ async function addFollowOrigin(origin: string): Promise<void> {
  * "Always" writes the origin into the follow list, so later pages there follow
  * without asking; a timeout or a refusal leaves the session where it was.
  *
+ * A page in a *different environment* asks differently. The follow list is
+ * written in origins and a wildcard entry covers every environment under it, so
+ * "always follow this site" cannot express "but only from d15a" — persisting it
+ * would either do nothing here or widen the list beyond what the user meant.
+ * That card therefore offers "Allow in this session" instead, and the yes is a
+ * per-origin permission for this session only.
+ *
  * @param page - the page that opened.
  * @param sessionId - the session holding the browser.
  * @param origin - the origin the card names.
  * @param held - the page the session currently operates, for the summary.
+ * @param crossEnvironment - true when the page belongs to another environment.
  */
-function askFollow(page: AffinityTab, sessionId: string, origin: string, held: AffinityTab): void {
+function askFollow(page: AffinityTab, sessionId: string, origin: string, held: AffinityTab, crossEnvironment = false): void {
   if (followPrompt !== undefined) return
   followCandidates.markAsked(page.tabId)
   const controller = new AbortController()
@@ -801,17 +911,30 @@ function askFollow(page: AffinityTab, sessionId: string, origin: string, held: A
   const prompt: ApprovalPrompt = {
     kind: 'action',
     action: 'follow-page',
-    summary: zh
-      ? `新窗口打开了 ${page.url}，要让本会话（当前在 ${held.url}）跟过去吗？`
-      : `A new window opened at ${page.url}. Let this session (currently on ${held.url}) follow it?`,
+    summary: crossEnvironment
+      ? (zh
+        ? `新窗口在另一个环境打开了 ${page.url}（本会话当前在 ${held.url}）。要跟过去吗？「本次会话允许」只对当前会话有效，不会写进自动跟随名单。`
+        : `A new window opened at ${page.url}, in a different environment from the page this session is on (${held.url}). Follow it? "Allow in this session" applies to this session only and does not change the follow list.`)
+      : (zh
+        ? `新窗口打开了 ${page.url}，要让本会话（当前在 ${held.url}）跟过去吗？`
+        : `A new window opened at ${page.url}. Let this session (currently on ${held.url}) follow it?`),
     origins: [origin],
     canTrust: false,
+    ...(crossEnvironment ? { crossEnvironment: true } : {}),
   }
   void approvals.request(prompt, controller.signal, page.windowId, sessionId).then(async (result) => {
     followPrompt = undefined
     if (result.status !== 'decision') return
-    if (result.decision !== 'allow-once' && result.decision !== 'follow-always') return
-    if (result.decision === 'follow-always') await addFollowOrigin(origin)
+    const sessionAllow = crossEnvironment && result.decision === 'allow-in-session'
+    if (!sessionAllow && result.decision !== 'allow-once' && result.decision !== 'follow-always') return
+    // A session grant needs a session to hold it; never let a card without one
+    // turn into an unprompted follow.
+    if (sessionAllow && sessionId.trim() === '') return
+    if (result.decision === 'follow-always' && !crossEnvironment) await addFollowOrigin(origin)
+    if (sessionAllow) {
+      followAllowances.remember(sessionId, `${FOLLOW_GRANT_PREFIX}${origin}`, 'follow-page')
+      broadcastSessionGrants(sessionId)
+    }
     if (!tabAffinity.hasBinding(sessionId)) return
     const current = tabAffinity.getSessionTab(sessionId)
     if (current === undefined || current.tabId === page.tabId) return
@@ -856,14 +979,34 @@ function maybeFollowTab(tab: chrome.tabs.Tab): void {
       followOrigins: settings.followOrigins,
       blockedOrigins: settings.blockedOrigins,
       isDshPage: isDshPageUrl,
+      currentUrl: held.url,
+      sessionOrigins: followSessionOrigins(sessionId),
     })
     if (origin !== undefined) {
       followSession(sessionId, summary, origin)
       return
     }
-    // Not on the list yet: a page in a new window is the hand-off worth one
-    // question, and only once (maybeFollowTab runs on every tab update).
+    // One question per page: maybeFollowTab runs on every tab update.
     if (followCandidates.hasAsked(tabId)) return
+    // Another environment is the case the follow list cannot express: the card
+    // asks even when the origin is already listed, and offers a session grant
+    // rather than widening the list.
+    const crossOrigin = askableCrossPrefixOrigin({
+      url: summary.url,
+      tabId,
+      tabWindowId: summary.windowId,
+      boundWindowId: held.windowId,
+      boundTabIds,
+      blockedOrigins: settings.blockedOrigins,
+      isDshPage: isDshPageUrl,
+      currentUrl: held.url,
+    })
+    if (crossOrigin !== undefined) {
+      askFollow(summary, sessionId, crossOrigin, held, true)
+      return
+    }
+    // The same environment, not on the list yet: the ordinary hand-off card,
+    // whose "always" is meaningful because the prefix matches.
     const askOrigin = askableFollowOrigin({
       url: summary.url,
       tabId,
@@ -1027,6 +1170,176 @@ function takenBindingAnswer(holder: { sessionId: string; tab: AffinityTab }): To
 }
 
 
+/**
+ * Whether two addresses name the same page: same path and query, whatever host.
+ *
+ * The capture workflow this bridge serves hands the page back from its own
+ * environment: the expert page opened on `d15a` comes back on `ts1`, and the
+ * user reads that as the same record. Ignoring the host is safe *here* — the
+ * remembered page is the session's own, not a page the workflow opened — and
+ * the reconnect notice names the URL, so the model never assumes it stayed on
+ * the old host.
+ *
+ * @param left - one URL.
+ * @param right - the other URL.
+ * @returns true when both have the same pathname and search string.
+ */
+function samePagePath(left: string, right: string): boolean {
+  try {
+    const a = new URL(left)
+    const b = new URL(right)
+    return a.pathname === b.pathname && a.search === b.search
+  } catch {
+    return false
+  }
+}
+
+/** Whether two addresses share an origin. */
+function sameOrigin(left: string, right: string): boolean {
+  try {
+    return new URL(left).origin === new URL(right).origin
+  } catch {
+    return false
+  }
+}
+
+/** The page a session had, among the open tabs, or undefined when there is none or it is ambiguous. */
+function bindablePageFor(open: chrome.tabs.Tab[], remembered: AffinityTab): chrome.tabs.Tab | undefined {
+  const bindable = open.filter((tab) => tab.id !== undefined && isBindableTabUrl(tab.url) && !isDshPageUrl(tab.url ?? ''))
+  const sameId = bindable.find((tab) => tab.id === remembered.tabId)
+  if (sameId !== undefined) return sameId
+  const others = bindable.filter((tab) => tab.id !== remembered.tabId)
+  const sameUrl = others.filter((tab) => remembered.url !== '' && tab.url === remembered.url)
+  // The same page may come back on another environment's host (the capture
+  // workflow does exactly that); prefer the remembered host, and only accept a
+  // single candidate either way.
+  const samePageHere = others.filter((tab) => remembered.url !== '' && sameOrigin(tab.url ?? '', remembered.url) && samePagePath(tab.url ?? '', remembered.url))
+  const samePageAnywhere = others.filter((tab) => remembered.url !== '' && samePagePath(tab.url ?? '', remembered.url))
+  const unique = (tabs: chrome.tabs.Tab[]): chrome.tabs.Tab | undefined => (tabs.length === 1 ? tabs[0] : undefined)
+  return unique(sameUrl) ?? unique(samePageHere) ?? unique(samePageAnywhere)
+}
+
+/**
+ * Reconnect a session to the page it had, when Chrome still has it.
+ *
+ * A pruned binding is not proof the page is gone. The workflow this bridge is
+ * used with re-opens the same page (a capture flow that closes its helper and
+ * restores the original, a tab Chrome replaced, a binding lost to a worker
+ * restart) while the user still sees it; and a false prune leaves the tab
+ * untouched. The user's rule for all of them: a lost binding looks for its own
+ * page and reconnects silently instead of answering "the tab was closed".
+ *
+ * The lookup repeats for a while rather than running once: the capture flow
+ * closes its tab first and only then opens the page again, so at the instant
+ * the loss is noticed the page is usually still missing. Waiting inside the
+ * failing call is what turns "the controlled tab was closed" into "the call
+ * continued on the page that came back"; {@link scheduleLateReconnect} covers a
+ * return slower than this window.
+ *
+ * The remembered tab id wins, because it is the same page even if it navigated
+ * meanwhile. A same-page match (path and query, host allowed to differ) is
+ * accepted only when it is unambiguous — two tabs showing one page are two
+ * pages the user may be using for different work. Another session's page is
+ * never taken, and a page that has stopped being bindable is left alone; there
+ * the honest refusal still applies.
+ *
+ * @param sessionId - the session whose binding the call could not resolve.
+ * @param waitMs - how long to keep looking, for a page that is being reopened.
+ * @returns whether the session is bound again and the call may continue.
+ */
+async function reconnectLastPage(sessionId: string | undefined, waitMs = 0): Promise<boolean> {
+  const sid = sessionId?.trim()
+  if (sid === undefined || sid === '') return false
+  if (tabAffinity.hasBinding(sid) || tabAffinity.competingBinding(sid) !== undefined) return false
+  const trail = pageTrail.get(sid)
+  if (trail === undefined || trail.length === 0) return false
+  const deadline = Date.now() + waitMs
+  for (;;) {
+    // The page it had first; then the page the workflow came back to.
+    for (const [index, page] of trail.slice(0, 2).entries()) {
+      if (await reconnectOnce(sid, page, index > 0)) return true
+    }
+    if (Date.now() >= deadline) break
+    await new Promise((resolve) => setTimeout(resolve, RECONNECT_POLL_MS))
+    // A call in between may have bound this session somewhere else: that is the
+    // newer decision, and the search is over.
+    if (tabAffinity.hasBinding(sid) || tabAffinity.competingBinding(sid) !== undefined) return false
+  }
+  const [newest] = trail
+  recordDebugEvent('reconnect-miss', `session ${sid} no tab for ${newest?.url === '' ? `tab ${newest?.tabId}` : newest?.url}`)
+  return false
+}
+
+/**
+ * One reconnect attempt against one remembered page.
+ *
+ * @param sid - the session to rebind.
+ * @param remembered - the page to look for.
+ * @param returned - true when this is the page before the one that closed, so
+ *   the answer says the workflow returned to it rather than that it was found.
+ * @returns whether the attempt bound a page.
+ */
+async function reconnectOnce(sid: string, remembered: AffinityTab, returned = false): Promise<boolean> {
+  let open: chrome.tabs.Tab[]
+  try {
+    open = await chrome.tabs.query({})
+  } catch {
+    return false
+  }
+  const picked = bindablePageFor(open, remembered)
+  if (picked === undefined) return false
+  const summary = summarizeTab(picked)
+  if (summary === null || blockedOriginFailure(summary.url) !== undefined) return false
+  // One session owns the browser: a page another session holds is not a target.
+  for (const held of Object.values(tabAffinity.sessionMap())) {
+    if (held.tabId === summary.tabId) return false
+  }
+  cancelLateReconnect(sid)
+  followReturns.forget(sid)
+  forgetSession(sid, 'rebind')
+  resetTabSnapshot(summary.tabId)
+  tabAffinity.bindNewSession(sid, summary)
+  keepTabAlive(summary.tabId)
+  rememberLastPage(sid, summary)
+  if (returned) announceReturned(sid, summary)
+  else announceReconnect(sid, summary)
+  persistTabAffinity()
+  broadcastTabAffinity()
+  recordDebugEvent('reconnect', `session ${sid} -> tab ${summary.tabId}${returned ? ' (returned page)' : ''}${sameOrigin(summary.url, remembered.url) ? '' : ` (was ${remembered.url})`}`)
+  return true
+}
+
+/**
+ * Keep looking for a page that comes back after the call already refused.
+ *
+ * The failing call waits {@link RECONNECT_WAIT_MS}; a capture flow can take
+ * longer than that. Without this the session stays unbound while the page sits
+ * open in front of the user, and the next tool call has to be recovered by hand.
+ * The watcher stops as soon as the session is bound some other way, is unbound,
+ * the page is found, or {@link RECONNECT_LATE_WINDOW_MS} passes.
+ *
+ * @param sessionId - the session that just lost its page.
+ */
+function scheduleLateReconnect(sessionId: string): void {
+  const sid = sessionId.trim()
+  if (sid === '' || lateReconnectTimers.has(sid) || !pageTrail.has(sid)) return
+  const deadline = Date.now() + RECONNECT_LATE_WINDOW_MS
+  const tick = (): void => {
+    lateReconnectTimers.delete(sid)
+    // The worker (or the test harness) may be gone; a tick without the API has
+    // nothing to query and must not keep rescheduling itself.
+    if (typeof chrome === 'undefined' || chrome.tabs === undefined) return
+    if (Date.now() > deadline) return
+    if (tabAffinity.hasBinding(sid) || tabAffinity.competingBinding(sid) !== undefined) return
+    const trail = pageTrail.get(sid)
+    if (trail === undefined || trail.length === 0) return
+    void reconnectLastPage(sid, 0).then((bound) => {
+      if (!bound) lateReconnectTimers.set(sid, setTimeout(tick, RECONNECT_POLL_MS * 4))
+    })
+  }
+  lateReconnectTimers.set(sid, setTimeout(tick, RECONNECT_POLL_MS * 4))
+}
+
 /** Resolve one stable tab target without allowing a manual switch to drift it. */
 async function resolveToolTab(sessionId?: string): Promise<Pick<chrome.tabs.Tab, 'id' | 'url' | 'windowId'> | ToolAnswer> {
   await affinityReady
@@ -1034,15 +1347,22 @@ async function resolveToolTab(sessionId?: string): Promise<Pick<chrome.tabs.Tab,
     const resolution = tabAffinity.resolveTarget(sessionId)
     if (resolution.kind === 'handoff') return affinityFailureAnswer('handoff')
     if (resolution.kind === 'lost') {
-      // A session-scoped call with no page: its tab was closed (the entry is
-      // pruned with the tab) or it never bound one. It used to bind whichever
-      // tab the user was looking at, which meant the assistant's tab was closed,
-      // the user had moved on to another page, and the next call quietly began
-      // operating that page. Now the binding is released and the call refused;
-      // `lost` carries `needsPageChoice`, so the host asks the user which page to
-      // use, and browser_navigate / browser_bind_interactive stay the explicit
-      // ways to get one.
-      return noPageRefusal('lost', sessionId)
+      // The page may still be open (or reopened by the workflow). Looking for it
+      // is silent and self-serving — it only ever finds the session's own page,
+      // never whatever the user happens to be looking at. Only when it is not
+      // there does the call fail; `lost` carries `needsPageChoice`, so the host
+      // asks the user which page to use, and browser_navigate /
+      // browser_bind_interactive stay the explicit ways to get one.
+      if (await reconnectLastPage(sessionId, RECONNECT_WAIT_MS)) continue
+      if (sessionId !== undefined && pageTrail.has(sessionId)) {
+        // Its page is on its way back: keep looking and say so, instead of
+        // interrupting with a page picker for a recovery already in progress.
+        scheduleLateReconnect(sessionId)
+        return affinityFailureAnswer('retrying')
+      }
+      // A session that never held a page (or was unbound) has nothing to find
+      // and nothing that was closed: say "no page" instead of "was closed".
+      return noPageRefusal('missing', sessionId)
     }
     if (resolution.kind === 'initial') {
       // Nothing is bound and this call names no session (`resolveTarget` answers
@@ -1062,17 +1382,34 @@ async function resolveToolTab(sessionId?: string): Promise<Pick<chrome.tabs.Tab,
       // fail on it. A tab mid-navigation (empty URL, about:blank) is left alone.
       if (isClearlyUnoperablePage(summary.url)) return affinityFailureAnswer('unsupported', undefined, summary.url)
       keepTabAlive(summary.tabId)
+      rememberLastPage(sessionId, summary)
       if (tabAffinity.observeTab(summary)) broadcastTabAffinity()
       const current = tabAffinity.resolveTarget(sessionId)
       if (current.kind === 'handoff') return affinityFailureAnswer('handoff')
-      if (current.kind === 'lost') return affinityFailureAnswer('lost')
+      if (current.kind === 'lost') {
+        if (await reconnectLastPage(sessionId, RECONNECT_WAIT_MS)) continue
+        if (sessionId !== undefined && pageTrail.has(sessionId)) {
+          scheduleLateReconnect(sessionId)
+          return affinityFailureAnswer('retrying')
+        }
+        return affinityFailureAnswer('lost')
+      }
       if (current.kind === 'target' && current.tab.tabId === summary.tabId) return tab
     } catch {
       const affectedSessions = tabAffinity.sessionIdsForTab(resolution.tab.tabId)
+      for (const sid of affectedSessions) {
+        const held = tabAffinity.getSessionTab(sid)
+        if (held !== undefined) rememberLastPage(sid, held)
+      }
       if (tabAffinity.removeTab(resolution.tab.tabId)) {
         for (const sid of affectedSessions) forgetSession(sid, 'closed')
         persistTabAffinity()
         broadcastTabAffinity()
+      }
+      if (await reconnectLastPage(sessionId, RECONNECT_WAIT_MS)) continue
+      if (sessionId !== undefined && pageTrail.has(sessionId)) {
+        scheduleLateReconnect(sessionId)
+        return affinityFailureAnswer('retrying')
       }
       return affinityFailureAnswer('lost')
     }
@@ -1318,6 +1655,8 @@ async function openBoundTab(sessionId: string, destination: URL): Promise<boolea
   await affinityReady
   if (tabAffinity.hasBinding(sessionId)) return true
   if (!tabAffinity.bindNewSession(sessionId, summary)) return true
+  cancelLateReconnect(sessionId)
+  rememberLastPage(sessionId, summary)
   followReturns.forget(sessionId)
   followCandidates.forget(summary.tabId)
   keepTabAlive(summary.tabId)
@@ -1912,7 +2251,9 @@ async function handleVirtualTool(call: ToolCall, signal: AbortSignal): Promise<T
     followReturns.forget(sessionId)
     forgetSession(sessionId, 'rebind')
     resetTabSnapshot(summary.tabId)
+    cancelLateReconnect(sessionId)
     tabAffinity.bindNewSession(sessionId, summary)
+    rememberLastPage(sessionId, summary)
     followCandidates.forget(summary.tabId)
     keepTabAlive(summary.tabId)
     persistTabAffinity()
@@ -2292,6 +2633,8 @@ chrome.runtime.onMessage.addListener((message: unknown, sender, sendResponse) =>
       if (sessionId !== null && tabAffinity.unbindSession(sessionId)) {
         followCandidates.forgetSession(sessionId)
         followReturns.forget(sessionId)
+        cancelLateReconnect(sessionId)
+        pageTrail.delete(sessionId)
         forgetSession(sessionId, 'unbound')
         persistTabAffinity()
         broadcastTabAffinity()
@@ -2480,6 +2823,12 @@ chrome.tabs.onRemoved.addListener((tabId) => {
     const returning = affectedSessions
       .map((sid) => ({ sessionId: sid, back: followReturns.take(sid, tabId) }))
       .filter((entry): entry is { sessionId: string; back: AffinityTab } => entry.back !== undefined)
+    // What closed may have been re-opened through the capture flow; keep the
+    // page's identity so the next call can look for it instead of refusing.
+    for (const sid of affectedSessions) {
+      const held = tabAffinity.getSessionTab(sid)
+      if (held !== undefined) rememberLastPage(sid, held)
+    }
     followReturns.forgetTab(tabId)
     if (!tabAffinity.removeTab(tabId)) return
     for (const sid of affectedSessions) forgetSession(sid, 'closed')
@@ -2488,8 +2837,10 @@ chrome.tabs.onRemoved.addListener((tabId) => {
       if (live === undefined) continue
       forgetSession(sessionId, 'rebind')
       resetTabSnapshot(live.tabId)
+      cancelLateReconnect(sessionId)
       tabAffinity.bindNewSession(sessionId, live)
       keepTabAlive(live.tabId)
+      rememberLastPage(sessionId, live)
       announceFollowBack(sessionId, live)
       recordDebugEvent('follow-back', `session ${sessionId} -> tab ${live.tabId}`)
     }

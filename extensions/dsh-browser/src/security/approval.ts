@@ -36,6 +36,16 @@ export interface ApprovalPrompt {
   origins: string[]
   /** True only when one stable origin can safely be added to the action allowlist. */
   canTrust: boolean
+  /**
+   * Set on a follow card whose page belongs to another environment than the
+   * page the session holds.
+   *
+   * The follow list is written in origins and a wildcard covers every
+   * environment under it, so "always follow this site" cannot say "but only
+   * from here". Such a card offers a session grant instead, and the panel needs
+   * this flag to know which buttons belong on it.
+   */
+  crossEnvironment?: boolean
 }
 
 /** Correlated request delivered to every open side-panel view. */

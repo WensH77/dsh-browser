@@ -4,15 +4,20 @@ import {
   FollowReturn,
   announceFollow,
   announceFollowBack,
+  askableCrossPrefixOrigin,
   askableFollowOrigin,
   followableOrigin,
   followedBackNotice,
   followedNotice,
+  hostPrefix,
+  sameHostPrefix,
   takeFollowNotice,
 } from '../src/background/follow.ts'
 
 const ORIGIN = 'https://app.example.com'
 const PAGE = `${ORIGIN}/records/new?recordId=1234`
+
+const HELD = 'https://app.example.net/directory/1'
 
 const decide = (patch: Partial<Parameters<typeof followableOrigin>[0]> = {}) => followableOrigin({
   url: PAGE,
@@ -21,6 +26,7 @@ const decide = (patch: Partial<Parameters<typeof followableOrigin>[0]> = {}) => 
   followOrigins: [ORIGIN],
   blockedOrigins: [],
   isDshPage: () => false,
+  currentUrl: HELD,
   ...patch,
 })
 
@@ -139,6 +145,78 @@ describe('follow notice', () => {
     expect(takeFollowNotice('session-b')).toBeUndefined()
     expect(takeFollowNotice(undefined)).toBeUndefined()
     expect(takeFollowNotice('')).toBeUndefined()
+  })
+})
+
+describe('host prefixes', () => {
+  it('reads the environment label from the host', () => {
+    expect(hostPrefix('https://ts1.intranet.test6.pro/Experts_display.php')).toBe('ts1')
+    expect(hostPrefix('https://d15a.intranet.test15.tbeng.pro/x')).toBe('d15a')
+    expect(hostPrefix('https://www.example.com')).toBe('www')
+    expect(hostPrefix('http://127.0.0.1:3080/')).toBeUndefined()
+    expect(hostPrefix('')).toBeUndefined()
+    expect(hostPrefix(undefined)).toBeUndefined()
+  })
+
+  it('compares only defined labels', () => {
+    expect(sameHostPrefix('https://ts1.intranet.test6.pro/x', 'https://ts1.intranet.test6.pro/y')).toBe(true)
+    expect(sameHostPrefix('https://ts1.intranet.test6.pro/x', 'https://d15a.intranet.test15.tbeng.pro/y')).toBe(false)
+    expect(sameHostPrefix('http://127.0.0.1:3080/', 'http://127.0.0.1:3080/')).toBe(false)
+  })
+
+  it('does not follow another environment even when a wildcard entry covers it', () => {
+    const origin = 'https://ts1.intranet.test6.pro'
+    expect(decide({
+      url: `${origin}/Experts_display.php`,
+      followOrigins: ['https://*.test6.pro'],
+      currentUrl: 'https://d15a.intranet.test15.tbeng.pro/Experts_display.php',
+    })).toBeUndefined()
+  })
+
+  it('follows another environment once the session holds its origin as a grant', () => {
+    const origin = 'https://ts1.intranet.test6.pro'
+    expect(decide({
+      url: `${origin}/Experts_display.php`,
+      followOrigins: ['https://*.test6.pro'],
+      currentUrl: 'https://d15a.intranet.test15.tbeng.pro/Experts_display.php',
+      sessionOrigins: new Set([origin]),
+    })).toBe(origin)
+  })
+
+  it('does not follow when the held page has no environment label to compare', () => {
+    expect(decide({ currentUrl: 'http://127.0.0.1:3080/' })).toBeUndefined()
+  })
+})
+
+const askCross = (patch: Partial<Parameters<typeof askableCrossPrefixOrigin>[0]> = {}) => askableCrossPrefixOrigin({
+  url: 'https://www.linkedin.com/sales/people/1',
+  tabId: 7,
+  tabWindowId: 2,
+  boundWindowId: 1,
+  boundTabIds: new Set<number>(),
+  blockedOrigins: [],
+  isDshPage: () => false,
+  currentUrl: 'https://d15a.intranet.test15.tbeng.pro/Experts_display.php',
+  ...patch,
+})
+
+describe('askableCrossPrefixOrigin', () => {
+  it('asks about a different environment in another window, listed or not', () => {
+    expect(askCross()).toBe('https://www.linkedin.com')
+  })
+
+  it('stays silent for the same environment', () => {
+    expect(askCross({ url: 'https://d15a.intranet.test15.tbeng.pro/x' })).toBeUndefined()
+  })
+
+  it('stays silent for an ordinary new tab in the same window', () => {
+    expect(askCross({ tabWindowId: 1 })).toBeUndefined()
+  })
+
+  it('never asks about a page another session holds, or an unbindable one', () => {
+    expect(askCross({ boundTabIds: new Set([7]) })).toBeUndefined()
+    expect(askCross({ url: 'chrome://extensions' })).toBeUndefined()
+    expect(askCross({ url: 'https://www.linkedin.com/x', blockedOrigins: ['https://*.linkedin.com'] })).toBeUndefined()
   })
 })
 

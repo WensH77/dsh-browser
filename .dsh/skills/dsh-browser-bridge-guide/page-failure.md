@@ -22,7 +22,14 @@
 
 ## 二、标签页失效：被关掉、没有绑定页面
 
-- 受控页被**关掉**是另一条路径：工具会报 `The controlled tab was closed`（`needsPageChoice`），宿主会弹选页，不会把用户当前看的页面偷偷绑上。
+- 绑定丢了不等于页面没了：扩展会**先静默重连**——按记住的 tab id，或全页唯一一个「同一页」（相同路径与查询串，host 可以不同：capture 常把页面换回它自己的环境，优先同 origin）的标签页找回上一页，找回就在这次调用里继续，回答开头是
+  `This session is on tab N — <url> — again: the page it had was still open`。
+  看到这行就按它给的页继续，先重读再动作；这不是失败。
+- 关掉的是 capture 打开的页（LinkedIn）时，扩展会退一步找**上一页**：工作流回退到的 intranet 页若开着，就直接绑那一页，**不新开 tab**，回答开头是
+  `This session is on tab N — <url> — the page the workflow returned to, so it was rebound there instead of in a new tab.`。看到它就按这一页继续。
+- 这一版还会**等页面回来**：调用里先等约 2 秒；没等到就回答
+  `The controlled tab was closed, and its page is not open right now.`——它**不带 `needsPageChoice`**，所以不会弹选页，因为后台还会继续找 60 秒、页面一出现就静默重绑。看到它就**过几秒重试同一个调用**，不要重新选页。
+- 同一个页面开着两个以上标签页时扩展不替你选（继续找也一样），这时才需要 `browser_bind_interactive`；用户按过 Unbind 之后不再自动重连。
 - 工具报「没有绑定页面」或「受控标签页已消失」时，不要重试同一调用：用 `browser_navigate` 打开目标 URL（会新开标签页并绑定本会话），或用 `browser_bind_interactive` 让用户在已打开的页面里挑一个。
 
 **做完了，能指出这一条：**工具报的是「受控标签页已关闭」还是「没有绑定页面」，以及新开的标签页 URL 与本会话已绑定的页面。

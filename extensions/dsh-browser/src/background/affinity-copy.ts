@@ -33,7 +33,7 @@ import type { ToolAnswer } from './tools.ts'
  * Those answers therefore carry `needsPageChoice` (see
  * {@link offeringPageChoice}); a refusal a page choice cannot fix does not.
  */
-export type AffinityFailureKind = 'handoff' | 'lost' | 'missing' | 'taken' | 'unsupported'
+export type AffinityFailureKind = 'handoff' | 'lost' | 'missing' | 'retrying' | 'taken' | 'unsupported'
 
 /** The other session holding the controlled tab, as the panel shows it. */
 export interface BindingHolder {
@@ -114,6 +114,20 @@ export function affinityFailureAnswer(kind: AffinityFailureKind, holder?: Bindin
         message: 'No page is decided for this call yet, so browser operations are paused. '
           + 'Call browser_bind_interactive to let the user pick which open page this session should follow, '
           + 'or browser_navigate to open the target URL in a new tab.',
+      },
+    }
+  }
+  if (kind === 'retrying') {
+    // The session had a page and the bridge is still looking for it: the
+    // capture flow closed its tab and re-opens the page a moment later. This is
+    // deliberately not a page-choice failure — the picker would interrupt a
+    // recovery that is already under way — so it carries no `needsPageChoice`.
+    return {
+      ok: false,
+      error: {
+        code: 'content-unavailable',
+        message: 'The controlled tab was closed, and its page is not open right now. The bridge keeps looking for it and rebinds it automatically when it reappears — including the page the workflow returns to — so retry this call in a moment instead of opening a new tab. '
+          + 'To choose a page deliberately, call browser_bind_interactive.',
       },
     }
   }

@@ -148,6 +148,8 @@ interface Harness {
   bind: (tabId: number, sessionId: string) => Promise<void>
   /** Close a tab: the real `chrome.tabs.onRemoved` handler runs, as in Chrome. */
   closeTab: (tabId: number) => void
+  /** Make `chrome.tabs.query` report these open tabs; undefined restores the active one. */
+  setOpenTabs: (tabs: Array<{ id: number; windowId: number; title?: string; url: string }> | undefined) => void
   /** Answer the pending `hello` when automatic acknowledgement is off. */
   acceptHandshake: () => void
   /** Fire the real `chrome.tabs.onActivated` handler. */
@@ -201,6 +203,7 @@ async function boot(
   const tabCreatedListeners: Listener[] = []
   const tabUpdatedListeners: Listener[] = []
   const closedTabs = new Set<number>()
+  let queriedTabs: Array<{ id: number; windowId: number; title?: string; url: string }> | undefined
   const navigations: Frame[] = []
   const tabCreations: Frame[] = []
   const connectListeners: Listener[] = []
@@ -247,7 +250,10 @@ async function boot(
       },
     },
     tabs: {
-      query: async () => [activeTab],
+      // A closed tab is not in a query result, exactly like Chrome: the reconnect
+      // path relies on this to tell a lost page from one that is still open.
+      query: async () => queriedTabs
+        ?? (activeTab.id !== undefined && closedTabs.has(activeTab.id) ? [] : [activeTab]),
       get: async (tabId?: number) => {
         if (tabId !== undefined && closedTabs.has(tabId)) throw new Error(`No tab with id: ${tabId}`)
         return activeTab
@@ -370,7 +376,9 @@ async function boot(
 
   /** Wait for one call to settle and hand back its result frame. */
   const settleCall = async (id: string): Promise<Frame> => {
-    await vi.waitFor(() => { expect(results(id)).toHaveLength(1) })
+    // A lost-page call may wait for its page to come back inside the call, so a
+    // refusal legitimately takes a couple of seconds to settle.
+    await vi.waitFor(() => { expect(results(id)).toHaveLength(1) }, { timeout: 6000 })
     return results(id)[0]!
   }
 
@@ -427,6 +435,7 @@ async function boot(
       closedTabs.add(tabId)
       for (const listener of tabRemovedListeners) (listener as (tabId: number) => void)(tabId)
     },
+    setOpenTabs: (tabs) => { queriedTabs = tabs },
     acceptHandshake: () => socket.receive({
       t: 'hello.ok',
       caps: { proto: 3, toolset: 5, debugger: false, snapshotMaxChars: 32_000, maxInteractiveItems: 60 },
@@ -928,10 +937,6 @@ describe('background entry page-less sessions', () => {
   }
 
   /** How many affinity pushes the panel has received so far. */
-  function affinityPushes(harness: Harness): number {
-    return harness.uiPushes().filter((frame) => frame.type === 'push.affinity').length
-  }
-
   it('refuses the next call after the bound tab was closed without taking the tab the user moved to', async () => {
     const tab = { id: 42, windowId: 1, title: 'Orders', url: 'https://app.example/orders' }
     const harness = await boot(tab)
@@ -951,8 +956,11 @@ describe('background entry page-less sessions', () => {
 
     expect(frame.ok).toBe(false)
     expect((frame.error as { code?: string }).code).toBe('content-unavailable')
-    // The mark the host reads as "ask the user which page to use".
-    expect((frame.error as { needsPageChoice?: unknown }).needsPageChoice).toBe(true)
+    // The session had a page and the bridge is still looking for it, so this is
+    // not a request for the user to pick one: the picker would interrupt a
+    // recovery that is already running.
+    expect((frame.error as { needsPageChoice?: unknown }).needsPageChoice).toBeUndefined()
+    expect((frame.error as { message?: string }).message).toContain('keeps looking')
 
     const state = await harness.uiRequest({ type: 'ui.state' }) as Frame
     // Nothing was bound — and in particular not the page the user is viewing.
@@ -984,15 +992,16 @@ describe('background entry page-less sessions', () => {
   it('refuses a session that never bound a page, and binds nothing', async () => {
     // The same case for a session: a session-scoped call with no entry is
     // `lost` to the affinity controller — "never bound" and "its tab closed"
-    // are the same absence there — so the answer is the `content-unavailable`
-    // refusal, which also carries `needsPageChoice`.
+    // are the same absence there — but with nothing remembered there is no page
+    // that could have closed, so the answer is the `no-active-tab` refusal
+    // ("no page is bound"), which also carries `needsPageChoice`.
     const harness = await boot()
     harness.call({ id: 'c1', name: 'browser_get_text', args: {}, sessionId: 's1' })
 
     const frame = await harness.settle('c1')
 
     expect(frame.ok).toBe(false)
-    expect((frame.error as { code?: string }).code).toBe('content-unavailable')
+    expect((frame.error as { code?: string }).code).toBe('no-active-tab')
     expect((frame.error as { needsPageChoice?: unknown }).needsPageChoice).toBe(true)
     const state = await harness.uiRequest({ type: 'ui.state' }) as Frame
     expect(state.controlled).toBeNull()
@@ -1021,26 +1030,25 @@ describe('background entry page-less sessions', () => {
     expect(state.controlled).toMatchObject({ sessionId: 'owner', tabId: 42 })
   })
 
-  it('releases the dead binding on the refusal instead of failing silently', async () => {
-    // The release is the panel's Unbind path (`session.unbind`), so the refusal
-    // has to show its effect: the affinity the panel reads is pushed again. The
-    // close handler pruned the entry already, which is exactly why the push —
-    // and not a surviving record — is the observable half of it.
+  it('keeps the dead binding released while it looks for the page', async () => {
+    // The close handler pruned the entry and pushed the empty affinity; the
+    // refusal must not resurrect anything, and while the page is being looked
+    // for it must not ask the user to pick one either.
     const harness = await boot()
     await harness.bind(42, 's1')
     harness.closeTab(42)
     await vi.waitFor(async () => {
       expect((await affinity(harness)).status).toBe('lost')
     })
-    const pushesBefore = affinityPushes(harness)
 
     harness.call({ id: 'c1', name: 'browser_get_text', args: {}, sessionId: 's1' })
     const frame = await harness.settle('c1')
 
     expect(frame.ok).toBe(false)
-    expect((frame.error as { needsPageChoice?: unknown }).needsPageChoice).toBe(true)
-    expect(affinityPushes(harness)).toBeGreaterThan(pushesBefore)
+    expect((frame.error as { needsPageChoice?: unknown }).needsPageChoice).toBeUndefined()
     expect(harness.storedAffinity()?.['sessionTabs']).toBeUndefined()
+    const state = await harness.uiRequest({ type: 'ui.state' }) as Frame
+    expect(state.controlled).toBeNull()
   })
 })
 
@@ -1448,7 +1456,9 @@ describe('background entry follow origins', () => {
   })
 
   it('moves a bound session onto a newly opened page on a follow origin, and says so once', async () => {
-    const tab = { id: 42, windowId: 1, title: 'Lead', url: 'https://www.example.net/directory/1' }
+    // Same environment label (app) on both sides: the prefix rule is a separate
+    // test below, this one is about the move itself.
+    const tab = { id: 42, windowId: 1, title: 'Lead', url: 'https://app.example.net/directory/1' }
     const harness = await boot(
       tab,
       { bridgeUrl: BRIDGE_URL, followOrigins: ['https://app.example.com'] },
@@ -1494,12 +1504,12 @@ describe('background entry follow origins', () => {
     )
     await harness.bind(42, 's1')
 
-    // Another window, an origin that is not on the follow list yet.
+    // Another window, the same environment, an origin that is not on the list yet.
     harness.openTab({
       id: 55,
       windowId: 2,
       title: 'Add record',
-      url: 'https://app.example.com/records/new?recordId=1234',
+      url: 'https://www.example.com/records/new?recordId=1234',
     })
 
     await vi.waitFor(() => { expect(harness.approvalIds().length).toBeGreaterThan(0) })
@@ -1514,7 +1524,7 @@ describe('background entry follow origins', () => {
       expect(state.controlled).toMatchObject({ tabId: 55 })
     })
     await vi.waitFor(() => {
-      expect(harness.storedSettings()?.['followOrigins']).toEqual(['https://app.example.com'])
+      expect(harness.storedSettings()?.['followOrigins']).toEqual(['https://www.example.com'])
     })
   })
 
@@ -1550,20 +1560,21 @@ describe('background entry follow origins', () => {
     )
     await harness.bind(42, 's1')
 
-    harness.openTab({ id: 55, windowId: 2, title: 'Inbox', url: 'https://mail.example/inbox' })
+    harness.openTab({ id: 55, windowId: 1, title: 'Inbox', url: 'https://mail.example/inbox' })
     await vi.waitFor(async () => {
       const state = await harness.uiRequest({ type: 'ui.state' }) as Frame
       expect(state.controlled).toMatchObject({ tabId: 42 })
+      expect((state.pendingApprovals as Frame[]).length).toBe(0)
     })
   })
 
   it('gives a session its own page back when the page it followed closes itself', async () => {
-    // The reported bug: clicking capture opens a LinkedIn popup on a follow
-    // origin, the session moves there, the popup closes when the capture ends,
-    // and the answer said "the controlled tab was closed" to someone whose
-    // intranet page had never moved. The close of a followed helper is not the
-    // close of the user's page, so the session goes back instead of failing.
-    const tab = { id: 42, windowId: 1, title: 'Profile', url: 'https://www.example.net/directory/1' }
+    // The reported bug: clicking capture opens a popup on a follow origin, the
+    // session moves there, the popup closes when the capture ends, and the
+    // answer said "the controlled tab was closed" to someone whose intranet
+    // page had never moved. The close of a followed helper is not the close of
+    // the user's page, so the session goes back instead of failing.
+    const tab = { id: 42, windowId: 1, title: 'Profile', url: 'https://app.example.net/directory/1' }
     const harness = await boot(
       tab,
       { bridgeUrl: BRIDGE_URL, followOrigins: ['https://app.example.com'] },
@@ -1585,7 +1596,7 @@ describe('background entry follow origins', () => {
     tab.id = 42
     tab.windowId = 1
     tab.title = 'Profile'
-    tab.url = 'https://www.example.net/directory/1'
+    tab.url = 'https://app.example.net/directory/1'
     harness.closeTab(55)
 
     await vi.waitFor(async () => {
@@ -1598,7 +1609,7 @@ describe('background entry follow origins', () => {
     expect(frame.ok).toBe(true)
     const text = (frame.result as Frame).text as string
     expect(text).toContain('back on tab 42')
-    expect(text).toContain('https://www.example.net/directory/1')
+    expect(text).toContain('https://app.example.net/directory/1')
     // One notice for the return, so the next answer is the page's own text.
     expect(text).toContain('form page')
 
@@ -1608,7 +1619,7 @@ describe('background entry follow origins', () => {
   })
 
   it('keeps the session unbound when the page it followed from is gone too', async () => {
-    const tab = { id: 42, windowId: 1, title: 'Profile', url: 'https://www.example.net/directory/1' }
+    const tab = { id: 42, windowId: 1, title: 'Profile', url: 'https://app.example.net/directory/1' }
     const harness = await boot(
       tab,
       { bridgeUrl: BRIDGE_URL, followOrigins: ['https://app.example.com'] },
@@ -1640,5 +1651,240 @@ describe('background entry follow origins', () => {
     const frame = await harness.settle('gone-1')
     expect(frame.ok).toBe(false)
     expect(((frame.error as Frame).message as string)).toContain('controlled tab was closed')
+  })
+
+  it('asks before following another environment, and the session grant allows it', async () => {
+    // The reported jump: a d15a session followed a ts1/LinkedIn page because the
+    // follow list is written in origins and a wildcard covers every environment
+    // under it. The prefix is now part of the match, and "Allow in this session"
+    // is the consent that can be scoped to where the user is working.
+    const tab = { id: 42, windowId: 1, title: 'Profile', url: 'https://d15a.intranet.test15.tbeng.pro/Experts_display.php' }
+    const harness = await boot(
+      tab,
+      { bridgeUrl: BRIDGE_URL, followOrigins: ['https://www.linkedin.com'] },
+      () => ({ ok: true, result: { text: 'page' } }),
+    )
+    await harness.bind(42, 's1')
+
+    harness.openTab({ id: 55, windowId: 2, title: 'LinkedIn', url: 'https://www.linkedin.com/sales/people/1' })
+    await vi.waitFor(() => { expect(harness.approvalIds().length).toBe(1) })
+    // Nothing moves before the user answers.
+    const before = await harness.uiRequest({ type: 'ui.state' }) as Frame
+    expect(before.controlled).toMatchObject({ tabId: 42 })
+    expect((before.pendingApprovals as Frame[])[0]).toMatchObject({ action: 'follow-page', crossEnvironment: true })
+
+    harness.answer(harness.approvalIds()[0]!, 'allow-in-session')
+    await vi.waitFor(async () => {
+      const state = await harness.uiRequest({ type: 'ui.state' }) as Frame
+      expect(state.controlled).toMatchObject({ tabId: 55 })
+      expect(state.sessionGrants).toEqual([expect.objectContaining({ action: 'follow-page' })])
+    })
+
+    // The grant is per origin and lasts the session: the next popup follows
+    // without another card (and without the follow itself revoking the grant).
+    const cardsBefore = harness.approvalIds().length
+    tab.id = 66
+    tab.windowId = 2
+    tab.title = 'LinkedIn'
+    tab.url = 'https://www.linkedin.com/sales/people/2'
+    harness.openTab({ ...tab })
+    await vi.waitFor(async () => {
+      const state = await harness.uiRequest({ type: 'ui.state' }) as Frame
+      expect(state.controlled).toMatchObject({ tabId: 66 })
+    })
+    expect(harness.approvalIds().length).toBe(cardsBefore)
+  })
+
+  it('leaves the session where it is when another environment is declined', async () => {
+    const tab = { id: 42, windowId: 1, title: 'Profile', url: 'https://d15a.intranet.test15.tbeng.pro/Experts_display.php' }
+    const harness = await boot(
+      tab,
+      { bridgeUrl: BRIDGE_URL, followOrigins: ['https://www.linkedin.com'] },
+      () => ({ ok: true, result: { text: 'page' } }),
+    )
+    await harness.bind(42, 's1')
+
+    harness.openTab({ id: 55, windowId: 2, title: 'LinkedIn', url: 'https://www.linkedin.com/sales/people/1' })
+    await vi.waitFor(() => { expect(harness.approvalIds().length).toBe(1) })
+    harness.answer(harness.approvalIds()[0]!, 'deny')
+
+    await vi.waitFor(async () => {
+      const state = await harness.uiRequest({ type: 'ui.state' }) as Frame
+      expect(state.controlled).toMatchObject({ tabId: 42 })
+      expect(state.sessionGrants).toEqual([])
+    })
+  })
+})
+
+/**
+ * A binding that is lost is not always a page that is gone.
+ *
+ * The reported bug: the extension answered "the controlled tab was closed"
+ * while the page was still on screen — the capture workflow had reopened it,
+ * Chrome had replaced the tab, or the prune was false. The user's rule is to
+ * look for the session's own page and reconnect silently, never to take
+ * whatever the user happens to be looking at.
+ */
+describe('background entry lost-page reconnect', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    vi.restoreAllMocks()
+  })
+
+  it('reconnects to the same page in another tab, and says so in that answer', async () => {
+    const tab = { id: 42, windowId: 1, title: 'Profile', url: 'https://app.example/experts/1' }
+    const harness = await boot(tab, { bridgeUrl: BRIDGE_URL }, () => ({ ok: true, result: { text: 'page body' } }))
+    await harness.bind(42, 's1')
+
+    // The tab dsh held is gone from its bookkeeping; the same page is open in
+    // a new tab (the workflow reopened it, Chrome replaced the tab, …).
+    harness.closeTab(42)
+    tab.id = 77
+    tab.windowId = 2
+    tab.title = 'Profile'
+
+    harness.call({ id: 'rc-1', name: 'browser_get_text', args: {}, sessionId: 's1' })
+    const frame = await harness.settle('rc-1')
+
+    expect(frame.ok).toBe(true)
+    const text = (frame.result as Frame).text as string
+    expect(text).toContain('on tab 77')
+    expect(text).toContain('https://app.example/experts/1')
+    expect(text).toContain('page body')
+
+    const state = await harness.uiRequest({ type: 'ui.state' }) as Frame
+    expect(state.controlled).toMatchObject({ tabId: 77 })
+  })
+
+  it('reconnects to the same record on another environment when that is the only copy', async () => {
+    // The capture workflow hands the page back on its own environment: the
+    // expert page opened on d15a comes back as the ts1 page. The path is the
+    // same record, which is what the user is looking at.
+    const tab = { id: 42, windowId: 1, title: 'Expert', url: 'https://d15a.intranet.test15.tbeng.pro/Experts_display.php?display=ok&id_expert=1' }
+    const harness = await boot(tab, { bridgeUrl: BRIDGE_URL }, () => ({ ok: true, result: { text: 'page body' } }))
+    await harness.bind(42, 's1')
+
+    harness.closeTab(42)
+    tab.id = 90
+    tab.windowId = 2
+    tab.url = 'https://ts1.intranet.test6.pro/Experts_display.php?display=ok&id_expert=1'
+
+    harness.call({ id: 'rc-x', name: 'browser_get_text', args: {}, sessionId: 's1' })
+    const frame = await harness.settle('rc-x')
+    expect(frame.ok).toBe(true)
+    const text = (frame.result as Frame).text as string
+    expect(text).toContain('on tab 90')
+    expect(text).toContain('ts1.intranet.test6.pro')
+    expect(text).toContain('page body')
+  })
+
+  it('binds the page the workflow returned to instead of opening a new tab', async () => {
+    // The capture flow navigates the session onto LinkedIn, then closes it and
+    // comes back to the intranet page it started from. The page that closed is
+    // LinkedIn; the page the user is looking at is the one before it.
+    const tab = { id: 42, windowId: 1, title: 'Expert', url: 'https://d15a.intranet.test15.tbeng.pro/Experts_display.php?id_expert=1' }
+    const harness = await boot(tab, { bridgeUrl: BRIDGE_URL }, () => ({ ok: true, result: { text: 'page body' } }))
+    await harness.bind(42, 's1')
+
+    tab.url = 'https://www.linkedin.com/in/someone/'
+    harness.call({ id: 'go-1', name: 'browser_get_text', args: {}, sessionId: 's1' })
+    await harness.settle('go-1')
+
+    harness.closeTab(42)
+    tab.id = 96
+    tab.windowId = 1
+    tab.title = 'Expert'
+    tab.url = 'https://d15a.intranet.test15.tbeng.pro/Experts_display.php?id_expert=1'
+
+    harness.call({ id: 'back-2', name: 'browser_get_text', args: {}, sessionId: 's1' })
+    const frame = await harness.settle('back-2')
+    expect(frame.ok).toBe(true)
+    const text = (frame.result as Frame).text as string
+    expect(text).toContain('on tab 96')
+    expect(text).toContain('workflow returned to')
+    expect(text).toContain('page body')
+  })
+
+  it('answers that it is still looking, without a page picker, when the page is not back yet', async () => {
+    const tab = { id: 42, windowId: 1, title: 'Profile', url: 'https://app.example/experts/1' }
+    const harness = await boot(tab, { bridgeUrl: BRIDGE_URL }, () => ({ ok: true, result: { text: 'page body' } }))
+    await harness.bind(42, 's1')
+
+    harness.closeTab(42)
+    tab.id = 88
+    tab.url = 'https://other.example/unrelated'
+
+    harness.call({ id: 'rc-2', name: 'browser_get_text', args: {}, sessionId: 's1' })
+    const frame = await harness.settle('rc-2')
+    expect(frame.ok).toBe(false)
+    expect((frame.error as Frame).code).toBe('content-unavailable')
+    expect(((frame.error as Frame).message as string)).toContain('keeps looking')
+    // A recovery already under way must not raise the page picker.
+    expect((frame.error as { needsPageChoice?: unknown }).needsPageChoice).toBeUndefined()
+  })
+
+  it('rebinds on its own when the page comes back after the call failed', async () => {
+    const tab = { id: 42, windowId: 1, title: 'Profile', url: 'https://app.example/experts/1' }
+    const harness = await boot(tab, { bridgeUrl: BRIDGE_URL }, () => ({ ok: true, result: { text: 'page body' } }))
+    await harness.bind(42, 's1')
+
+    harness.closeTab(42)
+    tab.id = 88
+    tab.url = 'https://other.example/unrelated'
+    harness.call({ id: 'late-1', name: 'browser_get_text', args: {}, sessionId: 's1' })
+    const failed = await harness.settle('late-1')
+    expect(failed.ok).toBe(false)
+
+    // The capture flow hands the page back a moment later.
+    tab.id = 95
+    tab.windowId = 2
+    tab.url = 'https://app.example/experts/1'
+    await vi.waitFor(async () => {
+      const state = await harness.uiRequest({ type: 'ui.state' }) as Frame
+      expect(state.controlled).toMatchObject({ tabId: 95 })
+    }, { timeout: 8000 })
+  })
+
+  it('does not guess between two tabs on the same page', async () => {
+    const tab = { id: 42, windowId: 1, title: 'Profile', url: 'https://app.example/experts/1' }
+    const harness = await boot(tab, { bridgeUrl: BRIDGE_URL }, () => ({ ok: true, result: { text: 'page body' } }))
+    await harness.bind(42, 's1')
+
+    // Two tabs showing one page are two pages the user may be using for
+    // different work; the reconnect must not pick one for them.
+    const page = 'https://app.example/experts/1'
+    harness.closeTab(42)
+    harness.setOpenTabs([
+      { id: 77, windowId: 1, title: 'Profile', url: page },
+      { id: 78, windowId: 2, title: 'Profile', url: page },
+    ])
+
+    harness.call({ id: 'rc-3', name: 'browser_get_text', args: {}, sessionId: 's1' })
+    const frame = await harness.settle('rc-3')
+    expect(frame.ok).toBe(false)
+    expect(((frame.error as Frame).message as string)).toContain('keeps looking')
+  })
+
+  it('never reconnects after the user pressed Unbind', async () => {
+    const tab = { id: 42, windowId: 1, title: 'Profile', url: 'https://app.example/experts/1' }
+    const harness = await boot(tab, { bridgeUrl: BRIDGE_URL }, () => ({ ok: true, result: { text: 'page body' } }))
+    await harness.bind(42, 's1')
+    await harness.uiRequest({ type: 'session.unbind' })
+
+    tab.id = 77
+    tab.windowId = 2
+    harness.call({ id: 'rc-4', name: 'browser_get_text', args: {}, sessionId: 's1' })
+    const frame = await harness.settle('rc-4')
+    expect(frame.ok).toBe(false)
+    expect(((frame.error as Frame).message as string)).toContain('No page is bound')
+  })
+
+  it('says "no page" rather than "the tab was closed" for a session that never had one', async () => {
+    const tab = { id: 42, windowId: 1, title: 'Profile', url: 'https://app.example/experts/1' }
+    const harness = await boot(tab, { bridgeUrl: BRIDGE_URL })
+    harness.call({ id: 'fresh-1', name: 'browser_get_text', args: {}, sessionId: 's-fresh' })
+    const frame = await harness.settle('fresh-1')
+    expect(frame.ok).toBe(false)
+    expect(((frame.error as Frame).message as string)).toContain('No page is bound')
   })
 })

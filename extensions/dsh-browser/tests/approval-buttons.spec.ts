@@ -83,6 +83,27 @@ describe('panel approval buttons', () => {
     ])
   })
 
+  it('offers the session grant instead of a site entry across environments', () => {
+    const buttons = decisionButtons(request({
+      action: 'follow-page',
+      summary: 'A new window opened at https://www.linkedin.com/x, in a different environment',
+      origins: ['https://www.linkedin.com'],
+      canTrust: false,
+      crossEnvironment: true,
+      sessionId: 'session-a',
+    }), COPY)
+
+    expect(buttons).toEqual([
+      { id: 'allow-once', label: 'Follow this time' },
+      { id: 'deny', label: 'Do not follow' },
+      { id: 'allow-in-session', label: 'Allow in this session' },
+    ])
+    // Without a session to hold the grant, the cross-environment card has no
+    // opt-in at all — it must not offer the button the background would refuse.
+    expect(ids({ action: 'follow-page', origins: ['https://www.linkedin.com'], canTrust: false, crossEnvironment: true }))
+      .toEqual(['allow-once', 'deny'])
+  })
+
   it('keeps reads on their own persistent button', () => {
     expect(ids({ kind: 'read', action: 'browser_network', canTrust: false, sessionId: 'session-a' }))
       .toEqual(['allow-once', 'always-allow-reads', 'deny'])
