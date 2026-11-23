@@ -3,9 +3,9 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Context } from '@deepseek-ai/cordis'
-import type { WebRoute } from '@deepseek-ai/dsh-host-webserver'
-import { apply, assertPositiveInteger, Config, resolveConfig } from '../src/index.ts'
-import { BRIDGE_BINDINGS_PATH } from '../src/protocol.ts'
+import type { WebRoute, WebUpgradeRoute } from '@deepseek-ai/dsh-host-webserver'
+import { admitBridgeRequest, apply, assertPositiveInteger, Config, resolveConfig } from '../src/index.ts'
+import { BRIDGE_BINDINGS_PATH, BRIDGE_CONFIG_PATH, BRIDGE_PATH } from '../src/protocol.ts'
 
 /**
  * Minimal context stub: apply only needs the services at registration time.
@@ -17,9 +17,13 @@ function stubContext(reject?: (headers: Record<string, unknown>) => 401 | 403 | 
   ctx: Context
   registered: string[]
   routes: WebRoute[]
+  upgrades: WebUpgradeRoute[]
+  authorizers: { listener: (request: { url: URL }, policy: string) => unknown; options: unknown }[]
 } {
   const registered: string[] = []
   const routes: WebRoute[] = []
+  const upgrades: WebUpgradeRoute[] = []
+  const authorizers: { listener: (request: { url: URL }, policy: string) => unknown; options: unknown }[] = []
   const gateway = {
     wireStream: {
       open: async (): Promise<AsyncIterable<unknown>> => ({ async *[Symbol.asyncIterator]() {} }),
@@ -36,7 +40,10 @@ function stubContext(reject?: (headers: Record<string, unknown>) => 401 | 403 | 
   const ctx = {
     webServer: {
       port: 0,
-      registerUpgrade: () => () => {},
+      registerUpgrade: (route: WebUpgradeRoute) => {
+        upgrades.push(route)
+        return () => {}
+      },
       register: (route: WebRoute) => {
         routes.push(route)
         return () => {}
@@ -50,14 +57,17 @@ function stubContext(reject?: (headers: Record<string, unknown>) => 401 | 403 | 
     },
     agents: { get: () => undefined },
     get: (key: string) => key === 'typertGateway' ? gateway : key === 'connection' ? connection : undefined,
-    on: () => () => {},
+    on: (name: string, listener: (request: { url: URL }, policy: string) => unknown, options?: unknown) => {
+      if (name === 'webserver/authorize') authorizers.push({ listener, options })
+      return () => {}
+    },
     logger: { info: () => {}, warn: () => {}, error: () => {} },
     effect: (fn: () => unknown, label?: string) => {
       void label
       return fn() as () => void
     },
   } as unknown as Context
-  return { ctx, registered, routes }
+  return { ctx, registered, routes, upgrades, authorizers }
 }
 
 const dirs: string[] = []
@@ -126,6 +136,36 @@ describe('apply', () => {
     // Exact, not a prefix: the GUI polls this one path, and a prefix route
     // would answer for children this plugin never meant to serve.
     expect(route!.kind).toBe('exact')
+  })
+
+  it('admits the extension paths ahead of the host authorization', async () => {
+    const { ctx, routes, upgrades, authorizers } = stubContext()
+    await apply(ctx, { token: 'fixed-token', ...VALID })
+
+    // dsh 0.2.3 defaults every route to `required` and refuses a
+    // `chrome-extension://` Origin at Connection's source check, which is what
+    // made the extension reconnect forever; both paths must opt out.
+    expect(upgrades.find((candidate) => candidate.path === BRIDGE_PATH)?.auth).toBe('anonymous')
+    expect(routes.find((candidate) => candidate.path === BRIDGE_CONFIG_PATH)?.auth).toBe('anonymous')
+
+    // And the decision has to run before Connection's own listener, or the
+    // anonymous declaration never gets a say.
+    expect(authorizers).toHaveLength(1)
+    expect(authorizers[0].options).toEqual({ prepend: true })
+    const listener = authorizers[0].listener
+    expect(listener({ url: new URL(`http://127.0.0.1${BRIDGE_PATH}`) }, 'anonymous')).toEqual({ kind: 'allow' })
+    expect(listener({ url: new URL('http://127.0.0.1/api/session') }, 'required')).toBeUndefined()
+  })
+
+  it('admits only the bridge paths, leaving the rest to the host policy', () => {
+    const path = (value: string): URL => new URL(`http://127.0.0.1${value}`)
+    expect(admitBridgeRequest({ url: path(BRIDGE_PATH) })).toEqual({ kind: 'allow' })
+    expect(admitBridgeRequest({ url: path(BRIDGE_CONFIG_PATH) })).toEqual({ kind: 'allow' })
+    expect(admitBridgeRequest({ url: path(BRIDGE_BINDINGS_PATH) })).toBeUndefined()
+    expect(admitBridgeRequest({ url: path('/api/session') })).toBeUndefined()
+    expect(admitBridgeRequest({ url: path('/') })).toBeUndefined()
+    // A lookalike sibling must not ride on the prefix.
+    expect(admitBridgeRequest({ url: path(`${BRIDGE_PATH}/extra`) })).toBeUndefined()
   })
 
   it('answers the bindings route GET-only, with an empty table before any hello', async () => {

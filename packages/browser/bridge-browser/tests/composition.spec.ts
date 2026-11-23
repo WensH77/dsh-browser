@@ -20,6 +20,7 @@ import Include from '@deepseek-ai/cordis-plugin-include'
 import WebSocket from 'ws'
 import WebServer from '@deepseek-ai/dsh-host-webserver'
 import SessionStore from '@deepseek-ai/dsh-session'
+import SessionProjection from '@deepseek-ai/dsh-session-projection'
 import AgentRegistry from '@deepseek-ai/dsh-agent'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRegistry from '@deepseek-ai/dsh-tools'
@@ -78,6 +79,7 @@ async function loadComposition(): Promise<{ ctx: Context; configPath: string; po
     "    host: '127.0.0.1'",
     '    port: 0',
     "- name: '@deepseek-ai/dsh-session'",
+    "- name: '@deepseek-ai/dsh-session-projection'",
     "- name: '@deepseek-ai/dsh-user-questions'",
     "- name: '@deepseek-ai/dsh-agent'",
     "- name: '@deepseek-ai/dsh-system-prompt'",
@@ -103,6 +105,7 @@ async function loadComposition(): Promise<{ ctx: Context; configPath: string; po
   const modules = new Map<string, unknown>([
     ['@deepseek-ai/dsh-host-webserver', WebServer],
     ['@deepseek-ai/dsh-session', SessionStore],
+    ['@deepseek-ai/dsh-session-projection', SessionProjection],
     ['@deepseek-ai/dsh-user-questions', UserQuestionService],
     ['@deepseek-ai/dsh-agent', AgentRegistry],
     ['@deepseek-ai/dsh-system-prompt', SystemPrompt],
@@ -125,6 +128,13 @@ async function loadComposition(): Promise<{ ctx: Context; configPath: string; po
     config: { path: pathToFileURL(configPath).href },
   })
   await context.loader.await()
+  // dsh 0.2.3 起路由默认要求认证，而这个最小组合没挂 connection / token：补一条
+  // 测试监听代表“已登录的 GUI 页面”，让用例继续验证路由本身而不是宿主的准入。
+  // 桥接的两条扩展路径由插件自己的 prepend 监听放行，不会走到这里。
+  context.on('webserver/authorize', () => ({
+    kind: 'allow',
+    peer: { signal: new AbortController().signal, principal: { kind: 'owner' } } as never,
+  }))
   const web = context.get('webServer') as typeof WebServer.prototype
   return { ctx: context, configPath, port: web.port }
 }

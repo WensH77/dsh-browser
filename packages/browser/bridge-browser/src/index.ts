@@ -29,7 +29,7 @@ import type {} from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-attachment'
 import z from '@deepseek-ai/schemastery'
 import type {} from '@deepseek-ai/dsh-tools'
-import type { WebRoute, WebUpgradeRoute } from '@deepseek-ai/dsh-host-webserver'
+import type { WebAdmission, WebAuthRequest, WebRoute, WebUpgradeRoute } from '@deepseek-ai/dsh-host-webserver'
 import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
 import { BridgeServer, isLoopbackAddress } from './server.ts'
 import { registerBrowserTools } from './tools.ts'
@@ -405,6 +405,34 @@ function sendJson(
 }
 
 /**
+ * Paths the browser extension owns: the discovery endpoint and the bridge socket.
+ *
+ * Both are reached by a `chrome-extension://` Origin, which is not this web
+ * server's own authority. Since dsh 0.2.3 every route runs Connection's source
+ * check, so both are declared anonymous and admitted by
+ * {@link admitBridgeRequest} instead.
+ */
+const EXTENSION_PATHS: ReadonlySet<string> = new Set([BRIDGE_PATH, BRIDGE_CONFIG_PATH])
+
+/**
+ * Decide `webserver/authorize` for the extension's own two paths.
+ *
+ * dsh 0.2.3 gates every route: `auth` defaults to `required`, and Connection's
+ * Host/Origin check runs even for anonymous routes, so an extension request is
+ * refused before any handler here sees it. Admitting these paths is what the
+ * plugin's own boundary already assumed: the hello frame must arrive from
+ * loopback with a pinned extension ID, or present the bearer token, so an
+ * admitted socket that cannot prove either is closed by the bridge itself.
+ * Returning `undefined` leaves every other request to the host's policy.
+ *
+ * @param request - the request being authorized.
+ * @returns an allow decision for the bridge's own paths, otherwise undefined.
+ */
+export function admitBridgeRequest(request: Pick<WebAuthRequest, 'url'>): WebAdmission | undefined {
+  return EXTENSION_PATHS.has(request.url.pathname) ? { kind: 'allow' } : undefined
+}
+
+/**
  * Mount the bridge: resolve the token, register the upgrade route, the tool
  * set, and an optional system-prompt section, all effect-scoped for HMR.
  *
@@ -480,8 +508,17 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
     },
   })
 
+  // Prepend: Connection's own `webserver/authorize` listener decides first and
+  // refuses a foreign Origin for every route, so this decision has to run ahead
+  // of it. It answers only for the extension's two paths; the rest of the host
+  // keeps its normal policy.
+  ctx.on('webserver/authorize', admitBridgeRequest, { prepend: true })
+
   const route: WebUpgradeRoute = {
     path: BRIDGE_PATH,
+    // Declared anonymous so the admitted request reaches this handler without a
+    // GUI credential; the hello frame is the real boundary (see admitBridgeRequest).
+    auth: 'anonymous',
     handler: (req, socket, head) => { server.handleUpgrade(req, socket, head) },
   }
   ctx.effect(() => ctx.webServer.registerUpgrade(route), 'bridge-browser: /ext/bridge upgrade route')
@@ -495,6 +532,9 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   const configRoute: WebRoute = {
     kind: 'exact',
     path: BRIDGE_CONFIG_PATH,
+    // Same reason as the upgrade route: the extension probes this before any
+    // credential exists, and the answer carries no secret.
+    auth: 'anonymous',
     handler: (_req, res) => {
       res.writeHead(200, { 'content-type': 'application/json' })
       res.end(JSON.stringify({ wsUrl: `ws://127.0.0.1:${ctx.webServer.port}${BRIDGE_PATH}` }))
