@@ -3,13 +3,16 @@
  *
  * "Allow in this session" exists for actions that cannot be scoped to one
  * origin and therefore have no persistent counterpart: JavaScript execution,
- * header rewriting, dialog answers, response mocking, history moves, and
- * navigations whose destination cannot be pinned down. Such an action runs
- * unprompted for the rest of one dsh session — and only that session.
+ * header rewriting, dialog answers, cookie reads and writes, response mocking,
+ * history moves, and navigations whose destination cannot be pinned down. Such
+ * an action runs unprompted for the rest of one dsh session — and only that
+ * session.
  *
- * The scope is the pair (session, grant key), never the origin: two sessions
- * driving the same tab keep their own grants, and a grant dies with the binding
- * that defined it — the session is bound to another tab, that tab is closed or
+ * The scope is the pair (session, grant key). The key names the action and,
+ * when the call can be pinned to one site, that site too — a grant given on a
+ * test site must not silence the same action everywhere. Two sessions driving
+ * the same tab keep their own grants, and a grant dies with the binding that
+ * defined it — the session is bound to another tab, that tab is closed or
  * replaced, or the user unbinds — or with the service worker. None of that is
  * durable, which is what keeps a grant from becoming a permission by accident.
  */
@@ -133,10 +136,73 @@ export class SessionAllowance {
  * `browser_eval` has always let one grant cover every later evaluation in the
  * page's own context, which is the more powerful thing. The card still names the
  * action being approved; the grant is for the debugger on this page's session.
+ *
+ * The optional `scope` is the site {@link scopeLabelForCall} resolved; with it
+ * the key covers that site only. Without it (a call whose site cannot be pinned
+ * down) the key stays action-wide, as it was before scoping existed.
  */
-export function scopeKeyForCall(action: string, args: Record<string, unknown>): string {
-  if (action !== 'browser_network') return action
-  return args.mock !== undefined || args.mockClear === true ? `${action}#mock` : action
+export function scopeKeyForCall(action: string, args: Record<string, unknown>, scope?: string): string {
+  const base = action !== 'browser_network'
+    ? action
+    : args.mock !== undefined || args.mockClear === true ? `${action}#mock` : action
+  return scope === undefined || scope === '' ? base : `${base}@${scope}`
+}
+
+/**
+ * The actions whose session grant can be narrowed to one site.
+ *
+ * These are the calls whose effect stays inside the page they were approved
+ * on: JavaScript evaluated in one frame, a dialog answer, the debugger on this
+ * page, and cookie access, which names its own `url` or `domain`. A grant on a
+ * test site covers that site and nothing else.
+ *
+ * Everything else keeps the action-wide grant it always had, because its effect
+ * is not bounded by one site: a header or block `pattern` matches any host the
+ * tab requests, `browser_back`/`browser_forward` land on a destination nobody
+ * named, and a mocked response is keyed by pattern. Narrowing those would mean
+ * inventing a boundary the card never promised.
+ */
+export const SITE_SCOPABLE_ACTIONS = new Set([
+  'browser_eval',
+  'browser_dialog',
+  'browser_debug',
+  'browser_cookies',
+])
+
+/**
+ * The one site a call can be pinned to, for a session grant.
+ *
+ * A session grant used to be per action, so allowing `browser_cookies` on one
+ * test site also silenced it on every other site for the rest of the session.
+ * For the actions in {@link SITE_SCOPABLE_ACTIONS} a grant now covers one site:
+ * the `url` the call names, the `domain` a cookie call names, or the single
+ * origin the approval card named — in that order.
+ *
+ * When the call is not site-scopable, or no single site can be established (a
+ * tab with frames from several origins), this returns undefined and the grant
+ * stays action-wide, exactly as before. The session grant itself is unchanged:
+ * the card still offers "Allow in this session"; only its reach narrows.
+ *
+ * @param action - tool name.
+ * @param args - the call's own arguments.
+ * @param origins - origins the approval card named.
+ */
+export function scopeLabelForCall(action: string, args: Record<string, unknown>, origins: readonly string[] = []): string | undefined {
+  if (!SITE_SCOPABLE_ACTIONS.has(action)) return undefined
+  const namedUrl = typeof args.url === 'string' ? args.url.trim() : ''
+  if (namedUrl !== '') {
+    try {
+      const origin = new URL(namedUrl).origin
+      if (origin !== 'null') return origin
+    } catch {
+      // A malformed url is not a scope; fall through to the card's origins.
+    }
+  }
+  if (action === 'browser_cookies') {
+    const domain = typeof args.domain === 'string' ? args.domain.trim().toLowerCase().replace(/^\./, '') : ''
+    if (domain !== '') return `domain:${domain}`
+  }
+  return origins.length === 1 ? origins[0] : undefined
 }
 
 /** Whether this action's approval card may offer a session grant at all. */
@@ -162,6 +228,12 @@ export const SESSION_SCOPABLE_ACTIONS = new Set([
   // a frame and resuming are three calls, and each one asking again makes the
   // feature unusable. One grant covers the whole debugger for the session.
   'browser_debug',
+  // Cookies are the login state, so they are never trustable — but one swap is
+  // at least a read and a write, and a test round is many of both. Asking on
+  // every call made the tool unusable for the one job it exists for, which is
+  // the same trade `browser_eval` already makes: a session-only grant, dead
+  // when the session rebinds, closes the tab, or unbinds.
+  'browser_cookies',
   'browser_back',
   'browser_forward',
 ])

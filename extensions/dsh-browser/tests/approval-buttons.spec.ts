@@ -36,9 +36,9 @@ describe('panel approval buttons', () => {
   })
 
   it('offers the session grant exactly where trust is unavailable', () => {
-    // JavaScript execution, header rewriting, dialog answers and response
-    // mocking: no persistent origin grant exists, so the session is the scope.
-    for (const action of ['browser_network', 'browser_headers', 'browser_dialog', 'browser_eval']) {
+    // JavaScript execution, header rewriting, dialog answers, cookie access and
+    // response mocking: no persistent origin grant exists, so the session is the scope.
+    for (const action of ['browser_network', 'browser_headers', 'browser_dialog', 'browser_eval', 'browser_cookies']) {
       expect(ids({
         action,
         canTrust: false,

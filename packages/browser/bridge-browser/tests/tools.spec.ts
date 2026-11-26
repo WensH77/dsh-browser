@@ -4,6 +4,7 @@ import type { BridgeServer } from '../src/server.ts'
 import {
   BIND_INTERACTIVE_TIMEOUT_MS,
   BROWSER_TOOL_NAMES,
+  COOKIE_TOOL_NAMES,
   DEBUG_TOOL_NAMES,
   GOOGLE_DRIVE_TIMEOUT_MS,
   HOST_TOOL_NAMES,
@@ -20,7 +21,7 @@ import type { SyncResult } from '../src/extension-assets.ts'
 import type { BridgeCaps } from '../src/protocol.ts'
 import {
   BRIDGE_PROTO,
-  BRIDGE_TOOLSET, LEGACY_TOOLSET, TOOLSET_PAGE_IMAGE, TOOLSET_POINTER_CLICK, TOOLSET_SELECTOR_TARGETS,
+  BRIDGE_TOOLSET, LEGACY_TOOLSET, TOOLSET_COOKIES, TOOLSET_JS_DEBUG, TOOLSET_PAGE_IMAGE, TOOLSET_POINTER_CLICK, TOOLSET_SELECTOR_TARGETS,
   TOOLSET_SELECT_OPTION,
   TOOLSET_SLIDES_OPEN_PAGE,
   TOOLSET_TEXT_FIND,
@@ -321,6 +322,51 @@ describe('registerBrowserTools', () => {
     tools.setDebugToolsEnabled(true)
     expect(tools.names()).not.toContain('browser_debug')
     expect(tools.names()).toContain('browser_eval')
+  })
+
+  it('gates browser_cookies on the level that first ships its wire action', async () => {
+    const { ctx, bridge, requestTool, registered } = makeHarness()
+    const tools = registerBrowserTools(ctx, bridge, { toolTimeoutMs: 1_000, snapshotMaxChars: 12_000, maxInteractiveItems: 60 })
+    const params = (definition: Record<string, unknown>): Record<string, unknown> =>
+      (definition.parameters as { properties: Record<string, unknown> }).properties
+    const exec = { signal: new AbortController().signal }
+    const cookie = (): Record<string, unknown> => registered.find((r) => r.name === 'browser_cookies')!.definition
+
+    // Before a hello the full surface is registered, so the current level — the
+    // one BRIDGE_TOOLSET names — is where the tool first exists.
+    for (const name of COOKIE_TOOL_NAMES) expect(tools.names()).toContain(name)
+    expect(Object.keys(params(cookie()))).toEqual([
+      'action', 'url', 'domain', 'path', 'name', 'value', 'httpOnly', 'secure', 'sameSite', 'expires',
+    ])
+    await (cookie().execute as (a: unknown, e: typeof exec) => Promise<unknown>)({ action: 'get' }, exec)
+    expect(requestTool).toHaveBeenCalledWith('browser_cookies', { action: 'get' }, exec.signal, 1_000)
+
+    // One level below, the extension has no wire case for the action: it would
+    // answer "Unknown action", so the tool is not offered at all.
+    tools.setClientToolset(TOOLSET_JS_DEBUG)
+    for (const name of COOKIE_TOOL_NAMES) {
+      expect(tools.names()).not.toContain(name)
+      expect(registered.some((r) => r.name === name)).toBe(false)
+    }
+    // The levels that stay are untouched by the new gate.
+    expect(tools.names()).toContain('browser_headers')
+    expect(tools.names()).toContain('browser_click')
+
+    // A declared toolset brings it back, with the same schema and dispatch.
+    tools.setClientToolset(TOOLSET_COOKIES)
+    for (const name of COOKIE_TOOL_NAMES) expect(tools.names()).toContain(name)
+    await (cookie().execute as (a: unknown, e: typeof exec) => Promise<unknown>)({ action: 'set', name: 'sid', value: 'x', httpOnly: true, sameSite: 'Lax', expires: 1_800_000_000 }, exec)
+    expect(requestTool).toHaveBeenLastCalledWith(
+      'browser_cookies',
+      { action: 'set', name: 'sid', value: 'x', httpOnly: true, sameSite: 'Lax', expires: 1_800_000_000 },
+      exec.signal,
+      1_000,
+    )
+    // BRIDGE_TOOLSET names that same level, so declaring it keeps the tool.
+    tools.setClientToolset(BRIDGE_TOOLSET)
+    for (const name of COOKIE_TOOL_NAMES) expect(tools.names()).toContain(name)
+
+    tools.dispose()
   })
 
   it('gates the native-select arguments at TOOLSET_SELECT_OPTION', async () => {
@@ -1073,8 +1119,16 @@ describe('registerBrowserTools', () => {
     // browser_network 435, browser_capture 424 at the time), so it gets its own ceiling
     // rather than being averaged in with the rest and hidden from this test, which is what
     // had been happening: a wording pass could not see either number.
+    //
+    // Raised from 210 to 215 on 2026-11-26 for the 23rd tool, browser_cookies: its 328
+    // characters state the three actions plus the two facts a parameter description cannot
+    // carry — HttpOnly is readable and writable, and a write persists in the cookie jar
+    // across later navigations — which moved the average from 206.68 to 211.96. The
+    // per-action flag list stays abbreviated here because each flag has its own sentence in
+    // the parameters. The debugging ceiling below is unchanged: that surface measures 262.99
+    // with the new tool and stays under its own 265.
     const average = descriptionChars / registered.length
-    expect(average, `average model-facing description length: ${average.toFixed(2)} over ${registered.length} tools`).toBeLessThan(210)
+    expect(average, `average model-facing description length: ${average.toFixed(2)} over ${registered.length} tools`).toBeLessThan(215)
 
     const debugHarness = makeHarness({}, true)
     const debugTools = registerBrowserTools(debugHarness.ctx, debugHarness.bridge, { toolTimeoutMs: 5_000, snapshotMaxChars: 12_000, maxInteractiveItems: 60 })

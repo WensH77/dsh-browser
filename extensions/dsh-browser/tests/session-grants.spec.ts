@@ -49,6 +49,23 @@ describe('panel session-grant lines', () => {
     expect(grantsLine(view, EN)).toBe('Session grants: browser_network#mock, browser_eval')
   })
 
+  it('shows a site-scoped grant as action and host, not as a URL', () => {
+    const view: SessionGrantsView = {
+      grants: [
+        grant('browser_cookies@https://d15a.example'),
+        grant('browser_cookies@domain:example.com'),
+        grant('browser_network#mock@https://a.example:8443'),
+        grant('follow-page#https://b.example/x'),
+      ],
+      grantRevocation: null,
+    }
+
+    expect(grantsLine(view, EN)).toBe('Session grants: browser_cookies @ d15a.example, '
+      + 'browser_cookies @ example.com, browser_network#mock @ a.example:8443, follow-page @ b.example')
+    // An action-wide grant keeps its plain name.
+    expect(grantsLine({ grants: [grant('browser_eval')], grantRevocation: null }, EN)).toBe('Session grants: browser_eval')
+  })
+
   it('says so when the session holds nothing', () => {
     expect(grantsLine(empty, ZH)).toBe('本会话已授予：无')
     expect(grantsLine(empty, EN)).toBe('Session grants: none')

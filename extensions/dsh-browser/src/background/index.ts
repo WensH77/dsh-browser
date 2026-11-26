@@ -53,6 +53,7 @@ import {
 import {
   SessionAllowance,
   scopeKeyForCall,
+  scopeLabelForCall,
   type SessionGrant,
   type SessionGrantRevocation,
   type SessionGrantRevocationReason,
@@ -1463,7 +1464,10 @@ async function authorizeToolCall(
   // covers the rest of this session, so record it before the action runs.
   if (allowsSessionScope(decision, { kind: prompt.kind, action: prompt.action, sessionId })
     && sessionId !== undefined) {
-    sessionAllowances.remember(sessionId, scopeKeyForCall(call.name, call.args ?? {}), call.name)
+    // The scope is the site the card named, when there is one: a grant on a
+    // test site must not silence the same action on every other site.
+    const scope = scopeLabelForCall(call.name, call.args ?? {}, prompt.origins)
+    sessionAllowances.remember(sessionId, scopeKeyForCall(call.name, call.args ?? {}, scope), call.name)
     broadcastSessionGrants(sessionId)
     return 'approved'
   }
@@ -1479,8 +1483,9 @@ async function authorizeToolCall(
  * answered — which is what this predicate exists to prevent, so treat it as the
  * first line of every new gate rather than an optimization.
  */
-function coveredBySessionGrant(call: ToolCall): boolean {
-  return sessionAllowances.allows(call.sessionId, scopeKeyForCall(call.name, call.args ?? {}))
+function coveredBySessionGrant(call: ToolCall, origins: readonly string[] = []): boolean {
+  const scope = scopeLabelForCall(call.name, call.args ?? {}, origins)
+  return sessionAllowances.allows(call.sessionId, scopeKeyForCall(call.name, call.args ?? {}, scope))
 }
 
 /**
@@ -1494,7 +1499,7 @@ function coveredBySessionGrant(call: ToolCall): boolean {
  * is no less fail-closed than a prompted one.
  */
 async function authorizeCall(call: ToolCall, prompt: ApprovalPrompt, windowId: number, signal: AbortSignal): Promise<ApprovalAuthorization> {
-  if (coveredBySessionGrant(call)) {
+  if (coveredBySessionGrant(call, prompt.origins)) {
     settleOp(call.id, 'running')
     return 'approved'
   }
@@ -2153,8 +2158,10 @@ async function virtualToolGate(call: ToolCall, controller: AbortController): Pro
   const url = typeof call.args?.url === 'string' ? call.args.url : ''
   const blocked = blockedOriginFailure(url)
   if (blocked !== undefined) return blocked
-  if (coveredBySessionGrant(call)) return undefined
+  // The prompt comes first now: the session grant is keyed by the site it names,
+  // so the card's origins are part of the lookup.
   const prompt = approvalPromptForCall(call, settings.sharePageContent, [])
+  if (coveredBySessionGrant(call, prompt?.origins ?? [])) return undefined
   if (prompt === undefined) return undefined
   settleOp(call.id, 'waiting')
   const authorization = await authorizeToolCall(call, prompt, controller.signal, await approvalAnchorWindowId(), call.sessionId)

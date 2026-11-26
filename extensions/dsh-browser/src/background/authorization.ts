@@ -15,7 +15,7 @@ const PAGE_READS = new Set([
   'browser_dom_query',
 ])
 /** Actions whose blast radius is not bounded by "one origin", so they never trust-skip. */
-const UNTRUSTABLE_ACTIONS = new Set(['browser_eval', 'browser_headers', 'browser_dialog', 'browser_debug'])
+const UNTRUSTABLE_ACTIONS = new Set(['browser_eval', 'browser_headers', 'browser_dialog', 'browser_debug', 'browser_cookies'])
 const STATE_CHANGING_ACTIONS = new Set([
   'browser_click',
   // The pointer click is a click: same target, same effect, so it carries the same
@@ -136,6 +136,13 @@ export function approvalPromptForCall(
     const targets = call.name === 'browser_eval'
       ? frames.filter((frame) => frame.frameId === requestedFrame(call.args))
       : frames
+    // A cookie call names the site it acts on, and that site is the boundary:
+    // the tab's other frames have nothing to do with it. A call that names no
+    // site acts on whichever page the tab is showing, so it falls back to the
+    // frame origins like any other tab-scoped action.
+    const cookieOrigin = call.name === 'browser_cookies' && typeof call.args.url === 'string'
+      ? originFromUrl(call.args.url)
+      : undefined
     return {
       kind: 'action',
       action: call.name,
@@ -155,14 +162,20 @@ export function approvalPromptForCall(
                 `JavaScript debugging in the current page: ${debugActionSummary(call.args.action, locale)}`,
                 `当前页面的 JS 调试：${debugActionSummary(call.args.action, locale)}`,
               )
-            : localized(
-              locale,
-              `Rewrite request/response headers for ${safeInline(typeof call.args.pattern === 'string' ? call.args.pattern : '')}`,
-              `改写匹配 ${safeInline(typeof call.args.pattern === 'string' ? call.args.pattern : '')} 的请求/响应头`,
-            ),
-      origins: uniqueOrigins(targets, frames),
+            : call.name === 'browser_cookies'
+              // A write puts a value into the browser's cookie jar, and a read can
+              // return the site's HttpOnly session cookie — the card names which.
+              ? cookieSummary(call.args, locale)
+              : localized(
+                locale,
+                `Rewrite request/response headers for ${safeInline(typeof call.args.pattern === 'string' ? call.args.pattern : '')}`,
+                `改写匹配 ${safeInline(typeof call.args.pattern === 'string' ? call.args.pattern : '')} 的请求/响应头`,
+              ),
+      origins: cookieOrigin === undefined ? uniqueOrigins(targets, frames) : [cookieOrigin],
       // Header rewriting can exfiltrate or reshape what the page loads, so it is
       // never trust-skipped; JS execution joins trust only by explicit opt-in.
+      // Cookies are the site's login state: taking them over is never implied by
+      // having trusted the site earlier.
       canTrust: trustable,
     }
   }
@@ -226,6 +239,32 @@ function debugActionSummary(action: unknown, locale: UiLocale): string {
     case 'listeners': return localized(locale, 'list the event listeners on a page element', '列出页面元素上注册的事件监听器')
     default: return localized(locale, 'control the debugger', '控制调试器')
   }
+}
+
+/**
+ * What one `browser_cookies` call will do, in the user's language.
+ *
+ * The card is where a person decides whether the model may touch their session
+ * cookies, so it has to separate a read that returns the HttpOnly session
+ * cookie from a write that replaces it or a delete that ends the session.
+ */
+function cookieSummary(args: Record<string, unknown>, locale: UiLocale): string {
+  const target = cookieScope(args, locale)
+  switch (typeof args.action === 'string' ? args.action : '') {
+    case 'get': return localized(locale, `Read cookies (including HttpOnly) for ${target}`, `读取${target}的 Cookie（含 HttpOnly）`)
+    case 'set': return localized(locale, `Write cookies (including HttpOnly) for ${target}`, `写入${target}的 Cookie（含 HttpOnly）`)
+    case 'delete': return localized(locale, `Delete cookies for ${target}`, `删除${target}的 Cookie`)
+    default: return localized(locale, `Cookie access for ${target}`, `${target} 的 Cookie 访问`)
+  }
+}
+
+/** The site a cookie call names, or the current site when it names none. */
+function cookieScope(args: Record<string, unknown>, locale: UiLocale): string {
+  const url = typeof args.url === 'string' ? args.url.trim() : ''
+  if (url !== '') return safeInline(url)
+  const domain = typeof args.domain === 'string' ? args.domain.trim() : ''
+  if (domain !== '') return safeInline(domain)
+  return localized(locale, 'the current site', '当前站点')
 }
 
 function uniqueOrigins(targets: TabFrame[], allFrames: TabFrame[]): string[] {

@@ -354,7 +354,10 @@ export const LEGACY_PROTO = 1
  * {@link TOOLSET_SELECT_OPTION} adds the `option` argument to `browser_click`
  * and the `options` field to `browser_dom_query` (a native `<select>` cannot be
  * operated by a synthetic click); {@link TOOLSET_JS_DEBUG} adds
- * `browser_debug` (breakpoints, pause, stepping, call-frame evaluation).
+ * `browser_debug` (breakpoints, pause, stepping, call-frame evaluation);
+ * {@link TOOLSET_COOKIES} adds `browser_cookies`, which reads and writes the
+ * site's cookies over CDP — including HttpOnly ones the page's own
+ * `document.cookie` cannot see.
  *
  * A tool whose action the old build has no wire case for must be gated at the
  * level that ships it: exposing it to an older extension trades a smaller tool
@@ -362,7 +365,7 @@ export const LEGACY_PROTO = 1
  * cannot anticipate. The same holds for an argument: an older build drops it
  * silently, so the call reports success and changes nothing.
  */
-export const BRIDGE_TOOLSET = 7
+export const BRIDGE_TOOLSET = 8
 
 /** Level that first resolves CSS `selector` targets and ships the DOM/rule tools. */
 export const TOOLSET_SELECTOR_TARGETS = 1
@@ -388,6 +391,20 @@ export const TOOLSET_SELECT_OPTION = 6
  * domain. A lower build has no wire case for the action at all.
  */
 export const TOOLSET_JS_DEBUG = 7
+
+/**
+ * Level that first ships `browser_cookies`: reading and writing the controlled
+ * tab's cookies over the CDP `Network` domain. It is one level above
+ * {@link TOOLSET_JS_DEBUG} because the wire action did not exist before it —
+ * a lower build answers "Unknown action", so the surface must carry the skew
+ * instead of the call.
+ *
+ * Reading includes HttpOnly cookies, which `browser_eval` cannot see through
+ * `document.cookie`; writing goes into the browser's cookie jar, so later
+ * navigations in the tab send the new values. That is why every action here is
+ * approved like `browser_eval` rather than trust-skipped.
+ */
+export const TOOLSET_COOKIES = 8
 
 /** Feature level assumed when `caps.toolset` is absent. */
 export const LEGACY_TOOLSET = 0

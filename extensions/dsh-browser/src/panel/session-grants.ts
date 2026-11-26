@@ -48,7 +48,38 @@ export function grantsLine(view: SessionGrantsView, copy: SessionGrantCopy): str
   if (view.grants.length === 0) return `${copy.sessionGrants}${copy.sessionGrantsNone}`
   // No backticks around the keys: this line is plain text in a small panel, so
   // markup punctuation would render as itself.
-  return `${copy.sessionGrants}${view.grants.map((grant) => grant.key).join(copy.grantSeparator)}`
+  return `${copy.sessionGrants}${view.grants.map((grant) => formatGrantKey(grant.key)).join(copy.grantSeparator)}`
+}
+
+/** Prefix `follow-page` grants carry before their origin. */
+const FOLLOW_PREFIX = 'follow-page#'
+
+/**
+ * A grant key as the panel shows it: the action, then the site it covers.
+ *
+ * The stored key has to stay unambiguous (`action@origin`, `action@domain:x`),
+ * but printing it raw put a whole URL into a narrow panel line. The card reader
+ * only needs to know which power is held and where, so the site is shown as a
+ * host. A grant with no site (an action-wide one) has nothing to shorten.
+ *
+ * @param key - stored grant key.
+ * @returns display form, for example `browser_cookies @ d15a.example`.
+ */
+export function formatGrantKey(key: string): string {
+  if (key.startsWith(FOLLOW_PREFIX)) return `follow-page @ ${hostOf(key.slice(FOLLOW_PREFIX.length))}`
+  const at = key.indexOf('@')
+  if (at <= 0) return key
+  return `${key.slice(0, at)} @ ${hostOf(key.slice(at + 1))}`
+}
+
+/** The host of a scope label, or the label itself when it is already a host. */
+function hostOf(scope: string): string {
+  const raw = scope.startsWith('domain:') ? scope.slice('domain:'.length) : scope
+  try {
+    return new URL(raw).host
+  } catch {
+    return raw
+  }
 }
 
 /** Why the previous grants are gone, as one line. */

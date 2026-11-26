@@ -23,6 +23,7 @@ import { PageImageError, fetchPageImage, pageImageEnvelope, parsePageImageSource
 import { clearMocks, evaluateInPage, handleDialog, installMock, onDialogOpening, parseMockRule, pendingDialog, readConsole, readNetwork } from './devtools.ts'
 import { jsDebugAnswer, pausedAtBreakpoint } from './js-debug.ts'
 import { addBlockRule, addHeaderRule, clearTabRules, listTabRules, parseHeaderChanges } from './net-rules.ts'
+import { cookiesAnswer } from './cookies.ts'
 import { wrapUntrustedContent, wrapUntrustedResult } from '../security/untrusted.ts'
 import { recordDebugEvent } from './debug-log.ts'
 import { approvalPromptForCall } from './authorization.ts'
@@ -99,6 +100,9 @@ const DIALOG_SAFE_TOOLS = new Set([
   'browser_network',
   'browser_block',
   'browser_headers',
+  // Cookies are read and written in the browser process, so a dialog holding
+  // the renderer does not block them.
+  'browser_cookies',
 ])
 /**
  * Tools that still answer while a breakpoint has the renderer stopped.
@@ -116,6 +120,7 @@ const PAUSED_SAFE_TOOLS = new Set([
   'browser_network',
   'browser_block',
   'browser_headers',
+  'browser_cookies',
 ])
 /**
  * `browser_debug` actions whose answer carries page-derived data.
@@ -934,6 +939,22 @@ async function dispatchOnce(
   if (call.name === 'browser_debug') return wrapPageAnswer(await withForeignFrameRetry(tabId, () => jsDebugAnswer(tabId, call.args, budget.maxChars)), budget.maxChars)
   if (call.name === 'browser_block') return netRuleAnswer(tabId, call, 'block')
   if (call.name === 'browser_headers') return netRuleAnswer(tabId, call, 'headers')
+  // Cookies live in the browser's jar rather than the page, so this is a CDP call
+  // like the two above. The tab's own URL is the default target, read off the
+  // frame listing already in hand — no extra await sits between the approval
+  // above and the call.
+  if (call.name === 'browser_cookies') {
+    const pageUrl = frames.find((frame) => frame.frameId === 0)?.url ?? ''
+    const answer = await withForeignFrameRetry(tabId, () => cookiesAnswer(tabId, call.args, pageUrl))
+    // A `get` puts the site's own cookie values into the answer, so they cross
+    // the same trust boundary as any other page-authored read. The set/delete
+    // answers are our own wording and stay plain.
+    if (call.args.action === 'get' && answer.ok) {
+      const text = (answer.result as { text?: unknown } | undefined)?.text
+      if (typeof text === 'string') return { ok: true, result: { text: wrapUntrustedResult(text, budget.maxChars) } }
+    }
+    return answer
+  }
 
   const frameId = requestedFrame(call.args)
   if (frameId < 0) return frameArgumentInvalid()
@@ -1053,6 +1074,13 @@ export async function dispatchToolCall(
     // labels, and a label is a page URL. What stays is what releases a frozen
     // page: resume, pause, and step carry no page data either way.
     return { ok: false, error: { code: 'action-failed', message: 'Page content sharing is disabled in Settings > Page content sharing, and this browser_debug action reports page-derived data (script urls, variables, or breakpoint labels). The control actions (resume, pause, step) still work, including to release a page stopped at a breakpoint.' } }
+  }
+  // A cookie read carries the site's own data — including HttpOnly values the
+  // page cannot see — so it belongs inside the same boundary as the other
+  // reads. Writing and deleting a cookie is a state change rather than a read,
+  // and it keeps its own approval card.
+  if (sharePageContent === 'off' && call.name === 'browser_cookies' && call.args.action === 'get') {
+    return { ok: false, error: { code: 'action-failed', message: 'Page content sharing is disabled in Settings > Page content sharing, and this read returns the site\'s cookie values, including HttpOnly ones. Setting or deleting a cookie still works.' } }
   }
   const tab = targetTab ?? (await chrome.tabs.query({ active: true, lastFocusedWindow: true }))[0]
   if (isCancelled(call, signal)) return cancelled()

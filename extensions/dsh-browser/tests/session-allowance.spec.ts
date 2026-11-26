@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, expect, it } from 'vitest'
-import { SessionAllowance, isSessionScopableAction, scopeKeyForCall } from '../src/security/session-allowance.ts'
+import { SessionAllowance, SITE_SCOPABLE_ACTIONS, isSessionScopableAction, scopeKeyForCall, scopeLabelForCall } from '../src/security/session-allowance.ts'
 import { allowsSessionScope, isApprovalDecision } from '../src/security/approval.ts'
 
 describe('SessionAllowance', () => {
@@ -34,6 +34,35 @@ describe('SessionAllowance', () => {
     // Still separate from the other debugging tools.
     expect(allowances.allows('session-a', scopeKeyForCall('browser_eval', {}))).toBe(false)
     expect(isSessionScopableAction('browser_debug')).toBe(true)
+  })
+
+  it('narrows a site-bound action to the site it names', () => {
+    const url = 'https://d15a.example/project-management/1'
+    expect(scopeLabelForCall('browser_cookies', { url })).toBe('https://d15a.example')
+    expect(scopeLabelForCall('browser_cookies', { domain: '.Example.com' })).toBe('domain:example.com')
+    expect(scopeLabelForCall('browser_eval', {}, ['https://d15a.example'])).toBe('https://d15a.example')
+    // A call whose site cannot be established keeps the action-wide grant.
+    expect(scopeLabelForCall('browser_eval', {}, ['https://a.example', 'https://b.example'])).toBeUndefined()
+    expect(scopeLabelForCall('browser_cookies', {})).toBeUndefined()
+    // Actions whose effect is not bounded by one site never narrow.
+    expect(scopeLabelForCall('browser_headers', { pattern: '*/api/*' }, ['https://d15a.example'])).toBeUndefined()
+    expect(scopeLabelForCall('browser_network', { mock: { pattern: '*/api/*' } }, ['https://d15a.example'])).toBeUndefined()
+    expect(scopeLabelForCall('browser_back', {}, ['https://d15a.example'])).toBeUndefined()
+    expect(SITE_SCOPABLE_ACTIONS.has('browser_cookies')).toBe(true)
+    expect(SITE_SCOPABLE_ACTIONS.has('browser_headers')).toBe(false)
+  })
+
+  it('keeps one site grant from covering the same action on another site', () => {
+    const allowances = new SessionAllowance()
+    const keyAt = (url: string): string => scopeKeyForCall('browser_cookies', { url }, scopeLabelForCall('browser_cookies', { url }))
+    allowances.remember('session-a', keyAt('https://a.example/one'), 'browser_cookies')
+    // Same site, different path: still covered.
+    expect(allowances.allows('session-a', keyAt('https://a.example/two'))).toBe(true)
+    // Another site: the card asks again.
+    expect(allowances.allows('session-a', keyAt('https://b.example/one'))).toBe(false)
+    // An action-wide grant (site unknown) still covers every site, unchanged.
+    allowances.remember('session-a', 'browser_cookies', 'browser_cookies')
+    expect(allowances.allows('session-a', 'browser_cookies')).toBe(true)
   })
 
   it('separates response mocking from reading the same tool', () => {
@@ -166,7 +195,7 @@ describe('allowsSessionScope', () => {
   })
 
   it('lists the actions that may hold a session grant', () => {
-    for (const action of ['browser_network', 'browser_headers', 'browser_dialog', 'browser_eval', 'browser_debug', 'browser_back', 'browser_forward']) {
+    for (const action of ['browser_network', 'browser_headers', 'browser_dialog', 'browser_eval', 'browser_debug', 'browser_cookies', 'browser_back', 'browser_forward']) {
       expect(isSessionScopableAction(action), action).toBe(true)
     }
     for (const action of ['browser_navigate', 'browser_click', 'browser_console', 'browser_snapshot', 'gdrive.fetch']) {

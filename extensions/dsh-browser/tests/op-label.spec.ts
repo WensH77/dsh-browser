@@ -9,7 +9,7 @@ const copy: OpCopy = {
   opNavigate: 'Navigate to', opClick: 'Click', opType: 'Type', opPress: 'Press', opScroll: 'Scroll',
   opWait: 'Wait', opSnapshot: 'Read page', opGetText: 'Read text', opBack: 'Back', opForward: 'Forward',
   opReload: 'Reload', opListTabs: 'List tabs', opBindTab: 'Bind tab', opEval: 'Run JS', opBlock: 'Block',
-  opHeaders: 'Headers', opCapture: 'Capture', opConsole: 'Console', opNetwork: 'Network',
+  opHeaders: 'Headers', opCookies: 'Cookies', opCapture: 'Capture', opConsole: 'Console', opNetwork: 'Network',
   opDialog: 'Answer dialog', opChars: ' chars', opElement: 'element',
   opDomQuery: 'Query elements', opClickPointer: 'Press-sequence click', opImage: 'Read image',
   opDebug: 'Debug page', opStatus: 'Check bridge status', opSetup: 'Prepare extension files',

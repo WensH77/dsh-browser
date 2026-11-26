@@ -30,6 +30,7 @@ import {
   GDRIVE_UNSUPPORTED_HINT,
   LEGACY_TOOLSET,
   MAX_BINDABLE_TABS,
+  TOOLSET_COOKIES,
   TOOLSET_JS_DEBUG,
   TOOLSET_PAGE_IMAGE,
   TOOLSET_POINTER_CLICK,
@@ -980,6 +981,7 @@ export const BROWSER_TOOL_NAMES = [
   'browser_dom_query',
   'browser_image',
   'browser_wait',
+  'browser_cookies',
 ] as const
 
 /**
@@ -1027,6 +1029,16 @@ const SELECT_OPTION_TOOL_NAMES = ['browser_click', 'browser_dom_query'] as const
  * case for the action, so the surface carries the skew rather than the call.
  */
 export const JS_DEBUG_TOOL_NAMES = ['browser_debug'] as const
+
+/**
+ * Tools that only exist at `TOOLSET_COOKIES`.
+ *
+ * Same reason as the pointer click and the Slides page jump: the wire action is
+ * its own case, so an extension below that level answers `Unknown action`. The
+ * surface must therefore carry the skew — filtered by level — rather than let a
+ * registered tool turn every call into that error.
+ */
+export const COOKIE_TOOL_NAMES = ['browser_cookies'] as const
 
 /**
  * Answer a selector click/type aimed at an extension that cannot resolve
@@ -1594,12 +1606,12 @@ export function registerBrowserTools(
   // surfaces can never drift. A level-1 extension resolves selectors and ships
   // the DOM/rule tools but cannot search page text; a level-5 one predates the
   // native-`<select>` arguments.
-  const currentDefinitions = defineTools(ctx, call, callRaw, options, bindRun, clientDebugger, { selectorTargets: true, textFind: true, pageImage: true, selectOption: true, jsDebug: true })
-  const selectOptionDefinitions = defineTools(ctx, call, callRaw, options, bindRun, clientDebugger, { selectorTargets: true, textFind: true, pageImage: true, selectOption: true, jsDebug: false })
-  const slidesDefinitions = defineTools(ctx, call, callRaw, options, bindRun, clientDebugger, { selectorTargets: true, textFind: true, pageImage: true, selectOption: false, jsDebug: false })
-  const findOnlyDefinitions = defineTools(ctx, call, callRaw, options, bindRun, clientDebugger, { selectorTargets: true, textFind: true, pageImage: false, selectOption: false, jsDebug: false })
-  const selectorOnlyDefinitions = defineTools(ctx, call, callRaw, options, bindRun, clientDebugger, { selectorTargets: true, textFind: false, pageImage: false, selectOption: false, jsDebug: false })
-  const legacyDefinitions = defineTools(ctx, call, callRaw, options, bindRun, clientDebugger, { selectorTargets: false, textFind: false, pageImage: false, selectOption: false, jsDebug: false })
+  const currentDefinitions = defineTools(ctx, call, callRaw, options, bindRun, clientDebugger, { selectorTargets: true, textFind: true, pageImage: true, selectOption: true, jsDebug: true, cookies: true })
+  const selectOptionDefinitions = defineTools(ctx, call, callRaw, options, bindRun, clientDebugger, { selectorTargets: true, textFind: true, pageImage: true, selectOption: true, jsDebug: false, cookies: false })
+  const slidesDefinitions = defineTools(ctx, call, callRaw, options, bindRun, clientDebugger, { selectorTargets: true, textFind: true, pageImage: true, selectOption: false, jsDebug: false, cookies: false })
+  const findOnlyDefinitions = defineTools(ctx, call, callRaw, options, bindRun, clientDebugger, { selectorTargets: true, textFind: true, pageImage: false, selectOption: false, jsDebug: false, cookies: false })
+  const selectorOnlyDefinitions = defineTools(ctx, call, callRaw, options, bindRun, clientDebugger, { selectorTargets: true, textFind: false, pageImage: false, selectOption: false, jsDebug: false, cookies: false })
+  const legacyDefinitions = defineTools(ctx, call, callRaw, options, bindRun, clientDebugger, { selectorTargets: false, textFind: false, pageImage: false, selectOption: false, jsDebug: false, cookies: false })
   const toolsetNames = new Set<string>([
     ...TOOLSET_TOOL_NAMES,
     ...SELECTOR_TARGET_TOOL_NAMES,
@@ -1608,12 +1620,14 @@ export function registerBrowserTools(
     ...POINTER_CLICK_TOOL_NAMES,
     ...SLIDES_OPEN_PAGE_TOOL_NAMES,
     ...SELECT_OPTION_TOOL_NAMES,
+    ...COOKIE_TOOL_NAMES,
   ])
   // Tools absent below the level that first ships them.
   const legacyOnly = new Set<string>(TOOLSET_TOOL_NAMES)
   const pageImageOnly = new Set<string>(PAGE_IMAGE_TOOL_NAMES)
   const pointerClickOnly = new Set<string>(POINTER_CLICK_TOOL_NAMES)
   const slidesOpenPageOnly = new Set<string>(SLIDES_OPEN_PAGE_TOOL_NAMES)
+  const cookieOnly = new Set<string>(COOKIE_TOOL_NAMES)
   const notAt = (...absent: Array<Set<string>>) => (tool: ToolDefinition): boolean =>
     absent.every((names) => !names.has(tool.name))
   const byName = (list: ToolDefinition[]): Map<string, ToolDefinition> => new Map(list.map((tool) => [tool.name, tool]))
@@ -1621,7 +1635,11 @@ export function registerBrowserTools(
   // it reaches. Every row is derived from the same factories, minus the tools
   // that level predates.
   const levelMaps = new Map<number, Map<string, ToolDefinition>>([
-    [TOOLSET_JS_DEBUG, byName(currentDefinitions)],
+    [TOOLSET_COOKIES, byName(currentDefinitions)],
+    // Cookies are the one tool level 8 adds, so the level-7 row is the same
+    // definition set minus it: the earlier rows are built with `cookies: false`
+    // already, and every level below 8 must not offer it.
+    [TOOLSET_JS_DEBUG, byName(currentDefinitions.filter(notAt(cookieOnly)))],
     [TOOLSET_SELECT_OPTION, byName(selectOptionDefinitions)],
     [TOOLSET_SLIDES_OPEN_PAGE, byName(slidesDefinitions.map(guardSelectOption))],
     [TOOLSET_POINTER_CLICK, byName(slidesDefinitions.filter(notAt(slidesOpenPageOnly)).map(guardSelectOption))],
@@ -1637,6 +1655,7 @@ export function registerBrowserTools(
       .map(guardSelectOption))],
   ])
   const levelOrder = [
+    TOOLSET_COOKIES,
     TOOLSET_JS_DEBUG,
     TOOLSET_SELECT_OPTION,
     TOOLSET_SLIDES_OPEN_PAGE,
@@ -1892,9 +1911,9 @@ function defineTools(
   options: BrowserToolsOptions,
   bindRun: BindInteractiveRun,
   clientDebugger: () => boolean,
-  features: { selectorTargets: boolean; textFind: boolean; pageImage: boolean; selectOption: boolean; jsDebug: boolean },
+  features: { selectorTargets: boolean; textFind: boolean; pageImage: boolean; selectOption: boolean; jsDebug: boolean; cookies: boolean },
 ): ToolDefinition[] {
-  const { selectorTargets, textFind, pageImage, selectOption, jsDebug } = features
+  const { selectorTargets, textFind, pageImage, selectOption, jsDebug, cookies } = features
   // Every tool this factory defines runs against a bound page, so every one of
   // them may have to make a page choice first; see pageToolTimeoutMs. The
   // bridge waits inside them stay at options.toolTimeoutMs.
@@ -2080,6 +2099,29 @@ function defineTools(
     timeoutMs: pageCallTimeoutMs,
     output: TEXT_OUTPUT,
     execute: (args, exec) => call(exec, 'browser_headers', args as Record<string, unknown>),
+  })
+
+  const cookiesTool = (): ToolDefinition => defineTool({
+    name: 'browser_cookies',
+    description: 'Read, write, or delete the controlled tab\'s site cookies over CDP, HttpOnly included; '
+      + 'writes enter the cookie jar, so later navigations carry them. '
+      + 'get lists cookies for url (default: this page); set stores name + value (optional httpOnly/secure/sameSite/expires); '
+      + 'delete removes name; set/delete scoped by url or domain + path.',
+    parameters: {
+      action: { type: 'string', required: true, description: 'get | set | delete' },
+      url: { type: 'string', description: 'get: the URL whose cookies apply (defaults to the current page). set/delete: the URL the cookie belongs to, as an alternative to domain + path.' },
+      domain: { type: 'string', description: 'set/delete: the cookie domain, e.g. "example.com" (leading dot for a domain cookie); used with path instead of url.' },
+      path: { type: 'string', description: 'set/delete: the cookie path, e.g. "/" ; used with domain instead of url.' },
+      name: { type: 'string', description: 'set/delete: the cookie name.' },
+      value: { type: 'string', description: 'set: the cookie value.' },
+      httpOnly: { type: 'boolean', description: 'set: mark the cookie HttpOnly, so page scripts (document.cookie) cannot see it.' },
+      secure: { type: 'boolean', description: 'set: send the cookie only over HTTPS.' },
+      sameSite: { type: 'string', description: 'set: Strict | Lax | None; omit to let the browser apply its default.' },
+      expires: { type: 'number', description: 'set: expiry as Unix seconds; 0 or omitted makes it a session cookie.' },
+    },
+    timeoutMs: pageCallTimeoutMs,
+    output: TEXT_OUTPUT,
+    execute: (args, exec) => call(exec, 'browser_cookies', args as Record<string, unknown>),
   })
 
   const click = (): ToolDefinition => defineTool({
@@ -2339,6 +2381,7 @@ function defineTools(
     ...jsDebug ? [debug()] : [],
     block(),
     headers(),
+    ...cookies ? [cookiesTool()] : [],
     click(),
     clickPointer(),
     slidesOpenPage(),

@@ -103,6 +103,37 @@ describe('approvalPromptForCall', () => {
     expect(block?.summary).toContain('*/ads/*')
   })
 
+  it('asks for cookie access, names the action, and scopes it to the site the call names', () => {
+    const summaries: Record<string, string> = {
+      get: 'Read cookies (including HttpOnly) for https://app.example/page',
+      set: 'Write cookies (including HttpOnly) for https://app.example/page',
+      delete: 'Delete cookies for https://app.example/page',
+    }
+    for (const [action, summary] of Object.entries(summaries)) {
+      expect(approvalPromptForCall(call('browser_cookies', { action, url: 'https://app.example/page' }), 'auto', FRAMES, 'en'))
+        .toMatchObject({ kind: 'action', action: 'browser_cookies', origins: ['https://app.example'], canTrust: false, summary })
+    }
+    expect(approvalPromptForCall(call('browser_cookies', { action: 'set', name: 'sid', value: 'v', url: 'https://app.example/login' }), 'auto', FRAMES, 'zh')?.summary)
+      .toBe('写入https://app.example/login的 Cookie（含 HttpOnly）')
+
+    // No url: the card says which site it means and every frame origin is the boundary.
+    expect(approvalPromptForCall(call('browser_cookies', { action: 'get' }), 'auto', FRAMES, 'en')?.summary)
+      .toBe('Read cookies (including HttpOnly) for the current site')
+    expect(approvalPromptForCall(call('browser_cookies', { action: 'delete', domain: '.example.com' }), 'auto', FRAMES, 'en'))
+      .toMatchObject({ origins: ['https://app.example', 'https://login.example.net'] })
+    expect(approvalPromptForCall(call('browser_cookies', { action: 'delete', domain: '.example.com' }), 'auto', FRAMES, 'zh')?.summary)
+      .toBe('删除.example.com的 Cookie')
+
+    // Cookies are the site's login state, so not even explicit JS trust covers them.
+    setActionTrustPolicy({ trustJsExecution: true })
+    try {
+      expect(approvalPromptForCall(call('browser_cookies', { action: 'set', name: 'sid', value: 'v', url: 'https://app.example/' }), 'auto', FRAMES, 'en'))
+        .toMatchObject({ canTrust: false })
+    } finally {
+      setActionTrustPolicy({ trustJsExecution: false })
+    }
+  })
+
   it('scopes JavaScript consent to the frame the expression runs in', () => {
     // Slides and similar SPAs load auxiliary frames that come and go; making
     // consent depend on all of them invalidated grants the user had just given.

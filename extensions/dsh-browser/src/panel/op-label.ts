@@ -31,6 +31,7 @@ export interface OpCopy {
   opEval: string
   opBlock: string
   opHeaders: string
+  opCookies: string
   opCapture: string
   opConsole: string
   opNetwork: string
@@ -137,6 +138,11 @@ export function opLabel(op: RecentOp, copy: OpCopy): string {
     case 'browser_dialog': return `${copy.opDialog} ${stringArg(op, 'action')}`
     case 'browser_block': return `${copy.opBlock} ${short(stringArg(op, 'pattern'))}`
     case 'browser_headers': return `${copy.opHeaders} ${short(stringArg(op, 'pattern'))}`
+    // The scope is what a reader needs: which site's cookies, not the values.
+    case 'browser_cookies': {
+      const scope = stringArg(op, 'url') || stringArg(op, 'domain')
+      return `${copy.opCookies} ${stringArg(op, 'action')} ${scope === '' ? '' : hostOf(scope)}`.trim()
+    }
     case 'browser_back': return copy.opBack
     case 'browser_forward': return copy.opForward
     case 'browser_reload': return copy.opReload

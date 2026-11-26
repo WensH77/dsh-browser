@@ -141,6 +141,11 @@ pointer 对这个场景零副作用，对症的是 blur。不要写「表单提�
   用来验错误分支；`mockClear` 撤掉。
 - `browser_block` / `browser_headers`：在受控标签页里拦截匹配的请求，或改写请求头/
   响应头。
+- `browser_cookies`：读 / 写 / 删受控站点的 Cookie，走 CDP，**HttpOnly 也能读写**。
+  `browser_eval` 里的 `document.cookie` 看不到 HttpOnly，也写不进去，所以「换 cookie」
+  （切换登录态）的 case 只能用这个。写入会进浏览器 cookie jar，后续导航也带上新值；
+  注意 `browser_headers` 改 Cookie 头只对页面子请求生效，顶层导航请求不受影响，不能拿
+  它代替。每次调用单独审批。
 - `browser_eval`：页面上下文里执行 JS，走「不可信动作」审批。只在上面这些都不够用时
   才用，别当常规手段。
 - `browser_debug`：断点 / 单步 / 暂停现场（`wait`、`eval`），以及 `listeners` —— 列出
@@ -169,8 +174,8 @@ alert / confirm / prompt 是**浏览器 UI，不是页面内容**：弹窗一开
   `browser_image`）在 `sharePageContent = auto` 时直接跑，只有 `ask` 模式才逐次问。
   写类（`browser_navigate` / `back` / `forward` / `reload` / `click` /
   `click_pointer` / `type` / `press` / `browser_eval` / `browser_headers` /
-  `browser_dialog` / `browser_debug` / `browser_block` / `browser_network` 的 mock）
-  都要过审批卡。
+  `browser_cookies` / `browser_dialog` / `browser_debug` / `browser_block` /
+  `browser_network` 的 mock）都要过审批卡。
 - **子代理不要直接调 `browser_*`。** 浏览器一次只被一个会话持有，子代理既看不到扩展
   的卡、也收不到宿主那句提问，只会把 60 秒超时当成「站点打不开」来回试。
 - **一次只有一个会话能操作浏览器。** 受控标签页已被另一个会话持有时，绑定会失败并在
