@@ -2,8 +2,6 @@
 
 **English** | [中文](README.zh.md)
 
-<img width="1701" height="897" alt="dsh Browser Control" src="https://github.com/user-attachments/assets/3b1f3a25-f962-4e02-a9ef-d23e0d01fc8e" />
-
 Connect [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) to the Chrome tab you already use. The model can read a page, click controls, fill forms, scroll and navigate, while your login state, sessions and cookies stay in your browser. Click the toolbar icon to open the status view: what it is connected to, which page is under control, and which approvals are waiting for you.
 
 `dsh` is DeepSeek AI's open-source, plugin-based agent harness. This repository ships its companion browser bridge plugin and Chrome MV3 extension as one standalone pnpm workspace.

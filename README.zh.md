@@ -2,8 +2,6 @@
 
 [English](README.md) | **中文**
 
-<img width="1701" height="897" alt="dsh 浏览器操作" src="https://github.com/user-attachments/assets/3b1f3a25-f962-4e02-a9ef-d23e0d01fc8e" />
-
 把 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 接到你正在用的 Chrome 标签页。模型可以读取页面内容、点击控件、填写表单、滚动和导航，登录态、会话和 Cookie 都留在你的浏览器里。点工具栏图标打开状态视图，能看到连接状态、当前受控页面和等你确认的审批。
 
 `dsh` 是 DeepSeek AI 开发的开源、插件化 agent 框架（智能体框架）。本仓库是配套的浏览器桥接插件与 Chrome MV3 扩展，作为一个独立的 pnpm workspace 分发。
