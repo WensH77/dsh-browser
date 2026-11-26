@@ -4,18 +4,20 @@
 
 <img width="1701" height="897" alt="dsh 浏览器操作" src="https://github.com/user-attachments/assets/3b1f3a25-f962-4e02-a9ef-d23e0d01fc8e" />
 
-把 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 连接到你正在使用的 Chrome 标签页。模型可以读取页面内容、点击控件、填写表单、滚动与导航，同时保留登录态、会话和 Cookie。状态视图（默认浮窗，也可用侧边栏）会显示当前正在操作哪个页面。
+把 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 接到你正在用的 Chrome 标签页。模型可以读取页面内容、点击控件、填写表单、滚动和导航，登录态、会话和 Cookie 都留在你的浏览器里。点工具栏图标打开状态视图，能看到连接状态、当前受控页面和等你确认的审批。
 
-`dsh` 是由 DeepSeek AI 开发的开源、插件化 agent harness（智能体框架）。本仓库将配套的浏览器桥接插件与 Chrome MV3 扩展组成一个独立的 pnpm workspace。
+`dsh` 是 DeepSeek AI 开发的开源、插件化 agent 框架（智能体框架）。本仓库是配套的浏览器桥接插件与 Chrome MV3 扩展，作为一个独立的 pnpm workspace 分发。
 
-页面会转换为结构化文本和带编号的交互元素清单，模型通过编号定位元素。`browser_snapshot` 会把这份文本与同一时刻的截图一起返回，`browser_capture` 按需只返回截图——两者都只对支持图片输入的模型生效，且截图只存在内存里：扩展不落盘；纯文本模型会降级为文本快照并说明原因。截图走 `chrome.debugger`，需要扩展设置里的调试开关（默认关闭，见[核心能力](#核心能力)）。
+页面会转成结构化文本和带编号的交互清单，模型用编号定位元素。`browser_snapshot` 同时返回这份文本和同一时刻的截图，`browser_capture` 只返回截图；截图只存在内存里，不写磁盘，纯文本模型只拿到文本快照。截图走 `chrome.debugger`，需要扩展设置里的「允许浏览器调试」。
+
+三个取舍决定了它的形态：操作你真实的浏览器而不是无头副本，所以登录态还在；页面接口以文本为主、截图作补充；走调试器的能力默认不注册，要用得自己打开。
 
 > [!IMPORTANT]
-> 本仓库把运行时 pin 在 `0.1.7-rc.1`：npm 上 `@deepseek-ai/dsh` 的 `latest` 现在是 `0.1.7-rc.2`、`next` 是 `0.2.0-rc.1`，而桥接插件声明的对等范围是 `>=0.1.7-rc.1 <0.3.0`，所以同一个插件可以挂在这条范围内任何 dsh 上。升级过程与版本对照见 [升级记录](docs/dsh-0.1.7-rc-upgrade.md)。
+> npm 上未加 scope 的 [`dsh-browser`](https://www.npmjs.com/package/dsh-browser) 包属于另一个项目，与本仓库无关。本项目没有发布 npm 包，请使用下面的安装器。
 
 ## 快速安装
 
-本项目不能只使用标准的 `dsh plugin` 命令安装。它同时包含 dsh bridge plugin 和浏览器扩展。一行安装器目前会安装 Chrome 构建。
+安装器同时装两半：dsh 桥接插件和 Chrome 扩展，一条命令完成。
 
 macOS 与 Linux：
 
@@ -29,188 +31,164 @@ Windows（PowerShell）：
 $s="$env:TEMP\dsh-install.ps1"; irm https://raw.githubusercontent.com/WensH77/dsh-browser/refs/heads/main/scripts/install.ps1 -OutFile $s; powershell -NoProfile -ExecutionPolicy Bypass -File $s
 ```
 
-安装器把扩展文件放进 `~/.dsh/browser-extension` 并打开 `chrome://extensions`：在那里加载或重新加载一次 **AI 浏览器助手**——这是浏览器侧唯一要手点的动作。dsh 正在运行时通常会在几秒内自动加载插件；没加载的话重启一次 dsh。扩展文件的同步由插件在启动时自动完成，不用手工复制目录。扩展设置里的「允许浏览器调试」默认关闭，截图、控制台、网络、执行页面 JS、`browser_dialog` 和 `browser_debug` 这几个工具需要它，见[核心能力](#核心能力)的表注。以后每次更新：重跑同一条安装命令，再在 Chrome 点一次「重新加载」。前置要求、启动命令、更新方式和开发命令详见[详细安装与使用](#详细安装与使用)。
+安装器做四步：
 
-> [!IMPORTANT]
-> npm 上未加 scope 的 [`dsh-browser`](https://www.npmjs.com/package/dsh-browser) 包属于另一个项目，与本仓库无关。本项目目前没有发布 npm 包，请使用上方安装器。
+1. 把仓库取到 `~/.dsh/dsh-browser`（在本地 clone 里运行则直接用当前目录），`pnpm install` 后先构建扩展、再构建桥接插件。
+2. 把 `dsh-bridge-browser` 注册到本机 dsh 的 `web` profile；更早的包名会先移除。
+3. 把仓库里的技能装到 `~/.dsh/skills`，之后任何工作区的会话都能用到。
+4. 把扩展构建同步到 `~/.dsh/browser-extension`，在那里写 `install-info.json`，打开 `chrome://extensions`，并把扩展目录复制到剪贴板。
 
-## 核心能力
+剩下只有一步手点：在 `chrome://extensions` 里把 `~/.dsh/browser-extension` 作为已解压的扩展加载。已经有「AI 浏览器助手」卡片就点**重新加载**。dsh 正在运行时插件通常几秒内热加载；没有加载就重启一次 dsh。
 
-| 能力 | 工具 | 说明 |
-|---|---|---|
-| 读取页面 | `browser_snapshot` | 结构化文本快照：标题/URL/正文/编号交互清单/表单字段（敏感值掩码）；`delta: true` 只返回变化；默认附带同刻截图，`visual: false` 可关 |
-| 截取页面 † | `browser_capture` | 返回视口截图（`fullPage: true` 为整页），仅内存、不落盘。优先用视口——长页面的整页截图会被压到模型图像预算内，文字不可读 |
-| 读控制台与网络 † | `browser_console` / `browser_network` | 控制台消息与未捕获错误（带 cursor 增量）；请求列表含状态与耗时、按 id 取响应体、内存内响应替换 |
-| 回应用户弹窗 † | `browser_dialog` | 确认或取消 `alert` / `confirm` / `prompt`；这类弹窗会冻住页面，弹窗在时其它面向页面的工具会被直接拒绝，并把弹窗内容原样带回（模型先读、再决定）。`browser_console` / `browser_network` 与阻断、改头规则照常可用，`browser_dialog` 自身也不受这条拒绝影响。`beforeunload`（「离开此网站?」）不交给模型：扩展自己应答，导航不会卡在它上面 |
-| 执行页面 JS † | `browser_eval` | 在页面自身上下文求值，不受页面 CSP 限制；每次单独审批 |
-| 调试 JavaScript † | `browser_debug` | 下断点（行断点 `url` 或 `urlRegex` + 0 基 `lineNumber`，可加 `condition`；XHR/fetch 断点用 `kind: "xhr"`）、列出与删除断点、暂停、恢复、单步、读暂停现场（`action: "wait"`，含调用帧与变量）、在暂停的调用帧里求值（`action: "eval"`）。暂停会冻住页面的 JS，期间的页面类工具会被直接拒绝并带上暂停位置，直到恢复。断点随会话存在，随标签页关闭、调试提示条被点掉、开关关闭或 `unbreak { all: true }` 一起消失。每次调用单独审批，审批卡可给「本会话内允许」——这样一轮调试（读现场、看变量、恢复）不会连弹五张卡 |
-| 阻断/改写请求 | `browser_block` / `browser_headers` | 阻断匹配请求，或改写请求/响应头；仅作用于受控标签页、仅当前浏览器会话 |
-| 读写 Cookie † | `browser_cookies` | 走 CDP 读取、写入、删除受控站点的 Cookie，包括 `document.cookie` 看不到的 HttpOnly。写入会进浏览器 cookie jar，后续导航也会带上新值，不只是页面子请求。每次调用单独审批，不受站点信任跳过 |
-| 点击元素 | `browser_click` | 按编号或 CSS 选择器点击链接/按钮/复选框等；目标是原生 `<select>` 时用 `option` 传值或可见文本选中（合成点击打不开原生下拉，选项用 `browser_dom_query { fields: ["options"] }` 读） |
-| 点击绑定在按压上的控件 | `browser_click_pointer` | 在元素矩形中心派发 `pointerdown`、`mousedown`、`pointerup`、`mouseup`、`click`；用于 Google Slides 这类画布/SVG 编辑器——`browser_click` 回报成功但页面没反应时改用它 |
-| 跳到 Slides 某一页 | `browser_slides_open_page` | 按 1 起的页码打开演示文稿的某一页：走编辑器的网格视图，用 URL hash 核对落点，点击无效时按 hash 载入。比自己去点胶片栏缩略图可靠——胶片栏的按压是按坐标判定的 |
-| 填写表单 | `browser_type` | 按编号或 CSS 选择器输入文本（React/Vue 受控组件兼容），`replace` 清空重填 |
-| 按键 | `browser_press` | 键盘事件（Enter/Tab/Escape/方向键…） |
-| 滚动 | `browser_scroll` | 视口滚动（up/down/top/bottom） |
-| 页面导航 | `browser_navigate` / `browser_back` / `browser_forward` / `browser_reload` | 受控标签页内导航，保留登录态 |
-| 读取区域 | `browser_get_text` | 懒加载内容 / 局部文本；`find`（配 `context`）按文本定位并返回有界窗口 |
-| 查询元素 | `browser_dom_query` | 按 CSS 选择器读指定字段，每个匹配都带一个经校验唯一的选择器可直接操作 |
-| 看图 | `browser_image` | 按引用取回页面里的图片（img/canvas/SVG/背景图），原分辨率返回；不需要调试能力，DevTools 开着或后台标签页都能用 |
-| 绑定页面 | `browser_bind_interactive` | 列出可绑定页面、让用户选一个并绑定本会话 |
-| 导出 Google 文档 | `google_drive_export` | 仅 Docs/Sheets；这两类页面不接受页面工具，要读就用它导出。Slides 与 Drive 文件按普通页面读 |
-| 查看桥接状态 | `browser_status` | 连接状态、扩展 id 与版本、协议/工具集是否与插件匹配、镜像文件是否最新、最近的调试事件，以及唯一的下一步 |
-| 刷新扩展文件 | `browser_setup` | 把插件里的扩展文件镜像到 `~/.dsh/browser-extension`，并打开 `chrome://extensions` |
-| 打印更新命令 | `browser_update` | 只打印这台机器该跑的更新命令，不替你执行 |
-| 等待稳定 | `browser_wait` | 页面加载与渲染稳定检测 |
+更新：重跑同一条安装命令，再到 Chrome 点一次**重新加载**。不确定该跑哪一条时，让助手用 `browser_update` 打印这台机器的那一条，它只打印不执行。
 
-† 这六个工具走 Chrome 的 `chrome.debugger`，由扩展设置里的**「允许浏览器调试」**控制，该项首次安装时是关闭的：关着的时候插件根本不会注册它们，模型看不到也调不到，需要时在 options 页打开（改完桥接会重连，能力随握手带过来）。`browser_snapshot` 本身不受影响，但它默认附带的那张同刻截图同样要经过 `chrome.debugger`：关着时结果里只有文本，并附一句截图不可用的原因。同一标签页开着 DevTools 时 Chrome 拒绝第二个调试器，工具会直接说明这一点。`browser_debug` 还额外要求扩展的工具集级别 ≥ 7；更旧的构建保留其余五个。
+## 环境要求
 
-### dsh Web GUI 里的会话指示灯
+| 项 | 要求 |
+|---|---|
+| 浏览器 | Chrome 116 或更新（扩展的 `minimum_chrome_version`）。安装器也认 Chromium，其余 Chromium 内核浏览器未验证 |
+| Node.js | 跟随仓库 pin 的 dsh：当前这一版要求 `^24.22.3 \|\| >=26.13.1`。安装器只检查 `node` 是否存在，版本不满足时由 dsh 自己报错 |
+| pnpm | 建议用 Corepack 启用。仓库声明 `packageManager: pnpm@11.7.0` |
+| 安装器的额外依赖 | macOS/Linux 还需要 `curl`、`tar`、`rsync`；Windows 需要系统自带的 PowerShell 5.1 或 PowerShell 7+ |
 
-侧边栏会话列表会把「当前持有受控标签页」的那个会话标出来：该会话行首显示一个小地球图标，会话运行中时它落在行的活动圈里。它的颜色跟随会话行的状态点：空闲/运行是品牌蓝，等审批或等回答是琥珀，完成是绿，出错是红。它只是标记，不是按钮——会话行的点击、悬浮卡和菜单保持原样。标记跟着扩展走：会话绑定页面时出现，Unbind、标签页关闭或桥接断开时消失。
+## 启动
 
-两半都得是新的：插件的客户端部分由 `dsh web` 在启动时加载（所以更新后要重启），绑定状态由扩展上报（所以要在 `chrome://extensions` 里重载扩展）。上报内容只有会话 id 和标签 id——页面内容、标题和 URL 都不出扩展；界面通过 `GET /bridge-browser/bindings` 读取，该路由在 `/api` 之外，自行套用与 GUI 其余请求相同的 Host/Origin 与浏览器认证检查（没有 connection 服务时退回仅回环）。
-
-## 组成
-
-```
-packages/browser/bridge-browser/   桥接插件：WebSocket 通道 + browser_* 工具集
-extensions/dsh-browser/            Chrome MV3 扩展（后台/内容脚本/侧边栏与浮窗/options）
-.dsh/skills/                       随仓库分发的技能
-scripts/install.sh                 安装器（macOS/Linux，Windows 用 install.ps1）
-scripts/install-skills.mjs         技能安装（安装脚本的第 3 步）
-docs/                              升级记录与调研笔记
-```
-
-## 为什么这样设计
-
-- **使用你的真实浏览器，而不是无头副本**：模型操作你已经打开的页面，登录态、会话和 Cookie 均会保留。
-- **纯文本页面接口**：编号控件、跨快照稳定 ID、delta 更新和敏感值掩码，使模型无需截图也能操作页面。
-- **收窄隐私边界**：密码和支付卡字段始终显示为 `••••`，字段值不会离开页面。
-- **调试能力要显式开启**：走 `chrome.debugger` 的工具默认不注册，用户打开设置后才出现在模型面前。
-- **受保护的桥接连接**：远程连接使用认证握手；桥接只服务浏览器工具帧和六个桥接内部 RPC；扩展把工具绑定到一个由用户控制的标签页。
-
-## 详细安装与使用
-
-前置要求：Node.js 22 或更新（安装器只检查 `node` 与 `pnpm` 是否存在）、Corepack/pnpm，以及 Chrome 116+（扩展的 `minimum_chrome_version`）。Windows 还需要系统自带的 Windows PowerShell 5.1，或 PowerShell 7+。Windows 上 pnpm 的 shim 里包含一个 `pnpm.ps1`，裸名 `pnpm` 可能命中它而不是 `pnpm.cmd`；安装器因此优先跑 `.exe`/`.cmd`，手动命令也请写 `pnpm.cmd`，原因见 [Windows 手动兜底](#windows-手动兜底)。两个平台的安装器都会读取 `DSH_HOME`（默认 `~/.dsh`）。
-
-### 安装或更新
-
-托管安装请运行：
-
-```sh
-curl -fsSL https://raw.githubusercontent.com/WensH77/dsh-browser/refs/heads/main/scripts/install.sh | bash
-```
-
-Windows 请运行：
-
-```powershell
-$s="$env:TEMP\dsh-install.ps1"; irm https://raw.githubusercontent.com/WensH77/dsh-browser/refs/heads/main/scripts/install.ps1 -OutFile $s; powershell -NoProfile -ExecutionPolicy Bypass -File $s
-```
-
-安装器会下载 `main`、构建并注册桥接插件、把 Chrome 扩展构建到 `~/.dsh/browser-extension`，然后打开 `chrome://extensions`。首次安装时把该目录作为已解压扩展加载；此后更新只需在该页点一次**重新加载**——扩展文件由插件在启动时自动同步到该目录（不再依赖重跑安装器），但已加载的扩展代码要 Chrome 重新载入才生效。dsh 正在运行时插件会在几秒内热加载。
-
-`scripts/install.sh` 覆盖 macOS 与 Linux，`scripts/install.ps1` 覆盖 Windows；两者写入同一个托管工作区和同一份安装元数据。当系统提供剪贴板工具（`pbcopy`、`wl-copy`、`xclip`、`xsel` 或 PowerShell 的 `Set-Clipboard`）时，安装器会把扩展路径复制到剪贴板；无论是否复制成功都会打印该路径。若未检测到 Chrome/Chromium，安装器会打印对应的安装命令；设置 `DSH_INSTALL_BROWSER=1` 可让安装器尝试自动安装。
-
-Windows 命令先下载 `install.ps1` 再执行，而不是管道给 `Invoke-Expression`：脚本是带 BOM 的 UTF-8，Windows PowerShell 依赖 BOM 才能正确显示中文，而 `Invoke-Expression` 无法处理开头的 BOM。
-
-更新：重跑上面那条命令拉取新版本，再在扩展页点一次「重新加载」。不知道确切命令时问助手：它会用 `browser_update` 打印你这台机器该跑的那一条（并且不会替你执行）。
-
-#### Windows 手动兜底
-
-Windows PowerShell 会按它认识的所有扩展名解析裸名 `pnpm`，而 pnpm 的 Windows shim 里包含一个 `pnpm.ps1`；一旦命中它，退出码来自 shim 而不是 pnpm：在一份 Windows 11 + PowerShell 5.1 的复现报告里，这个 shim 不输出任何内容、退出码保持 0，于是某一步「报成功但什么都没做」，直到第 4 步才以 `Resolve-Path … dist does not exist` 失败。当前的 `install.ps1` 优先跑 `.exe`/`.cmd`，并在每一步之后检查产物，所以会在真正没做事的步骤上就停下。
-
-如果你手上是旧版脚本且已经踩到，先用 `pnpm.cmd` 手动跑构建与注册（显式写扩展名就是为了避开 `.ps1`），再重跑安装器：它会快速重做构建，并完成第 3、4 步。
-
-```powershell
-cd <repo>
-pnpm.cmd install --frozen-lockfile
-pnpm.cmd --filter dsh-browser-extension run build
-pnpm.cmd --filter dsh-bridge-browser run build
-pnpm.cmd exec dsh plugin --profile web add -w "dsh-bridge-browser@link:<repo>/packages/browser/bridge-browser"
-.\scripts\install.ps1
-```
-
-`<repo>` 是 checkout 根目录，`link:` 目标里请用正斜杠（pnpm 会把反斜杠当转义）。两个路径能看出是哪一步空转：没有 `node_modules` 说明 `pnpm install` 没跑，`<DSH_HOME>\profiles\web\package.json` 里没有 `dsh-bridge-browser` 依赖说明注册没跑。`DSH_HOME` 不是 `%USERPROFILE%\.dsh` 时，先在该 shell 里设置它。
-
-### 随仓库分发的技能
-
-仓库同时把这些工具对应的操作经验作为技能放在 `.dsh/skills/` 下。放在仓库里的原因：浏览器行为的改动和针对该行为的经验能一起评审、一起提交；安装到 `~/.dsh/skills/` 的原因：技能文件系统提供方会扫描项目根目录（优先级 100）和用户目录 `~/.dsh/skills`（优先级 400），只留在仓库里的话，只有从本仓库启动的会话能用到。
-
-`scripts/install-skills.mjs`（安装脚本的第 3 步，也可单独执行 `pnpm run skills:install`）把每个技能链接到 `~/.dsh/skills`；`--copy` 改为复制，Windows 安装脚本用的就是复制，因为在那里创建链接需要开发者模式或管理员权限。macOS 和 Linux 默认用符号链接，因此改仓库里的那份立即生效，安装出来的副本也不会与仓库脱节。技能只在其描述与当前任务匹配时才会加载，例如 `google-slides-via-browser` 只在受控标签页是 Google Slides 编辑器时加载。
-
-### 启动与使用
-
-启动托管安装：
+托管安装：
 
 ```sh
 cd ~/.dsh/dsh-browser && pnpm start
 ```
 
-当前受支持的精确公开版本为钉定的 0.1.7 预发布版：
+从 clone 安装就在仓库根目录跑 `pnpm start`。它就是 `dsh web`，默认地址 `http://127.0.0.1:3080`；`dsh` 来自该 workspace 自己的依赖，不需要另装。
 
-```sh
-npx @deepseek-ai/dsh@0.1.7-rc.1 web
-```
+打开任意 `http://` 或 `https://` 页面，等状态视图显示**已连接**即可使用。`chrome://` 等浏览器页、扩展商店，以及别的扩展自己的页面都不能操作。
 
-Chrome 本机使用无需配置。点击工具栏上的 DeepSeek 鲸鱼图标会打开状态视图——默认是浮窗，可在扩展设置里改成 Chrome 侧边栏：它显示连接状态、正在操作的标签页、本会话已授予的权限和最近的调试事件。打开任意 `http://` 或 `https://` 页面，等状态显示**已连接**即可。已有标签页会在第一次操作时自动加载；`chrome://` 等浏览器受保护页面、扩展商店，以及另一个扩展自己的页面（`chrome-extension://`）都不受支持。
+## 工具一览
 
-连不上或工具缺失时，对助手说「浏览器桥接什么状态」：`browser_status` 会报告扩展有没有连上、扩展构建的版本与协议级别是否和插件匹配（并直接说该「重载扩展」还是「重启 dsh」）、镜像文件是否最新、最近的调试事件，以及唯一的下一步；需要重新镜像扩展文件时用 `browser_setup`。
+| 工具 | 作用 |
+|---|---|
+| `browser_snapshot` | 读当前页：标题、URL、正文、编号交互清单、表单字段（敏感值掩码）。`delta: true` 只返回变化，`visual: false` 不附带截图 |
+| `browser_capture` † | 视口截图，`fullPage: true` 取整页；截图只存在内存。优先用视口，长页面的整页截图会被压到模型的图像预算里，文字读不出来 |
+| `browser_console` † / `browser_network` † | 控制台消息与未捕获错误（带 cursor 增量）；网络请求列表（状态、耗时）、按 id 取响应体、在内存里替换响应 |
+| `browser_eval` † | 在页面自身的 JS 上下文里求值，不受页面 CSP 限制 |
+| `browser_dialog` † | 应答 `alert` / `confirm` / `prompt`。这类弹窗会冻住页面，期间的页面类工具被拒绝并把弹窗内容原样带回 |
+| `browser_debug` † | 行断点与 XHR/fetch 断点、暂停/恢复/单步、读暂停现场、在暂停的调用帧里求值、列出脚本与事件监听 |
+| `browser_cookies` | 经 CDP 读写删站点 Cookie，包括 `document.cookie` 看不到的 HttpOnly；写入会进浏览器 cookie jar，后续导航也带新值。不受调试开关控制，但每次调用会临时附加调试器 |
+| `browser_block` / `browser_headers` | 阻断匹配的请求，或改写请求/响应头；规则装在当时受控的标签页上，清规则、关标签页或浏览器会话结束才失效 |
+| `browser_click` | 按编号或 CSS 选择器点击；目标为原生 `<select>` 时用 `option` 按值或可见文本选中 |
+| `browser_click_pointer` | 在元素中心派发完整指针事件序列；用于 Google Slides 这类画布编辑器的「点击回报成功但页面没反应」 |
+| `browser_slides_open_page` | 按页码打开 Slides 演示文稿的某一页，比点胶片栏缩略图可靠 |
+| `browser_type` / `browser_press` / `browser_scroll` | 输入文本（`replace` 清空重填，兼容 React/Vue 受控组件）、按键、滚动视口 |
+| `browser_navigate` / `browser_back` / `browser_forward` / `browser_reload` | 受控标签页内的导航、历史前进后退与刷新 |
+| `browser_get_text` | 读局部或懒加载文本；`find` 按文本定位并返回有界窗口 |
+| `browser_dom_query` | 按 CSS 选择器读指定字段，每个匹配都带一个经校验唯一的选择器 |
+| `browser_image` | 取回页面里的图片（img/canvas/SVG/背景图），按原分辨率返回，不需要调试能力 |
+| `browser_wait` | 等页面加载与渲染稳定 |
+| `browser_bind_interactive` | 列出可绑定页面（最多 60 个），让用户选一个并绑定本会话；它总是询问，即使只开了一个页面 |
+| `browser_status` / `browser_setup` / `browser_update` | 桥接自检、重新镜像扩展文件并把加载路径复制到剪贴板、打印本机的更新命令 |
+| `google_drive_export` | 导出 Google Docs 或 Sheets：Docs 出 Markdown（为空则 HTML），Sheets 下载后问分析哪个 sheet 并落成 CSV；只认这两类链接，其它 Google 链接按普通页面读 |
+
+† 这六个工具走 `chrome.debugger`，由扩展设置里的**「允许浏览器调试」**控制，首次安装时是关闭的。关着的时候插件根本不注册它们，模型看不到也调不到；打开后桥接会重连，能力随握手带过来。`browser_snapshot` 本身不受影响，但它默认附带的那张截图同样要调试器，关着时只返回文本并说明原因。同一标签页开着 DevTools 时 Chrome 拒绝第二个调试器，工具会直接说这一点。
+
+另有一道**扩展工具集级别**的门槛：`browser_cookies`、`browser_click` 的 `option`、`browser_slides_open_page`、`browser_click_pointer`、`browser_image`、`browser_get_text` 的 `find`、CSS 选择器目标，都是逐级加进来的（级别 1–8）。旧扩展构建缺这些工具或参数，`browser_status` 会报出两边级别不一致并建议重载扩展。`browser_cookies` 要级别 8：扩展停在 7 时它会直接消失，而调试开关与它无关；真拿不到 `chrome.debugger`（企业策略、或 Chrome 老于 116）时它会报 unsupported。
+
+## 审批与信任
+
+写操作默认失败关闭，没有你的批准什么都不做：`browser_click`、`browser_click_pointer`、`browser_type`、`browser_press`、`browser_navigate`、`browser_back`、`browser_forward`、`browser_reload`、`browser_block`，以及 Google Drive 导出。被拒绝或没人应答的调用不会发出任何请求。
+
+审批卡上有两种长期选项：
+
+- 能定位到站点的动作可以**信任此站点**。授权写进扩展设置，在设置页里显式管理。
+- 没有「信任此站点」的动作只给**本会话内允许**：在页面里执行 JS、调试页面 JS、改写请求头、回应 JS 弹窗、读写 Cookie、替换网络响应、历史前进后退。授权按会话 + 动作记住（能定位到站点的，还按站点分开）；解绑、改绑到别的标签页、标签页被关掉或替换、或浏览器会话结束就失效。
+- `browser_navigate` 不给会话级授权，避免一次批准变成整个会话可去任意站点；它按目标站点逐个询问，同样可以记住信任。
+- `browser_eval` 默认每次调用都要批准；卡上可以给本会话允许，或让「信任此站点」覆盖 JS 执行（设置里单独打开）。
+
+页面读取由设置里的**页面内容共享**决定，作用于 `browser_snapshot`、`browser_get_text`、`browser_dom_query`、`browser_image`、`browser_capture`、`browser_console` 和 `browser_network`：默认「自动共享」，只读受控标签页、不额外弹窗；「每次询问」逐次确认，可以只允许一次或切回自动；「关闭」完全阻断。读到的页面文字会发给当前选择的模型。
+
+导航默认只能去当前受控页所在的主机；换主机要先绑定到目标页、或用会话的首次导航（它会开一个新标签并绑给这个会话），要放开得在设置里打开**允许跨域导航**。设置里另有一份**禁止的站点**，命中即拒绝读取和操作。Google Drive 导出走同一套审批：按文档所在的站点授权，信任之后不再询问。
+
+审批卡出现在 dsh 页面里，所以你得能切回去点它。60 秒无人应答就超时，超时后重发同一调用会重新弹卡。
+
+## 标签页绑定
+
+会话还没有页面时，`browser_navigate` 走另一条路：批准后开一个后台新标签并绑给这个会话，不抢你正在看的页面。其它页面工具则先列可绑定的页面（只算 http/https，排除 dsh 自己的页面和浏览器受保护页）：只有一个就直接绑，有多个才弹选页框让你选，一分钟内可作答，然后接着执行这次调用。同一步里的几个工具一起被拒时只弹一次选页框，绑好后各自重跑。
+
+已经绑定页面的会话不会被自动挪走，你手动切到别的标签页也一样。如果它的页面变成谁也操作不了的页（`chrome://`、别的扩展的页面、本地文件），调用会失败并说明这一点，三条出路：切到普通页面后 Unbind、用 `browser_navigate` 打开新页面，或用 `browser_bind_interactive` 挑一个已打开的页面。这种情况不会替你改绑。
+
+受控标签页关掉后，扩展还会找它 60 秒（调用里先等 2 秒）；找到就静默重绑，找不到会话暂停，等下一次调用重新绑定。
+
+扩展设置里还有**自动跟随的站点**：这些站点上新开的页面会自动成为受控页。只跟随绑定之后新开的页面，默认不跟随；另一个环境（比如测试站和预发站）的页面会先问一次，跟随页自己关掉会退回原页。
+
+一个扩展连接同一时间只服务一个会话，新的扩展连接会顶掉旧的。第二个会话来绑定时会被拒绝，并报出占用它的会话 id，而不是抢走标签页。
+
+## 状态视图与会话指示灯
+
+点工具栏图标（DeepSeek 鲸鱼图标）打开状态视图。它默认是浮窗，可在扩展设置里改成 Chrome 侧边栏：显示连接状态、当前受控标签页、本会话已授予的权限和最近的操作，并列出等你确认的审批。没有界面能显示审批时，可以打开系统通知。
+
+dsh Web GUI 的侧边栏会给「当前持有受控标签页」的会话标一个小地球图标，颜色跟随会话行的状态点。它只是标记，不是按钮。标记跟着扩展上报的绑定状态出现和消失：socket 上报里有会话 id、标签 id、窗口 id 和标签标题，而界面读的 `GET /bridge-browser/bindings` 只暴露会话 id 和标签 id；页面 URL 和内容始终不出扩展。该路由在 `/api` 之外，自行套用与 GUI 其余请求相同的 Host/Origin 与浏览器认证检查。
 
 ## 故障排查
 
-**状态视图一直显示「未连接」**
-
-- 确认本机 dsh web 正在运行（默认 `http://127.0.0.1:3080`）。
-- 确认桥接已加载：浏览器打开 `http://127.0.0.1:3080/ext/bridge-config`，应返回类似 `{"wsUrl":"ws://127.0.0.1:3080/ext/bridge"}` 的 JSON。如果返回的是网页而不是 JSON，说明当前运行的 dsh 早于桥接注册——重启 dsh 并刷新页面即可，扩展会自动重连。
-- 扩展会自动探测 3080/3081/3090/14389/43189（dsh Desktop）端口。若 dsh 运行在其它端口，或使用 `--host 0.0.0.0` 远程部署，请在扩展设置页中填写地址与桥接 token。
-
-**截图、控制台、网络、执行 JS、`browser_dialog`、`browser_debug` 这些工具不存在**
-
-它们走 `chrome.debugger`，由扩展设置里的「允许浏览器调试」控制，该项首次安装时关闭；关着的时候插件不注册这些工具，模型看不到。打开后桥接会重连，能力随握手带到模型面前。`browser_debug` 还要求扩展的工具集级别 ≥ 7（见 `browser_status`）：它是唯一一个旧构建没有对应动作的调试工具。
-
-**页面类工具回报「页面停在断点上」**
-
-`browser_debug` 下的断点命中了，页面 JavaScript 停住，任何面向页面的工具都跑不了。拒绝文案里带着停在哪个文件哪一行。先 `browser_debug { action: "wait" }` 读现场（或用 `action: "eval"` 在某个调用帧里求值），再 `action: "resume"` 恢复，或用 `step` 逐条前进。页面停住期间 `browser_console` / `browser_network` 照常可用；每次 `browser_debug` 调用都要单独审批。
-
-**调试类工具报「另一个调试器已附加」**
-
-受控标签页开着 DevTools 时，Chrome 拒绝第二个调试器。关掉该标签页的 DevTools 再重试。
-
-**另一个会话正在操作浏览器**
-
-一个扩展连接同时只服务一个会话。占用者存在时，新会话的绑定/调用会被拒绝，并报出占用它的会话 id；在那个会话里 Unbind（或让那边的会话结束）之后即可绑定。
+| 症状 | 处理 |
+|---|---|
+| 状态视图一直显示「未连接」 | 确认本机 dsh web 在跑；浏览器打开 `http://127.0.0.1:3080/ext/bridge-config`，应返回 `{"wsUrl":...}` 形式的 JSON。返回网页说明当前运行的 dsh 早于桥接注册，重启 dsh 后扩展会自动重连 |
+| dsh 不在 3080 | 扩展会探测 3080/3081/3090（dsh web）、43189（DSH Desktop）和 14389（旧桌面端口）；dsh 在本机换端口时，在扩展设置里填地址和 token |
+| 桥接跑在另一台机器上 | 扩展的 CSP 只放行 `ws://127.0.0.1:*`、`http://127.0.0.1:*` 和 raw.githubusercontent.com，填远端地址会被浏览器拦下，目前连不上远端桥接 |
+| 截图、控制台、网络、eval、弹窗、调试工具不存在 | 打开「允许浏览器调试」，桥接会重连并把能力带过来。`browser_debug` 还要求扩展工具集级别 ≥ 7，更旧的构建没有它 |
+| 报「另一个调试器已附加」 | 受控标签页开着 DevTools。关掉该标签页的 DevTools 再试 |
+| 报「页面停在断点上」 | `browser_debug { action: "wait" }` 读现场，然后 `resume` 或 `step`。期间 `browser_console` / `browser_network` 照常可用 |
+| 提示另一个会话正在操作浏览器 | 在那个会话里 Unbind，或让那边的会话结束 |
+| 说不清桥接哪里不对 | 问助手「浏览器桥接什么状态」。`browser_status` 会报连接、扩展版本、协议与工具集是否匹配、镜像文件是否最新、最近的调试事件，并给出唯一的下一步；需要重新镜像扩展文件用 `browser_setup` |
 
 ## 开发
 
-桥接插件和 Chrome 扩展都属于本仓库 workspace；所有命令均在本仓库根目录执行。首次开发安装运行 `pnpm install`。
+桥接插件和 Chrome 扩展在同一个 workspace，所有命令都在仓库根目录执行。
 
 ```sh
-pnpm run build
+pnpm install
+pnpm run build        # 先构建扩展，再构建桥接插件（插件要把扩展产物打包进自己）
 pnpm run typecheck
-pnpm run test
+pnpm run test         # 安装器编码检查 + 技能检查 + 两个包的 vitest
 pnpm run skills:install
+```
 
+单包命令：
+
+```sh
 pnpm --filter dsh-bridge-browser run build
 pnpm --filter dsh-bridge-browser run typecheck
 pnpm --filter dsh-bridge-browser run test
 
-pnpm --filter dsh-browser-extension run build
+pnpm --filter dsh-browser-extension run build   # 输出到 extensions/dsh-browser/dist
 pnpm --filter dsh-browser-extension run test
 ```
 
 注意：
 
-- 启动前桥接插件必须已有 `lib/` 供 Loader 加载；`scripts/install.sh` 和根目录 `pnpm run build` 都会先构建插件再构建扩展。
-- `@deepseek-ai/dsh` 与桥接插件的依赖固定在同一条经过验证的公开发布线上（插件对等范围 `>=0.1.7-rc.1 <0.3.0`）；升级时必须同时更新 manifest、锁文件并重跑根目录检查。
+- 桥接插件必须先有 `lib/` 才能被 Loader 加载；顺序不能反过来。
+- 仓库把 `@deepseek-ai` 依赖 pin 在同一批版本（当前 `0.2.3-alpha.2`，见 `package.json`）。桥接插件声明的 peer 范围是 `>=0.1.7-rc.1 <0.3.0`，同一份插件可以挂在这条范围内的 dsh 上；升级时要同时更新 manifest、锁文件并重跑根目录检查。
+- `docs/` 有历史升级记录（0.1.5-alpha → 0.1.5-rc → 0.1.7-rc）和几份调研笔记；0.2.x 的升级过程还没整理成文。
 
 ## 安全
 
-- 桥接路径在 `/api` 信任栅栏之外，自带 bearer token 认证。
-- Chrome 扩展的本地 Origin 保留零配置回环访问。
-- 特权网关方法（`settings.*`/`credentials.*`/`host.open*`）对非回环来源一律拒绝。
-- 单活动连接；页面读取默认走文本，模型路由声明支持图片输入时 `browser_snapshot` 会附带截图。走 `chrome.debugger` 的能力（截图、控制台、网络、执行页面 JS、`browser_dialog`、`browser_debug`）默认关闭，关着时插件不注册这些工具；附加调试器期间 Chrome 会显示它的调试提示条，截图只存在内存中、不写磁盘。密码和卡号值永不回传。
-- 还没有绑定页面的会话，会在首次浏览器工具调用时绑定当时的活动标签页，此后一直操作**这个**标签页。如果那个标签页是别的扩展碰不到的页（`chrome://` 页、另一个扩展的页面、本地文件），这次调用不会直接失败：桥接会列出已打开的页面，绑定其中一个，然后接着执行**这次**调用——整个浏览器里只有一个普通页面时直接绑、不问，候选不止一个才弹选页框（一分钟内可作答）。没能绑上时（没有普通页面可绑、选页框没人选、或浏览器已被另一个会话占用）这次调用照旧失败并说明原因。**已经**持有页面的会话绝不会被自动挪走：如果它的页面变成谁也操作不了的页，调用会照实说明，把下一步（切到别的页面并点 Unbind、`browser_navigate`、`browser_bind_interactive`）留给你。你切去看别的页面（包括 Gmail）不会打断它，也不会撤掉正在等待你确认的弹窗——弹窗就在 dsh 页面里，你得能切过去点它。受控标签页关闭后才会暂停，直到下一次调用重新绑定页面。浏览器面板的操作流里，选页过程显示为它实际做的步骤（List tabs、Bind tab），不会显示成一次失败的调用——被拒的那次调用根本没碰到页面；桥接的调试日志仍会记下它。一个扩展连接同时只服务一个会话，第二个会话的绑定会被拒绝并报出占用者的会话 id，而不是抢走标签页。
-- 网页文字会标记为不可信输入。默认「自动共享」只按需读取受控标签页且不额外弹窗；对隐私敏感时可选择「每次询问」，或用「关闭」完全阻断读取。在「每次询问」模式下，读取弹窗可以仅允许一次，也可以持久切回自动读取；之后仍可在设置中关闭。读取的页面文字会发送给当前选择的模型。
-- 点击、输入、按键、导航、历史跳转和刷新默认失败关闭，必须由用户批准。会话的首次 `browser_navigate` 也是在批准之后才创建新标签，并且新标签在后台打开、不切走你正在看的页面；被拒绝或未应答的调用不会发出任何请求。默认策略下 `browser_navigate` 只能去当前受控页面所在的主机（换主机要先绑定或首次导航），要放开得在扩展设置里打开「允许跨域导航」；设置里另有一份禁用 origin 黑名单，命中即拒绝读取与操作。Google Drive 导出走同一套审批：按文档所在 origin 授权，信任该 origin 后不再询问；Docs/Sheets 也不接受页面工具，只能用导出工具读。信任某个 origin 会写入扩展设置、在设置页中显式管理；代码里另保留一条「仅本会话」的信任（`trust-session`）作为它的降级方案，但当前没有入口提供。
-- 无法归到单一 origin 的动作（`browser_eval`、`browser_headers`、`browser_dialog`、`browser_cookies`、`browser_network` 的 `mock`/`mockClear`、历史前进后退）没有「信任此网站」，改为提供「本会话内允许」：按会话 + 动作记住，本会话内同名动作不再询问，解绑、显式改绑到别的标签页、标签页关闭或浏览器会话结束即失效。能定位到单一站点的动作（`browser_eval`、`browser_dialog`、`browser_debug`、`browser_cookies`）授权只覆盖该站点，在一个测试站点允许不会连带放过其它站点；`browser_headers`、`browser_network` 的 mock 与历史前进后退没有单一边界，仍按整段会话生效。`browser_navigate` 不在其中——它的风险就是目标地址，会话级授权等于一次批准后本会话可去任意站点，所以它仍然按目标询问。`browser_eval` 默认每次都要批准，除非在设置里让 origin 信任同时覆盖 JavaScript 执行。授权面板超时（60 秒未应答）后仍可让模型重发同一调用，重新弹出确认。
+- 桥接在 `/api` 的信任栅栏之外，自带 bearer token（`~/.dsh/ext-bridge-token`，权限 0600）。回环免 token 要三个条件同时成立：对端是回环、Origin 是固定扩展 id、握手里声明的扩展 id 与它相同。
+- 同一时间只接受一个扩展连接，新连接会顶掉旧的，旧连接以 replaced 关闭。
+- 一个受控标签页只属于一个会话；网页文字会被标记为不可信输入。
+- 走 `chrome.debugger` 的能力默认关闭，关着时插件不注册这些工具。附加调试器期间 Chrome 会显示它的调试提示条；截图只在内存里，不写磁盘。
+- 密码和支付卡字段在快照里显示为 `••••`，字段值不离开页面。
+- 点击、输入、按键、导航、刷新和阻断请求默认失败关闭；跨域导航默认关闭；可以配置禁止访问的站点。
+
+## 仓库组成
+
+```
+packages/browser/bridge-browser/   桥接插件：WebSocket 通道 + browser_* 工具集
+extensions/dsh-browser/            Chrome MV3 扩展（后台/内容脚本/状态视图/设置页）
+.dsh/skills/                       随仓库分发的技能
+scripts/install.sh                 安装器（Windows 用 install.ps1）
+scripts/install-skills.mjs         技能安装（安装器的第 3 步）
+docs/                              升级记录与调研笔记
+```
+
+两半各自的细节见[桥接插件 README](packages/browser/bridge-browser/README.zh.md)和[扩展 README](extensions/dsh-browser/README.zh.md)；操作经验见 `.dsh/skills/` 下的两个技能。
+
+本仓库 fork 自 [omdsh-dev/dsh-browser](https://github.com/omdsh-dev/dsh-browser)。

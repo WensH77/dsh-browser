@@ -4,18 +4,20 @@
 
 <img width="1701" height="897" alt="dsh Browser Control" src="https://github.com/user-attachments/assets/3b1f3a25-f962-4e02-a9ef-d23e0d01fc8e" />
 
-Connect [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) to the Chrome tab you are already using. The model can read page content, click controls, fill forms, scroll, and navigate while preserving your login state, session, and cookies. A status surface — a floating window by default, or the side panel — shows which page is currently being operated.
+Connect [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) to the Chrome tab you already use. The model can read a page, click controls, fill forms, scroll and navigate, while your login state, sessions and cookies stay in your browser. Click the toolbar icon to open the status view: what it is connected to, which page is under control, and which approvals are waiting for you.
 
-`dsh` is DeepSeek AI's open-source, plugin-based agent harness. This repository provides a companion browser bridge plugin and Chrome MV3 extension as one standalone pnpm workspace.
+`dsh` is DeepSeek AI's open-source, plugin-based agent harness. This repository ships its companion browser bridge plugin and Chrome MV3 extension as one standalone pnpm workspace.
 
-Pages become structured text with a numbered inventory of interactive elements, and the model addresses those elements by number. `browser_snapshot` pairs that text with a screenshot of the same moment, and `browser_capture` returns a screenshot on demand — both only for image-capable models, and both kept in memory: the extension never writes the image to disk, while a text-only route degrades to the text snapshot with a named reason. Screenshots go through `chrome.debugger`, so they need the extension's debugging switch (off by default — see [Core capabilities](#core-capabilities)).
+A page becomes structured text plus a numbered inventory of interactive elements, and the model addresses those elements by number. `browser_snapshot` returns that text together with a screenshot of the same moment; `browser_capture` returns a screenshot alone. Screenshots stay in memory and are never written to disk, and a text-only model gets the text snapshot instead. Screenshots go through `chrome.debugger`, so they need "Allow browser debugging" in the extension options.
+
+Three choices shape it: it drives your real browser rather than a headless copy, so your logins still apply; the page interface is text first and screenshots second; and everything that needs the debugger stays unregistered until you turn it on.
 
 > [!IMPORTANT]
-> This repository pins the runtime at `0.1.7-rc.1`: npm's `latest` for `@deepseek-ai/dsh` is now `0.1.7-rc.2` and `next` is `0.2.0-rc.1`, while the bridge declares a peer range of `>=0.1.7-rc.1 <0.3.0` — so the same plugin mounts on any dsh in that range. See the [upgrade note](docs/dsh-0.1.7-rc-upgrade.md) for the version history.
+> The unscoped [`dsh-browser`](https://www.npmjs.com/package/dsh-browser) package on npm belongs to a different project and is not affiliated with this repository. This project is not published as an npm package; use the installer below.
 
 ## Quick install
 
-The standard `dsh plugin` command alone cannot install this project. The integration contains both a dsh bridge plugin and a browser extension. The one-line installer currently sets up the Chrome build.
+The installer sets up both halves — the dsh bridge plugin and the Chrome extension — in one command.
 
 macOS and Linux:
 
@@ -23,194 +25,170 @@ macOS and Linux:
 curl -fsSL https://raw.githubusercontent.com/WensH77/dsh-browser/refs/heads/main/scripts/install.sh | bash
 ```
 
-Windows, in PowerShell:
+Windows (PowerShell):
 
 ```powershell
 $s="$env:TEMP\dsh-install.ps1"; irm https://raw.githubusercontent.com/WensH77/dsh-browser/refs/heads/main/scripts/install.ps1 -OutFile $s; powershell -NoProfile -ExecutionPolicy Bypass -File $s
 ```
 
-The installer puts the extension files in `~/.dsh/browser-extension` and opens `chrome://extensions`: load or reload **AI Browser Assistant** there — that is the only browser-side click. A running dsh usually picks the plugin up within seconds; if it does not, restart dsh once. The plugin keeps those files current at startup, so nothing has to be copied by hand. Each later update: rerun the same install command, then one more “Reload” in Chrome. See [Detailed installation and usage](#detailed-installation-and-usage) for prerequisites, startup commands, updates, and development commands.
+The installer does four things:
 
-> [!IMPORTANT]
-> The unscoped [`dsh-browser`](https://www.npmjs.com/package/dsh-browser) package on npm belongs to a different project and is not affiliated with this repository. This project is not currently published as an npm package; use the installer above.
+1. Puts the repository at `~/.dsh/dsh-browser` (or uses the checkout it was run from), runs `pnpm install`, then builds the extension first and the bridge plugin second.
+2. Registers `dsh-bridge-browser` with the local dsh `web` profile; older package names are removed first.
+3. Installs the bundled skills into `~/.dsh/skills`, where sessions in every workspace can load them.
+4. Mirrors the extension build to `~/.dsh/browser-extension`, writes `install-info.json` there, opens `chrome://extensions`, and copies the extension directory to the clipboard.
 
-## Core capabilities
+One click is left: load `~/.dsh/browser-extension` as an unpacked extension in `chrome://extensions`. If the “AI Browser Assistant” card is already there, click **Reload** on it. A running dsh usually picks the plugin up within seconds; if it does not, restart dsh once.
 
-| Capability | Tool | Notes |
-|---|---|---|
-| Read page | `browser_snapshot` | Structured text snapshot: title, URL, main text, numbered controls, and masked form fields; `delta: true` returns only changes; carries a same-moment screenshot unless `visual: false` |
-| Capture the page † | `browser_capture` | Screenshot of the viewport (or the whole page with `fullPage: true`) delivered as an image; never written to disk. Prefer the viewport — a long page's full-page capture is scaled to the model's image budget, so its text is not legible |
-| Read console and network † | `browser_console` / `browser_network` | Console messages and uncaught errors with a cursor; request list with status and timing, one response body by id, and in-memory response overrides |
-| Answer a page dialog † | `browser_dialog` | Accept or dismiss an `alert` / `confirm` / `prompt`; such a dialog freezes the page, so every other page-facing tool is refused while it is open — the refusal quotes the dialog back, so the model can read it and decide. `browser_console` / `browser_network` and the block/header rules keep working, and so does `browser_dialog` itself. A `beforeunload` dialog ("Leave this site?") is not model-facing: the extension answers it itself, so a navigation cannot stall behind it |
-| Run page JavaScript † | `browser_eval` | Evaluate an expression in the page's own context; page CSP does not block it, and every call is approved on its own |
-| Debug JavaScript † | `browser_debug` | Set line breakpoints (`url` or `urlRegex` plus a 0-based `lineNumber`, optional `condition`) or XHR/fetch breakpoints (`kind: "xhr"`), list and remove them, pause, resume, step, read a pause with its call frames and variables (`action: "wait"`), and evaluate in a paused frame (`action: "eval"`). A pause freezes the page's JavaScript, so page-facing tools come back refused — with the pause quoted back — until it resumes. Breakpoints live as long as the session and go away with the tab, the debugging notice, the options switch, or `unbreak { all: true }`. Every call is approved on its own, and the card can grant the debugger for the session so a debugging round does not ask five times |
-| Block or rewrite requests | `browser_block` / `browser_headers` | Block matching requests, or rewrite request/response headers — scoped to the controlled tab and session-only |
-| Read or write cookies † | `browser_cookies` | Read, set, or delete the controlled site's cookies over CDP — including HttpOnly ones `document.cookie` cannot see. A set goes into the browser's cookie jar, so later navigations send the new value, not only page subrequests. Every call is approved on its own and is never covered by origin trust |
-| Click element | `browser_click` | Click by inventory number, or by CSS selector when a control has no usable inventory entry (icon-only buttons). On a native `<select>`, pass `option` (its value or visible text): a synthetic click cannot open a native popup, and `browser_dom_query { fields: ["options"] }` lists the choices |
-| Click a control bound to the press | `browser_click_pointer` | Sends `pointerdown`, `mousedown`, `pointerup`, `mouseup`, and `click` at the element's centre — for canvas/SVG editors such as Google Slides, where `browser_click` reports success and nothing changes |
-| Open a Google Slides page | `browser_slides_open_page` | Opens one page of the deck in the controlled tab by 1-based number: drives the editor's grid view, checks the landing through the URL hash, and loads the slide by hash when a press changes nothing. Safer than pressing a filmstrip thumbnail yourself, whose press resolves by coordinates |
-| Fill forms | `browser_type` | React/Vue-compatible input by inventory number or CSS selector; `replace` clears the field first |
-| Press keys | `browser_press` | Keyboard events such as Enter, Tab, Escape, and arrow keys |
-| Scroll | `browser_scroll` | Viewport scrolling: up, down, top, and bottom |
-| Navigate | `browser_navigate` / `browser_back` / `browser_forward` / `browser_reload` | Navigation inside the controlled tab, with login state preserved |
-| Read region | `browser_get_text` | Lazy-loaded or partial page text; `find` (+ `context`) locates a phrase and returns a bounded window |
-| Inspect elements | `browser_dom_query` | Read the fields you name off elements matching a CSS selector, each with a verified unique selector to act on |
-| Read a page picture | `browser_image` | A picture the page embeds (`<img>` / `<canvas>` / SVG `<image>` / CSS background) at its original resolution; needs no debugging capability, so DevTools open or a background tab is fine |
-| Bind a page | `browser_bind_interactive` | List the bindable pages, ask the user to pick one, and bind this session to it |
-| Export a Google file | `google_drive_export` | Docs and Sheets only; those two page types refuse the page tools, so read them through the export. Slides and Drive files are ordinary pages |
-| Bridge status | `browser_status` | Connection state, extension id and version, whether protocol/toolset match the plugin, whether the mirrored files are current, the recent debugging events, and the single next action |
-| Refresh the extension files | `browser_setup` | Mirror the extension bundled in the plugin into `~/.dsh/browser-extension` and open `chrome://extensions` |
-| Print the update command | `browser_update` | Prints the update command for this machine; never runs it |
-| Wait for stability | `browser_wait` | Page-load and render-settle detection |
+To update, rerun the same install command and click **Reload** in Chrome again. If you are unsure which command applies, ask the assistant to run `browser_update`: it prints the one for this machine and never runs it.
 
-† These six tools run over Chrome's `chrome.debugger` and are governed by the extension's **“Allow browser debugging”** setting, which is off on first install: while it is off the plugin does not register them at all, so the model can neither see nor call them. Turn it on in the options page when needed (the bridge reconnects and the capability travels in the handshake). `browser_snapshot` itself still works, but the same-moment screenshot it carries by default also goes through `chrome.debugger`: with debugging off the result carries the text plus a line naming why the screenshot is unavailable. When DevTools is open on the controlled tab, Chrome refuses a second debugger and the tool says so. `browser_debug` also needs an extension at toolset 7 or above; an older build keeps the other five.
+## Requirements
 
-### Session indicator in the dsh Web GUI
+| Item | Requirement |
+|---|---|
+| Browser | Chrome 116 or newer (the extension's `minimum_chrome_version`). The installer also recognises Chromium; other Chromium-based browsers are untested |
+| Node.js | Follows the dsh version pinned in this workspace, which currently requires `^24.22.3 \|\| >=26.13.1`. The installer only checks that `node` exists; a mismatched version fails inside dsh |
+| pnpm | Enable it through Corepack. The workspace declares `packageManager: pnpm@11.7.0` |
+| Extra installer dependencies | macOS/Linux also need `curl`, `tar` and `rsync`; Windows needs the built-in PowerShell 5.1 or PowerShell 7+ |
 
-The session list marks the session that currently holds the controlled tab: a small globe glyph sits in that session's row, inside the row's activity ring while the session is running. Its colour follows the session's own state dot: brand blue while idle or running, amber while a confirmation or question is waiting, green when done, red on failure. It is a marker, not a control — the row keeps its usual click, hover card, and menu. The marker follows the extension: it appears when a session binds a page and disappears on Unbind, on tab close, or when the bridge disconnects.
+## Start
 
-It needs both halves current: the plugin's client half is loaded by `dsh web` at startup (so a restart is required after an update), and the binding report comes from the extension (so reload it in `chrome://extensions`). The report carries session ids and tab ids only — page contents, titles, and URLs stay in the extension — and the GUI reads it from `GET /bridge-browser/bindings`, a route outside `/api` that applies the same Host/Origin and browser-authentication check as the rest of the GUI (with a loopback-only fallback when no connection service is mounted).
-
-## Repository layout
-
-```
-packages/browser/bridge-browser/   the bridge: WebSocket carrier + the browser_* tool set
-extensions/dsh-browser/            the Chrome MV3 extension (background, content script, panel/options)
-.dsh/skills/                       skills shipped with the repository
-scripts/install.sh                 installer (macOS/Linux; install.ps1 on Windows)
-scripts/install-skills.mjs         skill install (step 3 of the installer)
-docs/                              upgrade notes and investigation records
-```
-
-## Why this design
-
-- **Your real browser, not a headless copy**: the model works in the page you already have open, retaining logins, sessions, and cookies.
-- **A text-first page interface**: numbered controls, stable IDs across snapshots, delta updates, and masked sensitive values make pages operable without screenshots.
-- **A narrow privacy boundary**: passwords and payment-card values are always rendered as `••••` and never leave the page.
-- **Debugging is opt-in**: the tools that run over `chrome.debugger` are not registered until the user turns the switch on, so the model never sees them by default.
-- **A guarded bridge**: authenticated handshakes protect remote connections, the bridge services only browser tool frames and six bridge-internal RPCs, and the extension binds tools to one user-controlled tab.
-
-## Detailed installation and usage
-
-Requirements: Node.js 22 or newer (the installer only checks that `node` and `pnpm` exist), Corepack/pnpm, and Chrome 116+ (the extension's `minimum_chrome_version`). Windows additionally needs Windows PowerShell 5.1, which ships with Windows, or PowerShell 7+. pnpm's Windows shims include a `pnpm.ps1` that a bare `pnpm` can resolve to instead of `pnpm.cmd`, which is why the installer prefers the `.exe`/`.cmd` and why manual commands should spell `pnpm.cmd` — see [Manual fallback on Windows](#manual-fallback-on-windows). Both installers read `DSH_HOME` when it is set and otherwise use `~/.dsh`.
-
-### Install or update
-
-For a managed installation, run:
-
-```sh
-curl -fsSL https://raw.githubusercontent.com/WensH77/dsh-browser/refs/heads/main/scripts/install.sh | bash
-```
-
-or, on Windows:
-
-```powershell
-$s="$env:TEMP\dsh-install.ps1"; irm https://raw.githubusercontent.com/WensH77/dsh-browser/refs/heads/main/scripts/install.ps1 -OutFile $s; powershell -NoProfile -ExecutionPolicy Bypass -File $s
-```
-
-The installer downloads `main`, builds and registers the bridge plugin, builds the Chrome extension into `~/.dsh/browser-extension`, and opens `chrome://extensions`. On the first install, load that directory as an unpacked extension; afterwards a single **Reload** on that page is enough — the plugin re-syncs the extension files into that directory on every start (no installer rerun needed), but the code Chrome already loaded only changes when Chrome reloads it. A running dsh hot-loads the plugin within seconds.
-
-`scripts/install.sh` covers macOS and Linux, and `scripts/install.ps1` covers Windows; both write the same managed workspace and the same install metadata. The installer copies the extension path to the clipboard when a clipboard tool is available (`pbcopy`, `wl-copy`, `xclip`, `xsel`, or PowerShell's `Set-Clipboard`), and prints the path either way. When no Chrome or Chromium install is found, it prints the command that installs one; set `DSH_INSTALL_BROWSER=1` to let the installer attempt that install itself.
-
-The Windows command downloads `install.ps1` and runs it rather than piping it into `Invoke-Expression`: the script is UTF-8 with a byte order mark so Windows PowerShell renders its Chinese output, and `Invoke-Expression` rejects a leading mark.
-
-Updates rerun the command above to pull the newer version, then one more **Reload** on the extensions page. Not sure which command that is? Ask the assistant: `browser_update` prints the one for this machine, and does not run it for you.
-
-#### Manual fallback on Windows
-
-Windows PowerShell resolves a bare `pnpm` through every extension it knows, and pnpm's Windows install puts a `pnpm.ps1` shim on that list. When the `.ps1` wins, the exit code comes from the shim rather than from pnpm: in a reported Windows 11 + PowerShell 5.1 case the shim printed nothing and left the exit code at 0, so a step reported success while doing nothing and the install only failed later, at step 4 with `Resolve-Path … dist does not exist`. Current `install.ps1` prefers the `.exe`/`.cmd` and checks each step's output, so it stops at the step that did nothing.
-
-If an older copy hit that, run the build and registration by hand with `pnpm.cmd` (the explicit extension is what keeps PowerShell off the `.ps1`), then rerun the installer: it redoes the build quickly and finishes steps 3 and 4.
-
-```powershell
-cd <repo>
-pnpm.cmd install --frozen-lockfile
-pnpm.cmd --filter dsh-browser-extension run build
-pnpm.cmd --filter dsh-bridge-browser run build
-pnpm.cmd exec dsh plugin --profile web add -w "dsh-bridge-browser@link:<repo>/packages/browser/bridge-browser"
-.\scripts\install.ps1
-```
-
-`<repo>` is the checkout root, written with forward slashes in the `link:` target because pnpm reads a backslash there as an escape. Two paths tell you which step was a no-op: a missing `node_modules` means `pnpm install` never ran, and `<DSH_HOME>\profiles\web\package.json` without a `dsh-bridge-browser` dependency means the registration never ran. Set `DSH_HOME` in the same shell if yours is not `%USERPROFILE%\.dsh`.
-
-### Skills shipped with this repository
-
-The repository also ships the operational knowledge that goes with these tools, as skills under `.dsh/skills/`. They live in the repo so a change in browser behaviour and the advice about that behaviour are reviewed and committed together, and they are installed into `~/.dsh/skills/` so that a session in **any other workspace** can use them — the skill filesystem provider scans the project root at rank 100 and the user's `~/.dsh/skills` at rank 400, so the repo copy alone would only reach sessions started inside this repo.
-
-`scripts/install-skills.mjs` (step 3 of the installer, or `pnpm run skills:install`) links each skill into `~/.dsh/skills`; `--copy` copies instead, which is what the Windows installer uses because creating a link there needs Developer Mode or elevation. A symlink is the default on macOS and Linux, so editing the repo copy takes effect with no reinstall and the installed skill cannot drift from it. A skill is only loaded when its description matches what the session is doing — `google-slides-via-browser`, for example, loads when the controlled tab is a Google Slides editor.
-
-### Start and use
-
-Start the managed installation with:
+For a managed install:
 
 ```sh
 cd ~/.dsh/dsh-browser && pnpm start
 ```
 
-The exact supported public runtime is currently the pinned 0.1.7 pre-release:
+From a checkout, run `pnpm start` in the repository root. It is `dsh web`, listening on `http://127.0.0.1:3080` by default; `dsh` comes from this workspace's own dependencies, so nothing else has to be installed.
 
-```sh
-npx @deepseek-ai/dsh@0.1.7-rc.1 web
-```
+Open any `http://` or `https://` page and wait until the status view says **connected**. Browser pages such as `chrome://`, the extension store, and other extensions' own pages cannot be operated.
 
-Local Chrome use requires no configuration. Clicking the DeepSeek whale icon in the toolbar opens the status surface — a floating window by default, switchable to Chrome's side panel in the extension options: it shows the connection state, the tab being operated, the grants this session holds, and the recent debugging events. Open any `http://` or `https://` page and wait for **Connected**. Existing tabs are instrumented on the first action; browser-internal pages such as `chrome://`, the extension stores, and another extension's own page (`chrome-extension://`) are not supported.
+## Tools
 
-When the bridge will not connect or tools are missing, tell the assistant “what is the browser bridge status”: `browser_status` reports whether the extension is connected, whether its build and protocol level match the plugin (and names the fix — reload the extension, or restart dsh), whether the mirrored files are current, the recent debugging events, and the single next action; `browser_setup` re-mirrors the extension files when they are stale.
+| Tool | What it does |
+|---|---|
+| `browser_snapshot` | Reads the current page: title, URL, main text, numbered interactive inventory, form fields (sensitive values masked). `delta: true` returns only changes; `visual: false` omits the screenshot |
+| `browser_capture` † | Screenshot of the viewport, or the whole page with `fullPage: true`; kept in memory only. Prefer the viewport — a full-page capture of a long page is scaled into the model's image budget and its text becomes unreadable |
+| `browser_console` † / `browser_network` † | Console messages and uncaught errors (incremental, by cursor); request list with status and duration, response bodies by id, and in-memory response overrides |
+| `browser_eval` † | Evaluates JavaScript in the page's own context, unaffected by the page's CSP |
+| `browser_dialog` † | Answers an `alert` / `confirm` / `prompt`. Such a dialog freezes the page: page-facing tools are refused while it is open, and the dialog text is quoted back |
+| `browser_debug` † | Line and XHR/fetch breakpoints, pause/resume/step, reading a pause with its call frames, evaluating in a paused frame, and listing scripts and event listeners |
+| `browser_cookies` | Reads, writes and deletes site cookies over CDP, including HttpOnly ones `document.cookie` cannot see; a write enters the browser cookie jar, so later navigations carry it |
+| `browser_block` / `browser_headers` | Blocks matching requests, or rewrites request/response headers; scoped to the controlled tab and to the current browser session |
+| `browser_click` | Clicks by inventory number or CSS selector; a native `<select>` is set through `option`, by value or visible text |
+| `browser_click_pointer` | Dispatches a full pointer-event sequence at the element's centre; for canvas editors such as Google Slides, where `browser_click` reports success but nothing happens |
+| `browser_slides_open_page` | Opens one page of a Slides deck by page number, more reliably than pressing filmstrip thumbnails |
+| `browser_type` / `browser_press` / `browser_scroll` | Types text (`replace` clears first, React/Vue controlled components included), presses a key, scrolls the viewport |
+| `browser_navigate` / `browser_back` / `browser_forward` / `browser_reload` | Navigation, history and reload inside the controlled tab |
+| `browser_get_text` | Reads partial or lazily loaded text; `find` locates a phrase and returns a bounded window |
+| `browser_dom_query` | Reads chosen fields off elements matching a CSS selector, each match carrying a verified unique selector |
+| `browser_image` | Returns a picture the page embeds (img/canvas/SVG/background) at its original resolution; needs no debugging capability |
+| `browser_wait` | Waits for loading and rendering to settle |
+| `browser_bind_interactive` | Lists the bindable pages and lets the user bind one to this session |
+| `browser_status` / `browser_setup` / `browser_update` | Bridge health report, re-mirroring the extension files, printing this machine's update command |
+| `google_drive_export` | Exports a Google Doc or Sheet; only those two link types, every other Google link is read as an ordinary page |
+
+† These six tools run over `chrome.debugger` and are controlled by **“Allow browser debugging”** in the extension options, which is off after a first install. While it is off the plugin does not register them at all, so the model cannot see them; turning it on reconnects the bridge and the capability arrives with the handshake. `browser_snapshot` itself is unaffected, but the screenshot it attaches by default needs the same debugger — with the switch off it returns text and names the reason. Chrome refuses a second debugger while DevTools is open on the same tab, and the tool says so.
+
+A second gate is the extension's **toolset level**: `browser_cookies`, the `option` argument of `browser_click`, `browser_slides_open_page`, `browser_click_pointer`, `browser_image`, `find` in `browser_get_text`, and CSS selector targets were added level by level (levels 1–8). An older extension build lacks those tools or arguments; `browser_status` reports the level mismatch and tells you to reload the extension.
+
+## Approvals and trust
+
+State-changing calls fail closed — without your approval they do nothing: `browser_click`, `browser_click_pointer`, `browser_type`, `browser_press`, `browser_navigate`, `browser_back`, `browser_forward`, `browser_reload`, `browser_block`, and Google Drive exports. A denied or unanswered call issues no request at all.
+
+An approval card offers two kinds of standing answer:
+
+- An action that can be pinned to one site offers **Trust this site**. The grant is stored in the extension settings and managed explicitly on the options page.
+- An action with no **Trust this site** option offers **Allow in this session** instead: JavaScript evaluation, JavaScript debugging, header rewriting, JavaScript dialog answers, cookie reads and writes, response overrides, history moves. The grant is remembered per session and per action — split by site where a site can be named — and dies when the session unbinds, is bound to another tab, loses or replaces its tab, or the browser session ends.
+- `browser_navigate` gets no session-wide grant, because one approved destination must not become permission to go anywhere for the rest of the session; it asks per destination and can remember that destination.
+- `browser_eval` asks on every call by default; a card can allow it for the session, or site trust can cover JavaScript execution through a separate switch in the options page.
+
+Page reads follow **page content sharing**, which covers `browser_snapshot`, `browser_get_text`, `browser_dom_query`, `browser_image`, `browser_capture`, `browser_console` and `browser_network`. The default, “auto”, reads only the controlled tab with no extra prompt; “ask” confirms each read, either once or by switching back to auto; “off” blocks reads entirely. Text that is read is sent to the selected model.
+
+Navigation reaches only the host of the currently controlled page by default; to switch hosts, bind to the target page or use an unbound session's first navigation, which opens a new tab and binds it. **Allow cross-domain navigation** lifts the restriction. Settings also carry a **blocked sites** list, and a blocked origin refuses both reads and operations. Google Drive exports are approved the same way, scoped to the document's site and skipped once that site is trusted.
+
+Approval cards appear in the dsh page, so you have to be able to switch back to it and answer. A card that goes unanswered for 60 seconds expires; calling the same tool again re-raises it.
+
+## Tab binding
+
+An unbound session's `browser_navigate` takes the other path: after approval it opens a new tab in the background and binds the session to it, without taking over the page you are reading. Every other page tool lists the bindable pages instead (HTTP/HTTPS only, excluding dsh's own pages and the browser's protected pages): exactly one is bound silently, a real choice raises a pick dialog answerable for a minute, and the call then runs. Tools refused in the same step share one dialog and each rerun once a page is bound.
+
+A session that has a page is never moved on its own, not even when you switch to another tab. If its page becomes one no extension may touch (`chrome://`, another extension's page, a local file), the call fails and says so, with three ways out: switch to an ordinary page and press Unbind, call `browser_navigate` to open one, or call `browser_bind_interactive` to pick an already open page. Nothing rebinds for you in that case.
+
+When the controlled tab closes, the extension keeps looking for it for another 60 seconds (the failing call waits 2 of them); if it comes back the session is silently rebound, otherwise it pauses until the next call binds a page.
+
+The options page also has **follow origins**: a page newly opened on one of those origins becomes the controlled page automatically. Only pages opened after binding are followed, nothing is followed by default, a page in another environment asks first, and a followed page that closes hands the browser back to the previous one.
+
+One extension connection serves one session at a time, and a new connection replaces the old one. A second session's bind is refused with the holder's session id instead of stealing the tab.
+
+## Status view and session indicator
+
+Click the toolbar icon (the DeepSeek whale) to open the status view. It is a floating window by default and can be switched to Chrome's side panel in the options page: it shows the connection state, the controlled tab, the grants this session holds and recent operations, and lists the approvals waiting for you. When no window can show an approval, system notifications can be enabled.
+
+The dsh Web GUI sidebar marks the session that currently holds the controlled tab with a small globe icon, coloured like that row's status dot. It is a marker, not a button. It appears and disappears with the binding state the extension reports: the socket frame carries the session id, tab id, window id and tab title, while the `GET /bridge-browser/bindings` route the GUI reads exposes only session id and tab id. Page URLs and contents never leave the extension. The route sits outside `/api` and applies the same Host/Origin and browser-auth checks as the rest of the GUI.
 
 ## Troubleshooting
 
-**Status surface stays "Not connected"**
-
-- Make sure dsh web is running locally (default `http://127.0.0.1:3080`).
-- Verify the bridge is loaded: open `http://127.0.0.1:3080/ext/bridge-config`. It should return JSON such as `{"wsUrl":"ws://127.0.0.1:3080/ext/bridge"}`. If it returns a web page instead of JSON, the running dsh predates the bridge registration — restart dsh and refresh the page; the extension reconnects on its own.
-- The extension probes ports 3080, 3081, 3090, 14389, and 43189 (dsh Desktop) automatically. If dsh runs on another port — or you use a remote `--host 0.0.0.0` deployment — set the address (and bridge token) in the extension options.
-
-**`browser_capture`, `browser_console`, `browser_network`, `browser_eval`, `browser_dialog`, or `browser_debug` is missing**
-
-They run over `chrome.debugger` and are governed by the extension's “Allow browser debugging” setting, which is off on first install: while it is off the plugin does not register those tools, so the model cannot see them. Turning it on reconnects the bridge and the capability arrives in the handshake. `browser_debug` needs one thing more: an extension at toolset 7 or above (see `browser_status`), because it is the only debugging tool whose action an older build has no wire case for.
-
-**A page tool came back saying the page is paused at a breakpoint**
-
-`browser_debug` set a breakpoint and the page stopped on it, so no page JavaScript — and therefore no page-facing tool — can run. The refusal names the file and line. Read the pause with `browser_debug { action: "wait" }` (or inspect a frame with `action: "eval"`), then `action: "resume"`, or `step` to move one statement at a time. `browser_console` and `browser_network` keep working while the page is stopped; every `browser_debug` call needs its own approval.
-
-**A debugging tool reports that another debugger is already attached**
-
-Chrome refuses a second debugger while DevTools holds the controlled tab. Close DevTools on that tab and retry.
-
-**Another session is already operating the browser**
-
-One extension connection serves one session at a time. While a session holds it, a new session's bind or call is refused with the holder's session id; unbind in that session (or let it end) before binding here.
+| Symptom | What to do |
+|---|---|
+| The status view keeps saying “not connected” | Check that dsh web is running, then open `http://127.0.0.1:3080/ext/bridge-config` in the browser. It should return JSON shaped like `{"wsUrl":...}`. A web page instead means the running dsh predates the bridge registration — restart dsh and the extension reconnects |
+| dsh is not on port 3080 | The extension probes 3080/3081/3090 (dsh web), 43189 (DSH Desktop) and 14389 (the old desktop port). When dsh runs on another port on this machine, set the address and token in the extension options |
+| The bridge runs on another machine | The extension's CSP allows only `ws://127.0.0.1:*`, `http://127.0.0.1:*` and raw.githubusercontent.com, so a remote address is blocked by the browser; a remote bridge cannot be reached today |
+| Screenshot, console, network, eval, dialog or debug tools are missing | Turn on “Allow browser debugging”; the bridge reconnects and the capability arrives. `browser_debug` additionally needs extension toolset level ≥ 7, which older builds do not have |
+| “Another debugger is already attached” | DevTools is open on the controlled tab. Close DevTools there and retry |
+| “The page is paused on a breakpoint” | Read the pause with `browser_debug { action: "wait" }`, then `resume` or `step`. `browser_console` and `browser_network` keep working meanwhile |
+| It says another session is operating the browser | Unbind in that session, or end it |
+| You cannot tell what is wrong with the bridge | Ask the assistant for “browser bridge status”. `browser_status` reports the connection, the extension version, whether protocol and toolset match, whether the mirrored files are current, recent debug events, and the single next step; `browser_setup` re-mirrors the extension files |
 
 ## Development
 
-The bridge plugin and Chrome extension are both members of this repository's workspace. Run all commands from the repository root. For the first development installation, run `pnpm install`.
+The bridge plugin and the Chrome extension share one workspace; all commands run from the repository root.
 
 ```sh
-pnpm run build
+pnpm install
+pnpm run build        # build the extension first, then the bridge plugin, which packages the extension
 pnpm run typecheck
-pnpm run test
+pnpm run test         # installer encoding checks, skill checks, then both packages' vitest suites
 pnpm run skills:install
+```
 
+Per package:
+
+```sh
 pnpm --filter dsh-bridge-browser run build
 pnpm --filter dsh-bridge-browser run typecheck
 pnpm --filter dsh-bridge-browser run test
 
-pnpm --filter dsh-browser-extension run build
+pnpm --filter dsh-browser-extension run build   # output: extensions/dsh-browser/dist
 pnpm --filter dsh-browser-extension run test
 ```
 
 Notes:
 
-- The bridge plugin must have a built `lib/` before startup because the loader consumes it; both `scripts/install.sh` and the root `pnpm run build` build the plugin before the extension.
-- The dependencies of `@deepseek-ai/dsh` and the bridge plugin are pinned to the same tested public release line (the plugin's peer range is `>=0.1.7-rc.1 <0.3.0`). An upgrade must update the manifests and lockfile together and rerun the root checks.
+- The bridge plugin needs `lib/` before the Loader can mount it, which is why the order cannot be swapped.
+- The workspace pins all `@deepseek-ai` dependencies to one batch (currently `0.2.3-alpha.2`, see `package.json`). The bridge declares a peer range of `>=0.1.7-rc.1 <0.3.0`, so one build of the plugin mounts on any dsh in that range; an upgrade must update the manifests and lockfile together and rerun the root checks.
+- `docs/` holds the upgrade history (0.1.5-alpha → 0.1.5-rc → 0.1.7-rc) and several research notes. The 0.2.x upgrade has not been written up yet.
 
 ## Security
 
-- The bridge path sits outside the `/api` trust boundary and performs its own bearer-token authentication.
-- Local Chrome extension origins retain zero-configuration loopback access.
-- Privileged gateway methods such as `settings.*`, `credentials.*`, and `host.open*` reject non-loopback sources.
-- One active connection. Page reads are text by default, and `browser_snapshot` adds a screenshot unless the current model route declares no image input. The tools that run over `chrome.debugger` (screenshots, console, network, page evaluation, `browser_dialog`) are off by default: while the switch is off the plugin does not register them, and Chrome shows its usual debugging notice while a session is attached. Screenshots stay in memory — nothing is written to disk — and password or payment-card values never leave the page.
-- A session that has no page yet takes the then-active tab on its first browser-tool call. When that tab is one no other extension may touch (a `chrome://` page, another extension's page, a local file), the call is not simply refused: the bridge lists the open pages, binds one and then runs that same call — silently when exactly one ordinary page is open anywhere in the browser, with a pick dialog (answerable for a minute) when there is a real choice. If nothing gets bound — no ordinary page open, the dialog left unanswered, or another session holds the browser — the call fails and says why. A session that already owns a page is never moved on its own: if its page becomes one no extension may touch, the call reports that and leaves the next move (switch to another page and press Unbind, `browser_navigate`, `browser_bind_interactive`) to you. A manual tab switch neither interrupts the session nor rebinds it, and it does not withdraw a prompt that is waiting for your approval — the prompt lives in the dsh page, so you have to be able to switch to it and answer. Only losing the bound tab pauses the session, until the next call binds a page again. The browser panel's operation feed shows a page choice as the steps it takes (List tabs, Bind tab) rather than a failed call, because the refused call never reached a page; the bridge's debug log still records it. One extension connection serves one session, so a second session's bind is refused with the holder's session id instead of stealing the tab.
-- Page-authored text is wrapped as untrusted input. The default `auto` mode reads only the controlled tab without an extra prompt; privacy-sensitive users can select `ask` for per-read confirmation or `off` to block reads entirely. In `ask` mode, the read dialog can allow one read or persistently switch back to `auto`; this can be reversed in Settings. Read page text is sent to the selected model.
-- Click, type, keypress, navigation, history, and reload calls fail closed until the user approves them. A session's first `browser_navigate` opens its new tab only after that approval — and opens it in the background, so the page you are reading keeps focus — so a denied or unanswered call issues no request at all. By default `browser_navigate` may only reach the host of the currently bound page (switch hosts by binding or by an initial navigation); enabling “Allow cross-domain navigation” in the options lifts that. Settings also carry a blocked-origin list, and a blocked origin refuses both reads and operations. Google Drive exports are approved the same way — scoped to the document host, and skipped once that origin is trusted — and Docs/Sheets refuse the page tools, so the export is the only way to read them. Trusting an origin is recorded as a setting and managed explicitly in the extension options; a session-scoped variant (`trust-session`) is kept in the code as a fallback for that grant, but nothing offers it today.
-- Actions that cannot be scoped to one origin (`browser_eval`, `browser_headers`, `browser_dialog`, `browser_cookies`, `browser_network` with `mock`/`mockClear`, history moves) have no "Trust this site" and offer "Allow in this session" instead: remembered per session and per action, they stop prompting for that action until the session unbinds, is explicitly bound to another tab, loses its tab, or the browser session ends. Where a single site can be established (`browser_eval`, `browser_dialog`, `browser_debug`, `browser_cookies`), the grant covers that site only, so allowing one test site does not silence the same tool on another; `browser_headers`, `browser_network` mocks and history moves keep the action-wide grant because their effect is not bounded by one site. `browser_navigate` is not among them — its risk is the destination, so a session grant would turn one approved destination into permission to go anywhere for the rest of the session; it keeps prompting per destination. `browser_eval` prompts on every call unless origin trust is allowed to cover JavaScript execution in Settings. A prompt that expires unanswered (60 seconds) can still be re-raised by calling the same tool again.
+- The bridge sits outside the `/api` trust fence and performs its own bearer-token authentication (the token lives in `~/.dsh/ext-bridge-token`, mode 0600). Loopback access without a token needs three things at once: a loopback peer, an Origin of the pinned extension id, and a matching extension id declared in the handshake.
+- One extension connection is accepted at a time; a new one replaces the old, which is closed as replaced.
+- One controlled tab belongs to one session, and page-authored text is marked as untrusted input.
+- The `chrome.debugger` capabilities are off by default and their tools are not registered while off. Chrome shows its usual debugging notice while a session is attached, and screenshots stay in memory — nothing is written to disk.
+- Password and payment-card fields are shown as `••••` in a snapshot; their values never leave the page.
+- Clicks, typing, keypresses, navigation, reload and request blocking fail closed until approved; cross-domain navigation is off by default; sites can be blocked outright.
+
+## Repository layout
+
+```
+packages/browser/bridge-browser/   Bridge plugin: the WebSocket carrier and the browser_* tool set
+extensions/dsh-browser/            Chrome MV3 extension (background, content script, status view, options)
+.dsh/skills/                       Skills shipped with this repository
+scripts/install.sh                 Installer (install.ps1 on Windows)
+scripts/install-skills.mjs         Skill install (step 3 of the installer)
+docs/                              Upgrade history and research notes
+```
+
+Each half has its own README: [bridge plugin](packages/browser/bridge-browser/README.md) and [extension](extensions/dsh-browser/README.md). Operating know-how lives in the two skills under `.dsh/skills/`.
+
+This repository is a fork of [omdsh-dev/dsh-browser](https://github.com/omdsh-dev/dsh-browser).
